@@ -143,11 +143,24 @@ describe("pages runtime", () => {
   it("builds the config schema Pages artifact", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-pages-"));
     mkdirSync(join(root, ".kanna"), { recursive: true });
-    writeFileSync(join(root, ".kanna", "config.schema.json"), '{"type":"object"}\n');
+    mkdirSync(join(root, "crates", "kanna-tool-catalog", "src"), { recursive: true });
+    writeFileSync(
+      join(root, ".kanna", "config.schema.json"),
+      '{"type":"object","properties":{"workflow":{"type":"string"}}}\n'
+    );
+    writeFileSync(
+      join(root, "crates", "kanna-tool-catalog", "src", "catalog.json"),
+      JSON.stringify({
+        guides: [{ sections: [{ body: "Catalog-owned meaning", schemaPaths: ["/properties/workflow"] }] }]
+      })
+    );
 
     const [schema, cname] = buildConfigSchemaPages({ repoRoot: root, outDir: join(root, "out") });
 
-    expect(readFileSync(schema, "utf8")).toBe('{"type":"object"}\n');
+    expect(JSON.parse(readFileSync(schema, "utf8"))).toEqual({
+      type: "object",
+      properties: { workflow: { type: "string", description: "Catalog-owned meaning" } }
+    });
     expect(readFileSync(cname, "utf8")).toBe("schemas.kanna.build\n");
     await rm(root, { recursive: true, force: true });
   });

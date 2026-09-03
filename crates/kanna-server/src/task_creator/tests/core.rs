@@ -3074,6 +3074,25 @@ fn read_agent_definition_loads_builtin_setup_agent() {
 }
 
 #[test]
+fn builtin_authoring_agents_use_catalog_guides_and_scaffold_the_config_schema() {
+    let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-authoring-guides");
+
+    let config = resolve_test_agent_definition(&repo_root, "config-factory").unwrap();
+    assert!(config.prompt.contains("kanna-cli guide config"));
+    assert!(config
+        .prompt
+        .contains("\"$schema\": \"https://schemas.kanna.build/config.schema.json\""));
+
+    let workflow = resolve_test_agent_definition(&repo_root, "workflow-factory").unwrap();
+    assert!(workflow.prompt.contains("kanna-cli guide workflows"));
+
+    let agent = resolve_test_agent_definition(&repo_root, "agent-factory").unwrap();
+    assert!(agent.prompt.contains("kanna-cli guide agents"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn read_agent_definition_loads_builtin_ship_agent_with_codex_first() {
     let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-ship");
 

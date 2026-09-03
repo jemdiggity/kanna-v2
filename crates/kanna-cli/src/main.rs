@@ -24,6 +24,9 @@ pub(crate) enum Commands {
     },
     /// Print the generated Kanna task manual for the current spawned task
     Guide {
+        /// Optional manual topic: config, workflows, agents, or tasks
+        topic: Option<String>,
+
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -713,8 +716,12 @@ async fn main() {
         Commands::Info { server_url } => {
             commands::info::run(server_url.as_deref()).await;
         }
-        Commands::Guide { json, server_url } => {
-            commands::guide::run(json, server_url.as_deref()).await;
+        Commands::Guide {
+            topic,
+            json,
+            server_url,
+        } => {
+            commands::guide::run(topic.as_deref(), json, server_url.as_deref()).await;
         }
         Commands::StageComplete {
             task_id,

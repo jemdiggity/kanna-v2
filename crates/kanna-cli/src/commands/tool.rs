@@ -69,6 +69,9 @@ pub(crate) async fn execute_catalog_request(
     client_tool_names: &[String],
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
+        (_, ResponseKind::Guide) => request
+            .local_response
+            .ok_or_else(|| "guide request missing local response".to_string()),
         (CatalogMethod::Get, ResponseKind::Json) => {
             get_routed_json(base_url, &request.path, machine_id).await
         }

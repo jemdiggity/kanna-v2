@@ -22,6 +22,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
         vec![
             "kanna_info",
             "kanna_list_machines",
+            "kanna_guide",
             "kanna_list_repos",
             "kanna_add_repo",
             "kanna_list_recent_tasks",
@@ -53,6 +54,64 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_request_revision",
         ]
     );
+}
+
+#[test]
+fn bundled_guides_are_topic_addressable_and_drive_schema_descriptions() {
+    let catalog = bundled_catalog();
+    assert_eq!(
+        catalog.guide_topics(),
+        vec!["config", "workflows", "agents", "tasks"]
+    );
+    let config = catalog.render_guide("config").expect("config guide");
+    assert!(config.contains("# Kanna Repository Configuration"));
+    assert!(config.contains("arrays never concatenate"));
+    assert!(config.contains("layer-coherent"));
+    assert!(catalog
+        .render_guide("workflows")
+        .expect("workflow guide")
+        .contains("Visibility belongs to the effective definition"));
+    assert!(catalog
+        .render_guide("agents")
+        .expect("agent guide")
+        .contains("EXTEND.md"));
+
+    let request = resolve_request(&catalog, "kanna_guide", &json!({ "topic": "config" }))
+        .expect("resolve guide");
+    assert_eq!(request.kind, ResponseKind::Guide);
+    assert!(request
+        .local_response
+        .is_some_and(|response| response["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("Kanna Repository Configuration"))));
+    assert!(catalog
+        .config_schema_descriptions()
+        .contains_key("/properties/agentProviders"));
+}
+
+#[test]
+fn checked_in_config_schema_descriptions_match_catalog_guides() {
+    let schema_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.kanna/config.schema.json");
+    let schema: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(schema_path).expect("read checked-in config schema"),
+    )
+    .expect("parse checked-in config schema");
+
+    for (pointer, description) in bundled_catalog().config_schema_descriptions() {
+        let node = if pointer.is_empty() {
+            &schema
+        } else {
+            schema
+                .pointer(pointer)
+                .unwrap_or_else(|| panic!("catalog guide references missing schema path {pointer}"))
+        };
+        assert_eq!(
+            node["description"],
+            json!(description),
+            "schema description at {pointer} drifted from the catalog guide"
+        );
+    }
 }
 
 #[test]
@@ -383,6 +442,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             ResponseKind::Json,
             "/v1/cloud/desktops",
             json!({}),
+        ),
+        (
+            "kanna_guide",
+            json!({ "topic": "config" }),
+            Method::Get,
+            ResponseKind::Guide,
+            "",
+            json!({ "topic": "config" }),
         ),
         (
             "kanna_list_repos",
@@ -1218,8 +1285,9 @@ fn preserves_validation_error_strings() {
         .expect_err("unknown tool should fail");
     assert!(unknown_tool.starts_with("unknown tool: kanna_unknown"));
     assert!(
-        unknown_tool
-            .contains("available tools: kanna_info, kanna_list_machines, kanna_list_repos,"),
+        unknown_tool.contains(
+            "available tools: kanna_info, kanna_list_machines, kanna_guide, kanna_list_repos,"
+        ),
         "unknown tool error should list available tools: {unknown_tool}"
     );
 }
@@ -1269,7 +1337,12 @@ fn load_catalog_uses_override_and_falls_back_with_warning() {
     let loaded = kanna_tool_catalog::load_catalog(&root);
     assert_eq!(loaded.catalog.tools[0].name, "kanna_info");
     assert_eq!(loaded.catalog.tools[1].name, "kanna_list_machines");
-    assert_eq!(loaded.catalog.tools[2].name, "kanna_test_tool");
+    assert_eq!(loaded.catalog.tools[2].name, "kanna_guide");
+    assert_eq!(loaded.catalog.tools[3].name, "kanna_test_tool");
+    assert_eq!(
+        loaded.catalog.guide_topics(),
+        vec!["config", "workflows", "agents", "tasks"]
+    );
     assert_eq!(
         loaded.watch_source.as_deref(),
         Some(override_path.as_path())

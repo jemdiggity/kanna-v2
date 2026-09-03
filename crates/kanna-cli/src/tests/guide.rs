@@ -75,7 +75,11 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         guide.contains("`agentProviders`, `workflow`, `ports`, `setup`, `teardown`, and `test`")
     );
     assert!(guide.contains("arrays never concatenate"));
-    assert!(guide.contains("`.kanna/config.schema.json`"));
+    assert!(guide.contains("https://schemas.kanna.build/config.schema.json"));
+    assert!(guide.contains("## Further Topics"));
+    for topic in ["config", "workflows", "agents", "tasks"] {
+        assert!(guide.contains(&format!("`kanna-cli guide {topic}`")));
+    }
     for tool in kanna_tool_catalog::bundled_catalog().tools {
         assert!(
             guide.contains(&format!("`{}`", tool.name)),
@@ -83,6 +87,28 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
             tool.name
         );
     }
+}
+
+#[test]
+fn topic_guides_render_from_the_catalog_without_live_task_state() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let mut markdown = Vec::new();
+    run_topic_guide_command(&catalog, "workflows", false, &mut markdown).unwrap();
+    let markdown = String::from_utf8(markdown).unwrap();
+    assert!(markdown.starts_with("# Kanna Workflow Authoring"));
+    assert!(markdown.contains("visibility"));
+
+    let mut json = Vec::new();
+    run_topic_guide_command(&catalog, "agents", true, &mut json).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(json["topic"], "agents");
+    assert!(json["sections"]
+        .as_array()
+        .is_some_and(|sections| !sections.is_empty()));
+
+    let error = run_topic_guide_command(&catalog, "missing", false, &mut Vec::new())
+        .expect_err("unknown topic");
+    assert!(error.contains("available topics: config, workflows, agents, tasks"));
 }
 
 #[test]
@@ -199,6 +225,10 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
         .unwrap()
         .contains("Prefer kanna_complete_stage"));
     assert_eq!(guide["localRepoConfig"]["path"], ".kanna/config.local.json");
+    assert_eq!(
+        guide["localRepoConfig"]["schema"],
+        "https://schemas.kanna.build/config.schema.json"
+    );
     assert!(guide["localRepoConfig"]["guidance"]
         .as_array()
         .is_some_and(|lines| lines.iter().any(|line| line
@@ -273,9 +303,15 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
         base_url.as_str(),
     ])
     .unwrap();
-    let crate::Commands::Guide { json, server_url } = cli.command else {
+    let crate::Commands::Guide {
+        topic,
+        json,
+        server_url,
+    } = cli.command
+    else {
         panic!("expected guide command");
     };
+    assert_eq!(topic, None);
     let mut output = Vec::new();
 
     run_guide_command(

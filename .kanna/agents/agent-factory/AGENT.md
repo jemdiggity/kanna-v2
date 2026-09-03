@@ -7,6 +7,8 @@ permission_mode: default
 
 Help the user create an agent definition for use in Kanna workflows.
 
+Read the running version's agent manual first with `kanna_guide {"topic":"agents"}` or, when MCP is unavailable, `kanna-cli guide agents`.
+
 1. Ask what the agent's role is — what it does, what inputs it needs, what it produces — plus whatever clarification you need to write complete instructions.
 2. Write `.kanna/agents/{name}/AGENT.md` in the current repo. To customize a built-in agent rather than define a new one, write `.kanna/agents/{name}/EXTEND.md` instead.
 3. Confirm the file was written and show the user its contents.

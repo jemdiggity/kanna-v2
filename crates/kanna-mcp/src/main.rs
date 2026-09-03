@@ -1468,6 +1468,9 @@ async fn execute_resolved_request(
     client_tool_names: &[String],
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
+        (_, ResponseKind::Guide) => request
+            .local_response
+            .ok_or_else(|| "guide request missing local response".to_string()),
         (Method::Get, ResponseKind::Json) => {
             let value = get_routed_json(base_url, &request.path, machine_id).await?;
             confirm_stopped_activity(base_url, &request.path, value, machine_id).await
@@ -1745,6 +1748,7 @@ mod tests {
             vec![
                 "kanna_info",
                 "kanna_list_machines",
+                "kanna_guide",
                 "kanna_list_repos",
                 "kanna_add_repo",
                 "kanna_list_recent_tasks",
@@ -1996,6 +2000,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guide_tool_returns_catalog_content_without_an_http_server() {
+        let catalog = shared_bundled_catalog();
+        let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
+        let response = handle_mcp_request(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_guide",
+                    "arguments": { "topic": "agents" }
+                }
+            }),
+            "http://127.0.0.1:1",
+            &catalog,
+            &waits,
+        )
+        .await;
+
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("guide tool text");
+        let guide: Value = serde_json::from_str(text).expect("guide result json");
+        assert_eq!(guide["topic"], "agents");
+        assert!(guide["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("# Kanna Agent Authoring")));
+    }
+
+    #[tokio::test]
     async fn unknown_tool_returns_protocol_error_listing_available_tools() {
         let catalog = shared_bundled_catalog();
         let waits = Arc::new(Mutex::new(MultiMachineWaitRegistry::default()));
@@ -2073,7 +2107,9 @@ mod tests {
         let tools = catalog.read().unwrap().tools_list_value();
         assert_eq!(tools[0]["name"], json!("kanna_info"));
         assert_eq!(tools[1]["name"], json!("kanna_list_machines"));
-        assert_eq!(tools[2]["name"], json!("kanna_custom_ping"));
+        assert_eq!(tools[2]["name"], json!("kanna_guide"));
+        assert_eq!(tools[3]["name"], json!("kanna_custom_ping"));
+        assert_eq!(catalog.read().unwrap().guide_topics().len(), 4);
         let output = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
         assert_eq!(
             output,

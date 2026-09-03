@@ -600,6 +600,7 @@ fn serve_hot_reloads_catalog_override_and_notifies_tools_changed() {
     }))
     .expect("custom tool");
     catalog.tools.push(custom_tool);
+    catalog.guides[0].sections[0].body = "Hot-reloaded config guide".to_string();
     let catalog_json = serde_json::to_string(&catalog).expect("serialize catalog");
     std::fs::write(root.join(".kanna/mcp-tools.json"), catalog_json).expect("write catalog");
 
@@ -617,6 +618,24 @@ fn serve_hot_reloads_catalog_override_and_notifies_tools_changed() {
     assert!(reloaded_tools
         .iter()
         .any(|tool| tool["name"] == "kanna_custom_ping"));
+
+    send_mcp_message(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_guide",
+                "arguments": { "topic": "config" }
+            }
+        }),
+    );
+    let guide_response = recv_until_id(&receiver, 4);
+    let guide_text = guide_response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("guide response text");
+    assert!(guide_text.contains("Hot-reloaded config guide"));
 
     drop(stdin);
     let status = child.wait().expect("wait for child");
