@@ -69,6 +69,8 @@ function getOverlayLabel(
   switch (status) {
     case "connecting":
       return "Connecting";
+    case "restarting":
+      return "Restarting session";
     case "closed":
       return "Offline";
     case "error":

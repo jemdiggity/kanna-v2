@@ -75,6 +75,24 @@ describe("buildTaskWorkspaceModel", () => {
     ).toBe("Error");
   });
 
+  it("shows a dedicated restarting state while the server replaces a missing session", () => {
+    expect(
+      buildTaskWorkspaceModel({
+        task: {
+          id: "task-restarting",
+          repoId: "repo-1",
+          title: "Recover the agent",
+          stage: "in progress"
+        },
+        terminalStatus: "restarting"
+      })
+    ).toMatchObject({
+      isTerminalHealthy: false,
+      overlayLabel: "Restarting session",
+      isComposerDisabled: true
+    });
+  });
+
   it.each([
     ["pending", "Creating task", false],
     ["recovering", "Recovering task", false],

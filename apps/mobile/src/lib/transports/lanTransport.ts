@@ -222,6 +222,10 @@ export function createLanTransport(
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`, {
         method: "POST"
       }),
+    resumeTask: (taskId: string) =>
+      request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/resume`, {
+        method: "POST"
+      }),
     markTaskRead: (taskId: string, expectedActivityRevision?: number) =>
       request<TaskActivityResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`, {
         method: "POST",
@@ -388,8 +392,8 @@ export function createLanTransport(
         onSessionExit(code) {
           listener({ type: "exit", taskId, code });
         },
-        onError(_code, message) {
-          listener({ type: "error", taskId, message });
+        onError(code, message) {
+          listener({ type: "error", taskId, code, message });
         }
       });
 

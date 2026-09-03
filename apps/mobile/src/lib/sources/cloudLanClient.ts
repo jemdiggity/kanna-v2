@@ -1507,6 +1507,15 @@ export function createCloudLanClient(
       invokeTaskActionRoute(taskId, (client, routedTaskId) =>
         client.advanceTaskStage(routedTaskId)
       ),
+    resumeTask: (taskId) =>
+      invokeTaskActionRoute(taskId, (client, routedTaskId) => {
+        if (!client.resumeTask) {
+          return Promise.reject(
+            new Error("The selected desktop does not support task session recovery.")
+          );
+        }
+        return client.resumeTask(routedTaskId);
+      }),
     markTaskRead: (taskId, expectedActivityRevision) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>
         expectedActivityRevision === undefined

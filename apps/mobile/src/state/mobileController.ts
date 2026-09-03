@@ -339,6 +339,7 @@ export function createMobileController(
     string,
     Promise<string | null>
   >();
+  const recoveringTaskSessionIds = new Set<string>();
   const taskCreationPersistenceFlights = new Map<string, Promise<void>>();
   const recoveryStartedTaskIds = new Set<string>();
   let repoCheckoutFlight: Promise<string | null> | null = null;
@@ -942,10 +943,80 @@ export function createMobileController(
     stopTaskCompanion();
   };
 
+  const isRecoverableMissingSessionError = (
+    code: string | undefined,
+    message: string
+  ): boolean =>
+    code === "session_not_found" ||
+    code === "no_session" ||
+    code === "handoff_lost" ||
+    message.toLowerCase().includes("session not found");
+
+  const showTaskSessionRestarting = (
+    taskId: string,
+    stream: "terminal" | "agent"
+  ): void => {
+    if (stream === "terminal") {
+      stopTaskTerminal();
+      store.setTaskTerminalStatus(taskId, "restarting");
+    } else {
+      stopTaskAgent();
+      store.setTaskAgentStatus(taskId, "restarting");
+    }
+  };
+
+  const recoverMissingTaskSession = (
+    taskId: string,
+    stream: "terminal" | "agent"
+  ): void => {
+    showTaskSessionRestarting(taskId, stream);
+
+    if (recoveringTaskSessionIds.has(taskId)) {
+      return;
+    }
+
+    const resumeTask = client.resumeTask;
+    if (!resumeTask) {
+      const message =
+        "This desktop cannot restart missing task sessions. Update Kanna on the desktop and try again.";
+      if (stream === "terminal") {
+        store.setTaskTerminalError(taskId, message);
+      } else {
+        store.applyTaskAgentStreamEvent(taskId, {
+          type: "error",
+          message
+        });
+      }
+      return;
+    }
+
+    // The server acknowledges before its detached transition has spawned the
+    // replacement. Keep this recovery live until a later task-state refresh
+    // reattaches and receives a stream frame; the server publishes that
+    // refresh after the daemon accepts the replacement. An earlier refresh may
+    // still see the dead session, in which case the in-flight guard above
+    // retires that attach without starting a second recovery.
+    recoveringTaskSessionIds.add(taskId);
+    void resumeTask(taskId).catch((error: unknown) => {
+      recoveringTaskSessionIds.delete(taskId);
+      const reason = error instanceof Error ? error.message : String(error);
+      const message = `Session restart failed: ${reason}`;
+      if (stream === "terminal") {
+        store.setTaskTerminalError(taskId, message);
+      } else {
+        store.applyTaskAgentStreamEvent(taskId, {
+          type: "error",
+          message
+        });
+      }
+    });
+  };
+
   const clearTaskSessionIfMissing = (taskId: string) => {
     if (findTask(taskId)) {
       return;
     }
+    recoveringTaskSessionIds.delete(taskId);
     stopTaskSession();
     store.clearTaskTerminal();
     store.clearTaskAgent();
@@ -1207,6 +1278,9 @@ export function createMobileController(
         if (generation !== taskTerminalGeneration) {
           return;
         }
+        if (event.type !== "error") {
+          recoveringTaskSessionIds.delete(streamTaskId);
+        }
         switch (event.type) {
           case "snapshot":
             store.replaceTaskTerminalSnapshot(
@@ -1239,6 +1313,10 @@ export function createMobileController(
           case "error":
             if (event.code === "no_scrollback") {
               store.setTaskTerminalScrollbackLoading(streamTaskId, false);
+              break;
+            }
+            if (isRecoverableMissingSessionError(event.code, event.message)) {
+              recoverMissingTaskSession(streamTaskId, "terminal");
               break;
             }
             store.setTaskTerminalError(streamTaskId, event.message);
@@ -1295,6 +1373,16 @@ export function createMobileController(
       let streamTaskId = taskId;
       const subscription = client.observeTaskAgent(taskId, (event) => {
         if (generation !== taskAgentGeneration) {
+          return;
+        }
+        if (event.type !== "error") {
+          recoveringTaskSessionIds.delete(streamTaskId);
+        }
+        if (
+          event.type === "error" &&
+          isRecoverableMissingSessionError(event.code, event.message)
+        ) {
+          recoverMissingTaskSession(streamTaskId, "agent");
           return;
         }
         store.applyTaskAgentStreamEvent(streamTaskId, event);

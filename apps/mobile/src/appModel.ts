@@ -1251,6 +1251,15 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).runMergeAgent(taskId),
     advanceTaskStage: async (taskId) =>
       (await resolveClient(desktopId)).advanceTaskStage(taskId),
+    resumeTask: async (taskId) => {
+      const client = await resolveClient(desktopId);
+      if (!client.resumeTask) {
+        throw new Error(
+          "The selected desktop does not support task session recovery."
+        );
+      }
+      return client.resumeTask(taskId);
+    },
     markTaskRead: async (taskId, expectedActivityRevision) =>
       expectedActivityRevision === undefined
         ? (await resolveClient(desktopId)).markTaskRead(taskId)
@@ -1487,6 +1496,15 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     abortTaskCreation: (input) => getClient().abortTaskCreation(input),
     runMergeAgent: (taskId) => getClient().runMergeAgent(taskId),
     advanceTaskStage: (taskId) => getClient().advanceTaskStage(taskId),
+    resumeTask: (taskId) => {
+      const client = getClient();
+      if (!client.resumeTask) {
+        return Promise.reject(
+          new Error("The selected desktop does not support task session recovery.")
+        );
+      }
+      return client.resumeTask(taskId);
+    },
     markTaskRead: (taskId, expectedActivityRevision) =>
       expectedActivityRevision === undefined
         ? getClient().markTaskRead(taskId)

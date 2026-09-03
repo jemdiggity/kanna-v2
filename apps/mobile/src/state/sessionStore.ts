@@ -63,7 +63,7 @@ import {
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
-export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
+export type TaskTerminalStatus = "idle" | "connecting" | "restarting" | "live" | "closed" | "error";
 export type TaskCompanionStatus = CompanionStatus;
 export type TaskCompanionEventStatus = CompanionEventStatus;
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
@@ -429,6 +429,7 @@ export interface SessionStore {
   setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
   setTaskTerminalError(taskId: string, message: string): void;
   beginTaskAgent(taskId: string): void;
+  setTaskAgentStatus(taskId: string, status: TaskTerminalStatus): void;
   applyTaskAgentStreamEvent(
     taskId: string,
     event: TaskAgentStreamEvent | { type: "error"; message: string }
@@ -1794,6 +1795,18 @@ export function createSessionStore(): SessionStore {
         taskAgentEvents: [],
         taskAgentHistory: null,
         taskAgentErrorMessage: null
+      };
+      publish();
+    },
+    setTaskAgentStatus(taskId, taskAgentStatus) {
+      if (state.taskAgentTaskId !== taskId) {
+        return;
+      }
+      state = {
+        ...state,
+        taskAgentStatus,
+        taskAgentErrorMessage:
+          taskAgentStatus === "error" ? state.taskAgentErrorMessage : null
       };
       publish();
     },

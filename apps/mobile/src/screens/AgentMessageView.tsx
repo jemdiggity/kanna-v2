@@ -68,6 +68,9 @@ export function AgentMessageViewComponent({
         {status === "connecting" ? (
           <LoadingText label="Connecting" style={styles.mutedText} />
         ) : null}
+        {status === "restarting" ? (
+          <LoadingText label="Restarting session" style={styles.mutedText} />
+        ) : null}
       </ScrollView>
       <Pressable
         accessibilityRole="button"
