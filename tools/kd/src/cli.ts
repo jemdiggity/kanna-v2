@@ -139,16 +139,37 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
+  let simulator: true | string | undefined;
+  const remainingArgs: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+    if (arg !== "--simulator") {
+      remainingArgs.push(arg);
+      continue;
+    }
+    if (simulator !== undefined) {
+      throw new Error("mobile run accepts --simulator only once");
+    }
+    const value = rest[index + 1];
+    if (value && !value.startsWith("--")) {
+      simulator = value;
+      index += 1;
+    } else {
+      simulator = true;
+    }
+  }
   const input = parseFlagInput(
-    rest,
+    remainingArgs,
     { device: false, production: false, staging: false, install: false },
     { "--install": "install" }
   );
+  if (simulator !== undefined) input.simulator = simulator;
   const unsupportedFlags = Object.entries(input)
     .filter(
       ([key, value]) =>
         ![
           "device",
+          "simulator",
           "production",
           "staging",
           "withCredentials",
@@ -160,13 +181,23 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
     )
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile run only accepts --device, --production, --staging, or --install");
+    throw new Error(
+      "mobile run only accepts --device, --simulator [<udid|name>], --production, --staging, or --install"
+    );
   }
   if (input.production === true && input.staging === true) {
     throw new Error("mobile run accepts only one of --production or --staging");
   }
-  if (input.device !== true) {
-    throw new Error("mobile run requires --device");
+  if (input.device === true && input.simulator !== undefined) {
+    throw new Error("mobile run accepts exactly one target: --device or --simulator [<udid|name>]");
+  }
+  if (input.device !== true && input.simulator === undefined) {
+    throw new Error(
+      "mobile run requires a target: use --simulator [<udid|name>] for an iOS Simulator or --device for a physical iPhone"
+    );
+  }
+  if (input.simulator !== undefined && input.install === true) {
+    throw new Error("mobile run --install is only supported with the physical-iPhone --device target");
   }
   if (input.withCredentials === true && (input.production === true || input.staging === true)) {
     throw new Error(CREDENTIALS_FLAG_ERROR);
@@ -174,7 +205,8 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   return {
     taskId: "mobile.run",
     input: {
-      device: true,
+      device: input.device === true,
+      ...(input.simulator !== undefined ? { simulator: input.simulator } : {}),
       production: input.production === true,
       staging: input.staging === true,
       ...(typeof input.build === "string" ? { build: input.build } : {}),
@@ -957,7 +989,7 @@ const helpTopics: Record<string, string[]> = {
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
     "  mobile up [--build dev|staging] [--owner staging] [--cloud staging] [--production|--staging]",
-    "  mobile run --device [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
+    "  mobile run (--simulator [<udid|name>] | --device) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile publish --production --ref release/X.Y [--build-number <number>|auto] [--release-type <type>] [--dry-run]",
@@ -1100,7 +1132,7 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  mobile up [--build dev|staging] [--owner staging] [--cloud staging] [--production|--staging]",
-    "  mobile run --device [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
+    "  mobile run (--simulator [<udid|name>] | --device) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
@@ -1122,18 +1154,19 @@ const helpTopics: Record<string, string[]> = {
     "  --cloud staging     Use staging Firebase and relay services."
   ],
   "mobile run": [
-    "Usage: kd mobile run --device [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
+    "Usage: kd mobile run (--simulator [<udid|name>] | --device) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "",
-    "Build, install, and launch Kanna mobile on a physical iOS device.",
+    "Build, install, and launch Kanna mobile on an iOS Simulator or physical iPhone.",
     "",
     "Options:",
-    "  --device            Required. Target a physical iOS device.",
+    "  --simulator [target] Target a simulator by optional UDID or name; defaults to a booted or newest available iPhone.",
+    "  --device             Target a physical iPhone selected from KANNA_IOS_DEVICE_UDID or KANNA_IOS_PHYSICAL_DEVICE_NAME.",
     "  --production        Guarded compatibility profile for the production build, owner, and cloud.",
     "  --staging           Compatibility profile: staging build + installed staging owner + staging cloud.",
     "  --build <identity>  Client build identity (dev or staging for development).",
     "  --owner <owner>     Desktop owner: worktree or installed staging.",
     "  --cloud <target>    Cloud target: emulators or staging.",
-    "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading.",
+    "  --install            Physical iPhone only: build and install a bundled Release app; skips Metro and dev-client hot loading.",
     "",
     "Marketing version defaults to apps/mobile/VERSION in every environment.",
     "KANNA_APP_VERSION is an explicit diagnostic/build override; it does not select identity, cloud, OTA, runtime, or signing settings."

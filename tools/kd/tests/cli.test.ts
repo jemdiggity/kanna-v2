@@ -561,7 +561,9 @@ describe("kd CLI", () => {
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("worktree server/daemon"));
 
     await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile run --device"));
+    expect(log).toHaveBeenLastCalledWith(
+      expect.stringContaining("Usage: kd mobile run (--simulator [<udid|name>] | --device)")
+    );
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("defaults to apps/mobile/VERSION"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("KANNA_APP_VERSION is an explicit"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--build <identity>"));
@@ -1071,7 +1073,7 @@ describe("kd CLI", () => {
       input: { device: true, production: true, staging: false }
     });
     expect(() => parseCliArgs(["mobile", "run", "--staging", "--install"])).toThrow(
-      "mobile run requires --device"
+      "mobile run requires a target: use --simulator [<udid|name>] for an iOS Simulator or --device for a physical iPhone"
     );
     expect(() => parseCliArgs(["mobile", "run", "--device", "--production", "--staging"])).toThrow(
       "mobile run accepts only one of --production or --staging"
@@ -1080,6 +1082,41 @@ describe("kd CLI", () => {
       taskId: "mobile.doctor",
       input: { device: true, production: false, staging: false }
     });
+  });
+
+  it("parses simulator mobile run targets with or without an explicit selector", () => {
+    expect(parseCliArgs(["mobile", "run", "--simulator"])).toEqual({
+      taskId: "mobile.run",
+      input: { device: false, simulator: true, production: false, staging: false }
+    });
+    expect(
+      parseCliArgs([
+        "mobile",
+        "run",
+        "--simulator",
+        "iPhone 17 Pro",
+        "--build",
+        "dev",
+        "--owner",
+        "staging"
+      ])
+    ).toEqual({
+      taskId: "mobile.run",
+      input: {
+        device: false,
+        simulator: "iPhone 17 Pro",
+        production: false,
+        staging: false,
+        build: "dev",
+        owner: "staging"
+      }
+    });
+    expect(() =>
+      parseCliArgs(["mobile", "run", "--device", "--simulator"])
+    ).toThrow("mobile run accepts exactly one target");
+    expect(() =>
+      parseCliArgs(["mobile", "run", "--simulator", "--install"])
+    ).toThrow("mobile run --install is only supported with the physical-iPhone --device target");
   });
 
   it("parses desktop staging cloud as an explicit cloud axis", () => {

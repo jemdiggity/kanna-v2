@@ -1323,6 +1323,120 @@ describe("task executors", () => {
     ).toBe(false);
   });
 
+  it("boots a simulator and reuses the worktree server stack before installing the dev client", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-simulator-run-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "firebase.json"),
+      JSON.stringify({ functions: { source: "services/firebase-functions" }, emulators: {} })
+    );
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env, cwd: options?.cwd });
+        if (command === "xcrun" && args.join(" ") === "simctl list devices available --json") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              devices: {
+                "com.apple.CoreSimulator.SimRuntime.iOS-26-2": [
+                  {
+                    deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+                    isAvailable: true,
+                    name: "iPhone 17 Pro",
+                    state: "Shutdown",
+                    udid: "simulator-udid"
+                  }
+                ]
+              }
+            }),
+            stderr: ""
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "packager-status:running\n", stderr: "" };
+        }
+        if (command === "tmux" && args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceRunWithContext(
+      { device: false, simulator: true, production: false, staging: false },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 1430,
+            KANNA_FIREBASE_AUTH_PORT: 9100,
+            KANNA_FIREBASE_FIRESTORE_PORT: 9101,
+            KANNA_FIREBASE_FUNCTIONS_PORT: 9102,
+            KANNA_FIREBASE_UI_PORT: 9103,
+            KANNA_RELAY_PORT: 9081
+          },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "1430",
+            KANNA_MOBILE_SERVER_PORT: "48120",
+            KANNA_FIREBASE_AUTH_PORT: "9100",
+            KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+            KANNA_FIREBASE_FUNCTIONS_PORT: "9102",
+            KANNA_FIREBASE_UI_PORT: "9103",
+            KANNA_RELAY_PORT: "9081"
+          }
+        }
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Launched Kanna mobile on iPhone 17 Pro simulator.");
+    expect(calls.slice(0, 4)).toMatchObject([
+      {
+        command: "xcrun",
+        args: ["simctl", "list", "devices", "available", "--json"]
+      },
+      { command: "xcrun", args: ["simctl", "boot", "simulator-udid"] },
+      { command: "xcrun", args: ["simctl", "bootstatus", "simulator-udid", "-b"] },
+      {
+        command: "open",
+        args: ["-a", "Simulator", "--args", "-CurrentDeviceUDID", "simulator-udid"]
+      }
+    ]);
+    const tmuxStartIndex = calls.findIndex(
+      (call) => call.command === "tmux" && call.args.includes("new-session")
+    );
+    const prebuildIndex = calls.findIndex(
+      (call) => call.command === "pnpm" && call.args.includes("prebuild")
+    );
+    const installIndex = calls.findIndex(
+      (call) => call.command === "pnpm" && call.args[2] === "ios"
+    );
+    expect(calls[tmuxStartIndex]?.args).toEqual(expect.arrayContaining(["-n", "emulators"]));
+    expect(prebuildIndex).toBeGreaterThan(tmuxStartIndex);
+    expect(installIndex).toBeGreaterThan(prebuildIndex);
+    expect(calls[installIndex]).toMatchObject({
+      command: "pnpm",
+      args: [
+        "--dir",
+        `${repoRoot}/apps/mobile`,
+        "ios",
+        "--device",
+        "simulator-udid",
+        "--port",
+        "1430"
+      ],
+      env: expect.objectContaining({
+        KANNA_APP_ENV: "dev",
+        REACT_NATIVE_PACKAGER_HOSTNAME: "127.0.0.1"
+      })
+    });
+  });
+
   it("rejects an incoherent mobile profile before inspecting devices or starting processes", async () => {
     const calls: string[] = [];
     const runner: CommandRunner = {

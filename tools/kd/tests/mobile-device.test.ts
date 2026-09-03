@@ -11,6 +11,7 @@ import {
   buildMobileDeviceReleaseBuildCommand,
   buildMobileDeviceRunCommand,
   buildMobileDeviceUninstallAppCommand,
+  buildMobileSimulatorBootCommandPlan,
   checkPhysicalDeviceRunPreflight,
   mobileDeviceDerivedDataPath,
   isMobileDeviceAppInstalled,
@@ -19,7 +20,9 @@ import {
   waitForPhysicalDeviceMetroReadiness,
   resolveMobileNativeIdentity,
   parseXcdeviceList,
-  selectPhysicalDevice
+  parseSimctlDeviceList,
+  selectPhysicalDevice,
+  selectSimulatorDevice
 } from "../src/runtime/mobile-device";
 import type { CommandRunner } from "../src/runtime/process";
 
@@ -430,6 +433,123 @@ describe("physical-device mobile runtime", () => {
         "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F172.16.0.193%3A1430",
         "build.kanna.app.dev"
       ]
+    });
+  });
+});
+
+describe("simulator mobile runtime", () => {
+  const simulatorList = `{
+    "devices": {
+      "com.apple.CoreSimulator.SimRuntime.iOS-18-5": [
+        {
+          "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro",
+          "isAvailable": true,
+          "lastBootedAt": "2026-09-03T06:55:38Z",
+          "name": "iPhone 16 Pro",
+          "state": "Booted",
+          "udid": "booted-18"
+        },
+        {
+          "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPad-A16",
+          "isAvailable": true,
+          "name": "iPad (A16)",
+          "state": "Shutdown",
+          "udid": "ipad-18"
+        }
+      ],
+      "com.apple.CoreSimulator.SimRuntime.iOS-26-2": [
+        {
+          "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+          "isAvailable": true,
+          "name": "iPhone 17 Pro",
+          "state": "Shutdown",
+          "udid": "newest-26"
+        }
+      ]
+    }
+  }`;
+
+  it("parses available iPhones and prefers a booted simulator", () => {
+    const devices = parseSimctlDeviceList(simulatorList);
+
+    expect(devices.map((entry) => entry.udid)).toEqual(["booted-18", "newest-26"]);
+    expect(selectSimulatorDevice(devices)).toMatchObject({
+      name: "iPhone 16 Pro",
+      state: "Booted",
+      udid: "booted-18"
+    });
+  });
+
+  it("selects an explicit simulator by UDID or name and lists choices on failure", () => {
+    const devices = parseSimctlDeviceList(simulatorList);
+
+    expect(selectSimulatorDevice(devices, "newest-26")).toMatchObject({
+      name: "iPhone 17 Pro"
+    });
+    expect(selectSimulatorDevice(devices, "iPhone 17 Pro")).toMatchObject({
+      udid: "newest-26"
+    });
+    expect(() => selectSimulatorDevice(devices, "iPhone 15")).toThrow(
+      /Available simulators: iPhone 16 Pro \(booted-18, iOS-18-5\), iPhone 17 Pro \(newest-26, iOS-26-2\)/
+    );
+  });
+
+  it("defaults to an iPhone on the newest runtime when none is booted", () => {
+    const devices = parseSimctlDeviceList(simulatorList).map((entry) => ({
+      ...entry,
+      state: "Shutdown"
+    }));
+
+    expect(selectSimulatorDevice(devices)).toMatchObject({
+      name: "iPhone 17 Pro",
+      udid: "newest-26"
+    });
+  });
+
+  it("plans simulator boot, readiness, UI opening, and Expo install/launch", () => {
+    const simulator = {
+      deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+      name: "iPhone 17 Pro",
+      runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+      state: "Shutdown",
+      udid: "simulator-udid"
+    };
+
+    expect(buildMobileSimulatorBootCommandPlan(simulator)).toEqual([
+      { command: "xcrun", args: ["simctl", "boot", "simulator-udid"] },
+      { command: "xcrun", args: ["simctl", "bootstatus", "simulator-udid", "-b"] },
+      {
+        command: "open",
+        args: ["-a", "Simulator", "--args", "-CurrentDeviceUDID", "simulator-udid"]
+      }
+    ]);
+    expect(buildMobileDeviceRunCommand({
+      repoRoot: "/repo",
+      deviceUdid: "simulator-udid",
+      lanHost: "127.0.0.1",
+      metroPort: 1430,
+      nativeIdentity: {
+        appEnv: "dev",
+        bundleId: "build.kanna.app.dev",
+        devClientScheme: "exp+kanna-mobile",
+        displayName: "Kanna Dev"
+      }
+    })).toMatchObject({
+      command: "pnpm",
+      args: ["--dir", "/repo/apps/mobile", "ios", "--device", "simulator-udid", "--port", "1430"],
+      env: {
+        KANNA_APP_ENV: "dev",
+        REACT_NATIVE_PACKAGER_HOSTNAME: "127.0.0.1",
+        RCT_METRO_PORT: "1430"
+      }
+    });
+  });
+
+  it("does not plan a redundant boot for an already booted simulator", () => {
+    const simulator = selectSimulatorDevice(parseSimctlDeviceList(simulatorList));
+    expect(buildMobileSimulatorBootCommandPlan(simulator)[0]).toEqual({
+      command: "xcrun",
+      args: ["simctl", "bootstatus", "booted-18", "-b"]
     });
   });
 });

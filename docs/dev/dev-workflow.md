@@ -78,6 +78,9 @@ pnpm test                    # JS/TS suite only
 ### Mobile
 
 ```sh
+./kd mobile run --simulator  # dev stack + boot/install/launch on the default Simulator
+./kd mobile run --simulator "iPhone 17 Pro"
+                             # select a Simulator by name (a UDID also works)
 ./kd mobile run --device     # dev stack + install/launch on a physical iPhone
 ./kd mobile run --device --build dev --owner staging
                              # dev iPhone app + installed staging owner/cloud
@@ -88,12 +91,12 @@ pnpm test                    # JS/TS suite only
 ./kd mobile ota status --staging  # OTA channel pointer; all OTA workflows in release.md
 ```
 
-Always start end-to-end mobile runs from `./kd dev up --mobile` or
-`./kd mobile up` — launching Expo directly from `apps/mobile` does not start
+Always start end-to-end mobile runs from `./kd mobile run --simulator`,
+`./kd mobile run --device`, `./kd dev up --mobile`, or `./kd mobile up` —
+launching Expo directly from `apps/mobile` does not start
 the desktop-side `kanna-server`, so the app boots but can't reach desktop
 data. Physical-device flows, staging installs, and the Buffy staging test
-identity are documented in detail in
-[Physical iPhone development](#physical-iphone-development) below.
+identity are documented in detail below.
 
 Development launches resolve three independent axes before starting anything:
 
@@ -578,7 +581,21 @@ The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates. With a
 warm store most of those are restored rather than compiled; with a cold store
 the daemon builds quickly but the full Tauri app takes several minutes.
 
-## Physical iPhone development
+## iOS development targets
+
+For iOS Simulator development, run `./kd mobile run --simulator` from a
+worktree. kd prefers an already booted iPhone Simulator; otherwise it selects
+an iPhone from the newest installed iOS runtime. Pass an exact simulator UDID
+or name after the flag to override that choice. The command boots the selected
+simulator, waits for it to become ready, opens Simulator, and then follows the
+same profile resolution, native prebuild, worktree/staging owner startup, and
+Expo dev-client build/install path as `--device`. For the normal development
+profile this starts the task-scoped Firebase emulators, relay, desktop app,
+`kanna-server`, and Metro before building and opening the dev client. Because
+the Simulator shares the Mac network namespace, its Metro host is
+`127.0.0.1`; physical iPhones continue to use the selected Mac LAN address.
+`--install` remains the physical-iPhone standalone Release flow and cannot be
+combined with `--simulator`.
 
 For physical iPhone dev-build launches, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd mobile run --device` from a worktree. This is the canonical single-command normal-dev flow: it starts or augments the worktree dev stack with Firebase emulators, relay, desktop, and a resilient dev-client Metro on `KANNA_MOBILE_PORT`; resolves the Mac LAN IP; prints the exact Metro URL (`http://<LAN-IP>:<KANNA_MOBILE_PORT>`); then runs `expo run:ios --device <udid> --port <KANNA_MOBILE_PORT>` with `REACT_NATIVE_PACKAGER_HOSTNAME=<LAN-IP>`. It reuses the kd-managed Metro and does not kill Metro after launch. Use `./kd mobile doctor --device` to run the same on-device preflight without building or launching.
 
@@ -586,7 +603,7 @@ To run the dev app identity against staging, use `./kd mobile run --device --bui
 
 iOS requires a one-time Local Network permission grant for the dev build: Settings -> Privacy & Security -> Local Network -> Kanna = ON. If this permission is denied or dismissed, the app can show "Could not connect to development server" even when the Metro URL is correct. Troubleshooting map: "No script URL provided" means Metro is down or the app launched against the wrong port; "Could not connect to development server" means Metro is down, the phone cannot reach the printed LAN URL, or Local Network permission is off.
 
-Mobile native identity is keyed by `KANNA_APP_ENV` from `apps/mobile/src/mobileEnvironments.json`. The iOS bundle ids are `build.kanna.app.dev` for dev, `build.kanna.app.staging` for staging, and `build.kanna.app` for production; display names are `Kanna Dev`, `Kanna Staging`, and `Kanna`. `./kd mobile run --device` resolves the environment, then runs `expo prebuild --platform ios` with `KANNA_APP_ENV` before invoking `expo run:ios`. This is the standard Expo Continuous Native Generation path: `apps/mobile/app.config.ts` sets `ios.bundleIdentifier`, and `apps/mobile/plugins/withKannaNativeIdentity.js` applies the bundle id and display name to only the `KannaMobile` app target during prebuild. Because Expo config plugins make the Xcode changes during the same prebuild-sync path that `expo run:ios` uses before compiling, there is no runtime `project.pbxproj` patch for Expo to revert; test targets such as WebDriverAgentRunner keep their own bundle ids.
+Mobile native identity is keyed by `KANNA_APP_ENV` from `apps/mobile/src/mobileEnvironments.json`. The iOS bundle ids are `build.kanna.app.dev` for dev, `build.kanna.app.staging` for staging, and `build.kanna.app` for production; display names are `Kanna Dev`, `Kanna Staging`, and `Kanna`. Both `./kd mobile run --simulator` and `./kd mobile run --device` resolve the environment, then run `expo prebuild --platform ios` with `KANNA_APP_ENV` before invoking `expo run:ios`. This is the standard Expo Continuous Native Generation path: `apps/mobile/app.config.ts` sets `ios.bundleIdentifier`, and `apps/mobile/plugins/withKannaNativeIdentity.js` applies the bundle id and display name to only the `KannaMobile` app target during prebuild. Because Expo config plugins make the Xcode changes during the same prebuild-sync path that `expo run:ios` uses before compiling, there is no runtime `project.pbxproj` patch for Expo to revert; test targets such as WebDriverAgentRunner keep their own bundle ids.
 
 If iOS cannot replace an installed app because its signing team's application-identifier prefix changed, remove only the affected environment with the guarded physical-device command. For staging, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd mobile uninstall --device --staging --confirm-bundle build.kanna.app.staging`. The confirmation must exactly match the bundle id resolved from the selected environment. The command prints the selected device name, UDID, and bundle before mutation; checks whether that exact bundle is installed; uninstalls only that bundle; and verifies whether it was removed. It does not build, install, launch, or touch the production `build.kanna.app` bundle. Uninstalling deletes that environment's on-device local data and pairing state. Production additionally requires `--production --confirm-bundle build.kanna.app --confirm-production`; do not use it without explicit human authorization to remove production.
 
