@@ -8382,22 +8382,26 @@ async fn destination_can_finalize_outgoing_transfer_after_approval() {
 async fn a_finalization_slower_than_the_peer_request_window_answers_the_first_request() {
     let temp = tempfile::tempdir().unwrap();
 
-    // Both ends run with an ordinary peer-request window far shorter than the
-    // finalization takes. Only the separate finalization window keeps this
-    // request alive.
+    // Establish the durable pairing and transfer reservation with the normal
+    // request budget. A tiny budget here used to make unrelated setup I/O the
+    // load-sensitive part of a test about finalization.
     let secondary = std::sync::Arc::new(
-        TransferRuntime::spawn(
-            RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
-                .with_peer_request_timeout(Duration::from_millis(250)),
-        )
+        TransferRuntime::spawn(RuntimeConfig::for_tests(
+            "peer-secondary",
+            "Secondary",
+            temp.path(),
+            0,
+        ))
         .await
         .unwrap(),
     );
     let primary = std::sync::Arc::new(
-        TransferRuntime::spawn(
-            RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
-                .with_peer_request_timeout(Duration::from_millis(250)),
-        )
+        TransferRuntime::spawn(RuntimeConfig::for_tests(
+            "peer-primary",
+            "Primary",
+            temp.path(),
+            0,
+        ))
         .await
         .unwrap(),
     );
@@ -8419,6 +8423,28 @@ async fn a_finalization_slower_than_the_peer_request_window_answers_the_first_re
         .await
         .unwrap();
     let _incoming = next_incoming_transfer_request(&secondary).await;
+
+    // Pairing, trust, and reservations are durable. Restart only after that
+    // setup so the deliberately narrow ordinary request window applies to the
+    // operation this test actually proves.
+    drop(primary);
+    drop(secondary);
+    let secondary = std::sync::Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+                .with_peer_request_timeout(Duration::from_millis(250)),
+        )
+        .await
+        .unwrap(),
+    );
+    let primary = std::sync::Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+                .with_peer_request_timeout(Duration::from_millis(250)),
+        )
+        .await
+        .unwrap(),
+    );
 
     let primary_for_completion = std::sync::Arc::clone(&primary);
     let transfer_id = preflight.transfer_id.clone();

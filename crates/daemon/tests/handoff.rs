@@ -302,10 +302,12 @@ impl DaemonHandle {
     }
 
     fn connect(&self) -> ClientConn {
+        self.connect_with_read_timeout(Duration::from_secs(5))
+    }
+
+    fn connect_with_read_timeout(&self, read_timeout: Duration) -> ClientConn {
         let stream = UnixStream::connect(&self.socket_path).expect("failed to connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(read_timeout)).unwrap();
         ClientConn {
             reader: BufReader::new(stream.try_clone().unwrap()),
             writer: stream,
@@ -975,9 +977,8 @@ fn wait_for_agent_turn(conn: &mut ClientConn, id: &str) {
     }
 }
 
-fn assert_agent_steers_after_handoff(daemon: &DaemonHandle, id: &str) {
-    let mut conn = daemon.connect();
-    wait_for_agent_turn(&mut conn, id);
+fn assert_agent_steers_after_handoff(conn: &mut ClientConn, id: &str) {
+    wait_for_agent_turn(conn, id);
     conn.send(&Cmd::AgentInput {
         session_id: id.to_string(),
         text: "still alive?".to_string(),
@@ -1266,7 +1267,8 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     // Server-style classification began against shipped v2, retried only
     // after v3 was published, and unfenced this ordinary inherited PTY.
     send_input_and_wait_for_echo(&mut current_pty, "stable-pty", b"after\n", "after");
-    assert_agent_steers_after_handoff(&current, "stable-agent");
+    let mut current_agent = current.connect();
+    assert_agent_steers_after_handoff(&mut current_agent, "stable-agent");
     assert_daemon_log_contains(&dir, "selected legacy-v2 mode");
 
     drop(current_pty);
@@ -1561,6 +1563,10 @@ fn shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human() {
 
 #[test]
 fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
+    // Socket reads are the event-driven synchronization in this cross-version
+    // test. Their timeout contains a wedged fixture; five seconds is not a
+    // daemon handoff latency contract and is too narrow under full-suite load.
+    let eventual_read_timeout = Duration::from_secs(30);
     let Some(previous) = support::previous_daemon::binary_or_skip(
         "current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter",
     ) else {
@@ -1577,17 +1583,23 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     );
     let mut current = DaemonHandle::start_binary_in(&stable_daemon, &dir);
 
-    spawn_echo(&mut current.connect(), "stable-pty");
+    spawn_echo(
+        &mut current.connect_with_read_timeout(eventual_read_timeout),
+        "stable-pty",
+    );
     spawn_agent(
-        &mut current.connect(),
+        &mut current.connect_with_read_timeout(eventual_read_timeout),
         "stable-agent",
         &script,
         "before handoff",
     );
-    let mut current_pty = current.connect();
+    let mut current_pty = current.connect_with_read_timeout(eventual_read_timeout);
     attach(&mut current_pty, "stable-pty");
     send_input_boundary_and_wait_for_echo(&mut current_pty, "stable-pty", b"before\n", "before");
-    wait_for_agent_turn(&mut current.connect(), "stable-agent");
+    wait_for_agent_turn(
+        &mut current.connect_with_read_timeout(eventual_read_timeout),
+        "stable-agent",
+    );
 
     drop(current_pty);
     install_test_daemon_at(&previous, &stable_daemon);
@@ -1597,10 +1609,11 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
         "current v3 sender should exit after the shipped v2 adopter ACKs"
     );
 
-    let mut adopted_pty = old_adopter.connect();
+    let mut adopted_pty = old_adopter.connect_with_read_timeout(eventual_read_timeout);
     attach(&mut adopted_pty, "stable-pty");
     send_input_and_wait_for_echo(&mut adopted_pty, "stable-pty", b"after\n", "after");
-    assert_agent_steers_after_handoff(&old_adopter, "stable-agent");
+    let mut adopted_agent = old_adopter.connect_with_read_timeout(eventual_read_timeout);
+    assert_agent_steers_after_handoff(&mut adopted_agent, "stable-agent");
 
     drop(adopted_pty);
     drop(old_adopter);

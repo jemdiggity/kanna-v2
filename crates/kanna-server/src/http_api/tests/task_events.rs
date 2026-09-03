@@ -235,6 +235,58 @@ fn connect_test_relay_peer_with_invoke_gate(
     })
 }
 
+fn connect_test_relay_peer_with_invoke_events(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+    invoke_started: tokio::sync::mpsc::UnboundedSender<usize>,
+    invoke_completed: tokio::sync::mpsc::UnboundedSender<usize>,
+) -> tokio::task::JoinHandle<()> {
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    tokio::spawn(async move {
+        let mut invocation = 0;
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
+                }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons { response, .. } => {
+                    let _ = response.send(Ok(Vec::new()));
+                }
+                crate::http_api::DesktopRelayRequest::Invoke {
+                    method,
+                    path,
+                    body,
+                    response,
+                    ..
+                } => {
+                    invocation += 1;
+                    let current_invocation = invocation;
+                    let _ = invoke_started.send(current_invocation);
+                    let peer = Arc::clone(&peer);
+                    let invoke_completed = invoke_completed.clone();
+                    tokio::spawn(async move {
+                        let result = crate::http_api::dispatch_authenticated_http_invoke(
+                            peer, &method, &path, body,
+                        )
+                        .await;
+                        let _ = response.send(Ok(result));
+                        let _ = invoke_completed.send(current_invocation);
+                    });
+                }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. }
+                | crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                    ..
+                } => {
+                    panic!("task-event relay test does not claim singletons")
+                }
+            }
+        }
+    })
+}
+
 fn connect_unresponsive_listed_peer(
     source: &Arc<AppState>,
     machine_id: &str,
@@ -2675,33 +2727,65 @@ async fn shrinking_limit_retains_one_peer_leg_and_resumes_past_only_emitted_even
 #[tokio::test]
 async fn empty_inherited_leg_is_rearmed_and_wakes_the_same_long_poll() {
     let (source, peer) = aggregate_pending_leg_states();
-    let relay =
-        connect_test_relay_peer(&source, Arc::clone(&peer), Arc::new(AtomicBool::new(true)));
+    let (invoke_started_tx, mut invoke_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (invoke_completed_tx, mut invoke_completed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let relay = connect_test_relay_peer_with_invoke_events(
+        &source,
+        Arc::clone(&peer),
+        invoke_started_tx,
+        invoke_completed_tx,
+    );
     let app = router(Arc::clone(&source));
     let scope = "/v1/task-events?taskIds=pending-local-child,pending-peer-child";
     let first = get_account_json_body(&app, &source, &format!("{scope}&timeoutSecs=1")).await;
     assert_eq!(event_pairs(&first).len(), 1);
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), invoke_started_rx.recv())
+            .await
+            .expect("initial inherited peer leg never started"),
+        Some(1)
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), invoke_completed_rx.recv())
+            .await
+            .expect("initial inherited peer leg never completed"),
+        Some(1)
+    );
 
-    let peer_db_path = peer.config().db_path.clone();
-    let writer = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        Db::open(&peer_db_path)
-            .expect("open peer db")
-            .update_pipeline_item_stage("pending-peer-child", "review")
-            .expect("append peer event");
-    });
-    let resumed = tokio::time::timeout(
-        Duration::from_secs(2),
+    let resumed_app = app.clone();
+    let resumed_source = Arc::clone(&source);
+    let first_cursor = cursor_of(&first);
+    let mut resumed = tokio::spawn(async move {
         get_account_json_body(
-            &app,
-            &source,
-            &format!("{scope}&cursor={}&timeoutSecs=5", cursor_of(&first)),
-        ),
-    )
+            &resumed_app,
+            &resumed_source,
+            &format!("{scope}&cursor={first_cursor}&timeoutSecs=5"),
+        )
+        .await
+    });
+    let second_invoke = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            invocation = invoke_started_rx.recv() => invocation,
+            response = &mut resumed => {
+                panic!("resumed long poll completed before rearming the peer leg: {response:?}");
+            }
+        }
+    })
     .await
-    .expect("rearmed peer leg must wake this call, not the next outer poll");
-    writer.await.expect("writer");
+    .expect("resumed long poll never rearmed its inherited peer leg");
+    assert_eq!(
+        second_invoke,
+        Some(2),
+        "the empty inherited peer leg must be rearmed in the resumed call"
+    );
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .update_pipeline_item_stage("pending-peer-child", "review")
+        .expect("append peer event after the rearmed invoke starts");
+    let resumed = tokio::time::timeout(Duration::from_secs(30), resumed)
+        .await
+        .expect("rearmed peer leg did not wake after its event was appended")
+        .expect("resumed task-event request panicked");
     assert_eq!(
         event_pairs(&resumed),
         vec![("pending-peer-child".into(), "stage.changed".into())]
