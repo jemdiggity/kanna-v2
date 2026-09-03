@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -36,6 +36,10 @@ let sharedOwnerTask: {
   taskId: string;
   prompt: string;
   worktreePath: string;
+} | null = null;
+let sharedFullscreenTask: {
+  taskId: string;
+  prompt: string;
 } | null = null;
 
 interface TerminalDimensions {
@@ -363,6 +367,258 @@ async function ownerTerminalDimensions(
   return { cols: snapshot.cols, rows: snapshot.rows };
 }
 
+async function createFullscreenOwnerTask(): Promise<{
+  taskId: string;
+  prompt: string;
+}> {
+  const taskId = `remote-fullscreen-${randomUUID()}`;
+  const prompt = `Remote full-screen TUI ${randomUUID()}`;
+  const script = [
+    "use Errno qw(EINTR);",
+    "select(STDOUT); $| = 1;",
+    "system('stty raw -echo');",
+    "my $stream = 'REMOTE_TUI_STREAM_WAITING';",
+    "sub draw_screen {",
+    "  my $size = `stty size`;",
+    "  $size =~ s/\\s+$//;",
+    "  my ($rows, $cols) = split(/\\s+/, $size);",
+    "  $rows ||= 24; $cols ||= 80;",
+    "  print qq{\\e[?1049h\\e[?2004h\\e[2J\\e[H};",
+    "  print qq{\\e[1;31mREMOTE_TUI_TOP:${cols}x${rows}\\e[0m};",
+    "  print qq{\\e[2;5H\\e[7mREMOTE_TUI_ATTR\\e[0m};",
+    "  print qq{\\e[4;3H$stream};",
+    "  print qq{\\e[${rows};1HREMOTE_TUI_BOTTOM};",
+    "  print qq{\\e[3;7H};",
+    "}",
+    "$SIG{WINCH} = sub { draw_screen(); };",
+    "draw_screen();",
+    "while (1) {",
+    "  my $read = sysread(STDIN, my $chunk, 4096);",
+    "  if (!defined($read)) { next if $! == EINTR; last; }",
+    "  last if $read == 0;",
+    "  if (index($chunk, 'u') >= 0) {",
+    "    $stream = qq{REMOTE_TUI_STREAM_界};",
+    "    draw_screen();",
+    "  }",
+    "}",
+    "print qq{\\e[?2004l\\e[?1049l};",
+  ].join("\n");
+
+  await execDb(
+    primary,
+    "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+    [taskId, primaryRepoId, prompt, "in progress", "pty"],
+  );
+  await tauriInvoke(primary, "spawn_session", {
+    sessionId: taskId,
+    cwd: fixtureRepoPath,
+    executable: "/usr/bin/perl",
+    args: ["-e", script],
+    env: { TERM: "xterm-256color" },
+    cols: 80,
+    rows: 24,
+  });
+  await callVueMethod(primary, "loadItems", primaryRepoId);
+  await expect.poll(
+    async () => (await tauriInvoke(
+      primary,
+      "get_session_recovery_state",
+      { sessionId: taskId },
+    ) as { serialized?: string } | null)?.serialized ?? "",
+    { timeout: 30_000, interval: 100 },
+  ).toContain("REMOTE_TUI_BOTTOM");
+  // `loadItems` may restore a newly inserted task when no older task is
+  // selected. Detach only in that case; in the full suite the companion task
+  // remains selected and this raw fixture never creates a local xterm.
+  await sleep(250);
+  await primary.executeSync(`
+    const store = window.__KANNA_E2E__.setupState.store;
+    if (store.selectedItemId === ${JSON.stringify(taskId)}) {
+      store.selectedItemId = null;
+    }
+  `);
+  return { taskId, prompt };
+}
+
+async function assertFullscreenRemoteTerminal(taskId: string): Promise<void> {
+  await expect.poll(
+    () => secondary.executeSync<boolean>(`
+      const buffers = window.__KANNA_E2E__?.terminalBuffers;
+      return buffers?.lines(${JSON.stringify(taskId)})
+        .some((line) => line.includes("REMOTE_TUI_BOTTOM")) ?? false;
+    `),
+    { timeout: 30_000, interval: 100 },
+  ).toBe(true);
+
+  const dimensions = await visibleRemoteTerminalDimensions(
+    taskId,
+    "REMOTE_TUI_BOTTOM",
+  );
+  expect(dimensions.cols).toBeGreaterThan(2);
+  expect(dimensions.rows).toBeGreaterThan(4);
+  await expect.poll(
+    () => secondary.executeSync(`
+      const lines = window.__KANNA_E2E__?.terminalBuffers
+        ?.lines(${JSON.stringify(taskId)}) ?? [];
+      const dimensions = /^REMOTE_TUI_TOP:(\\d+)x(\\d+)$/.exec(lines[0] ?? "");
+      const sourceRows = Number.parseInt(dimensions?.[2] ?? "0", 10);
+      return {
+        top: lines[0] ?? null,
+        attributes: lines[1] ?? null,
+        stream: lines[3] ?? null,
+        bottom: sourceRows > 0 ? lines[sourceRows - 1] ?? null : null,
+      };
+    `),
+    { timeout: 10_000, interval: 100 },
+  ).toEqual({
+    top: expect.stringMatching(/^REMOTE_TUI_TOP:\d+x\d+$/),
+    attributes: "    REMOTE_TUI_ATTR",
+    stream: expect.stringContaining("REMOTE_TUI_STREAM_"),
+    bottom: "REMOTE_TUI_BOTTOM",
+  });
+
+  const attributes = await secondary.executeSync(`
+    const buffers = window.__KANNA_E2E__?.terminalBuffers;
+    return {
+      top: buffers?.cellAttributes(${JSON.stringify(taskId)}, 0, 0) ?? null,
+      inverse: buffers?.cellAttributes(${JSON.stringify(taskId)}, 1, 4) ?? null,
+    };
+  `);
+  expect(attributes).toEqual({
+    top: expect.objectContaining({ bold: true, inverse: false }),
+    inverse: expect.objectContaining({ bold: false, inverse: true }),
+  });
+
+  await expect.poll(
+    () => secondary.executeSync<boolean>(`
+      const entry = Array.from(document.querySelectorAll(
+        ".main-panel .cloud-terminal-cache-entry"
+      )).find((candidate) => candidate.getClientRects().length > 0);
+      const canvasPainted = Array.from(
+        entry?.querySelectorAll(".xterm-screen canvas") ?? []
+      ).some((canvas) => {
+        const rect = canvas.getBoundingClientRect();
+        const style = window.getComputedStyle(canvas);
+        return canvas.width > 0 &&
+          canvas.height > 0 &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0";
+      });
+      if (canvasPainted) return true;
+      const rows = Array.from(entry?.querySelectorAll(".xterm-rows > div") ?? []);
+      const top = rows.find((row) => row.textContent?.includes("REMOTE_TUI_TOP:"));
+      if (!(top instanceof HTMLElement) || top.getClientRects().length === 0) {
+        return false;
+      }
+      return Array.from(top.querySelectorAll("span")).some((span) => {
+        const style = window.getComputedStyle(span);
+        const rect = span.getBoundingClientRect();
+        return Boolean(span.textContent?.trim()) &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0" &&
+          style.color !== "rgba(0, 0, 0, 0)";
+      });
+    `),
+    { timeout: 10_000, interval: 100 },
+  ).toBe(true);
+}
+
+async function assertRemoteTerminalDimensionsPropagated(taskId: string): Promise<void> {
+  await expect.poll(
+    async () => {
+      const visible = await visibleRemoteTerminalDimensions(
+        taskId,
+        "REMOTE_TUI_TOP:",
+      );
+      const owner = await ownerTerminalDimensions(taskId);
+      const top = await secondary.executeSync<string | null>(`
+        return window.__KANNA_E2E__?.terminalBuffers
+          ?.lines(${JSON.stringify(taskId)})[0] ?? null;
+      `);
+      return owner.cols === visible.cols &&
+        owner.rows === visible.rows &&
+        (owner.cols !== 80 || owner.rows !== 24) &&
+        top === "REMOTE_TUI_TOP:" + owner.cols + "x" + owner.rows;
+    },
+    { timeout: 15_000, interval: 100 },
+  ).toBe(true);
+}
+
+async function sendRemoteTerminalInput(taskId: string, data: string): Promise<void> {
+  await secondary.executeSync(`
+    window.__KANNA_E2E__?.terminalBuffers
+      ?.input(${JSON.stringify(taskId)}, ${JSON.stringify(data)});
+  `);
+}
+
+async function assertRemoteDropRefused(taskId: string): Promise<void> {
+  const localOnlyPath = "/Users/viewer/Desktop/remote-drop.png";
+  const targets = await secondary.findElements(
+    ".main-panel .cloud-terminal-cache-entry .terminal-container",
+  );
+  let visibleTarget: string | null = null;
+  for (const target of targets) {
+    const rect = await secondary.getElementRect(target);
+    if (rect.width > 0 && rect.height > 0) visibleTarget = target;
+  }
+  if (!visibleTarget) throw new Error("remote terminal drop target unavailable");
+  await secondary.click(visibleTarget);
+  const position = await secondary.executeSync<{ x: number; y: number }>(`
+    const entry = Array.from(document.querySelectorAll(
+      ".main-panel .cloud-terminal-cache-entry"
+    )).find((candidate) => candidate.getClientRects().length > 0);
+    const terminal = entry?.querySelector(".terminal-container");
+    if (!(terminal instanceof HTMLElement)) {
+      throw new Error("remote terminal drop target unavailable");
+    }
+    const rect = terminal.getBoundingClientRect();
+    const scale = window.devicePixelRatio || 1;
+    return {
+      x: (rect.left + rect.width / 2) * scale,
+      y: (rect.top + rect.height / 2) * scale,
+    };
+  `);
+  await sleep(200);
+  const emitted = await secondary.executeAsync<string>(`
+    const done = arguments[arguments.length - 1];
+    window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
+      event: "tauri://drag-drop",
+      payload: {
+        paths: [${JSON.stringify(localOnlyPath)}],
+        position: ${JSON.stringify(position)},
+      },
+    }).then(() => done("ok")).catch((error) => done(String(error)));
+  `);
+  expect(emitted).toBe("ok");
+  await secondary.waitForText(
+    ".toast.error .toast-message",
+    "Files can’t be dropped into a terminal on another machine.",
+    10_000,
+  );
+  const screenshotDir = process.env.KANNA_E2E_SCREENSHOT_DIR;
+  if (screenshotDir) {
+    await mkdir(screenshotDir, { recursive: true });
+    await secondary.executeSync(`
+      window.__KANNA_E2E__?.terminalBuffers?.refresh(${JSON.stringify(taskId)});
+    `);
+    await sleep(100);
+    await secondary.screenshot(`${screenshotDir}/remote-terminal-drop-refusal.png`);
+  }
+  await sleep(250);
+  const recovery = await tauriInvoke(
+    primary,
+    "get_session_recovery_state",
+    { sessionId: taskId },
+  ) as { serialized?: string } | null;
+  expect(recovery?.serialized ?? "").not.toContain(localOnlyPath);
+}
+
 async function waitForRemoteTask(input: {
   prompt: string;
   transport: "cloud" | "lan";
@@ -577,9 +833,10 @@ async function assertRemoteTerminalCopy(
         ${JSON.stringify(ownerTaskId)},
         ${JSON.stringify(expectedText)}
       ) ?? null;
-      const input = document.querySelector(
-        ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
-      );
+      const entry = Array.from(document.querySelectorAll(
+        ".main-panel .cloud-terminal-cache-entry"
+      )).find((candidate) => candidate.getClientRects().length > 0);
+      const input = entry?.querySelector(".xterm-helper-textarea");
       if (input instanceof HTMLElement) input.focus();
       return selection;
     `);
@@ -816,6 +1073,11 @@ describe("remote desktop visual companion", () => {
     if (!relayConnected) {
       await setRelayConnected(true).catch(() => undefined);
     }
+    if (sharedFullscreenTask) {
+      await tauriInvoke(primary, "kill_session", {
+        sessionId: sharedFullscreenTask.taskId,
+      }).catch(() => undefined);
+    }
     await cleanupWorktrees(primary, fixtureRepoPath).catch(() => undefined);
     await cleanupWorktrees(secondary, fixtureRepoPath).catch(() => undefined);
     await cleanupFixtureRepos(
@@ -864,6 +1126,32 @@ describe("remote desktop visual companion", () => {
     await assertScriptedOwnerTask(task.taskId);
   }, 180_000);
 
+  it("renders an authoritative full-screen TUI over relay and refuses viewer-local file drops", async () => {
+    const task = await createFullscreenOwnerTask();
+    sharedFullscreenTask = task;
+    const remote = await waitForRemoteTask({
+      prompt: task.prompt,
+      transport: "cloud",
+      expectedOwnerDesktopId: primaryDesktopId,
+      expectedOwnerTaskId: task.taskId,
+    });
+    await selectRemoteTask({ ...remote, prompt: task.prompt, transport: "cloud" });
+    await assertRemoteTerminalDimensionsPropagated(task.taskId);
+    await assertFullscreenRemoteTerminal(task.taskId);
+    await sendRemoteTerminalInput(task.taskId, "u");
+    await waitForRemoteTerminalLine(task.taskId, "  REMOTE_TUI_STREAM_界");
+    await assertRemoteDropRefused(task.taskId);
+
+    relayConnected = false;
+    await setRelayConnected(false);
+    await sleep(250);
+    await setRelayConnected(true);
+    relayConnected = true;
+    await assertRemoteTerminalDimensionsPropagated(task.taskId);
+    await assertFullscreenRemoteTerminal(task.taskId);
+    await waitForRemoteTerminalLine(task.taskId, "  REMOTE_TUI_STREAM_界");
+  }, 180_000);
+
   it("mirrors the paired LAN companion through the same external-browser bridge", async () => {
     if (!sharedOwnerTask) {
       throw new Error("relay owner task was not created");
@@ -901,6 +1189,32 @@ describe("remote desktop visual companion", () => {
       fixture,
       interruptRoute: "lan",
     });
+  }, 180_000);
+
+  it("renders and recovers the same full-screen TUI over paired LAN", async () => {
+    if (!sharedFullscreenTask) {
+      throw new Error("relay full-screen owner task was not created");
+    }
+    const task = sharedFullscreenTask;
+    const remote = await waitForRemoteTask({
+      prompt: task.prompt,
+      transport: "lan",
+      expectedOwnerDesktopId: "peer-primary",
+      expectedOwnerTaskId: task.taskId,
+    });
+    await selectRemoteTask({ ...remote, prompt: task.prompt, transport: "lan" });
+    await assertRemoteTerminalDimensionsPropagated(task.taskId);
+    await assertFullscreenRemoteTerminal(task.taskId);
+    await waitForRemoteTerminalLine(task.taskId, "  REMOTE_TUI_STREAM_界");
+
+    const originalPid = await interruptLanRoute();
+    await waitForReplacementLanRoute(originalPid);
+    await assertRemoteTerminalDimensionsPropagated(task.taskId);
+    await assertFullscreenRemoteTerminal(task.taskId);
+    await waitForRemoteTerminalLine(task.taskId, "  REMOTE_TUI_STREAM_界");
+
+    await tauriInvoke(primary, "kill_session", { sessionId: task.taskId });
+    sharedFullscreenTask = null;
   }, 180_000);
 
   // Quarantined: docs/2026-08-17-warm-remote-companion-browser-reselection-e2e-gap.md
@@ -1182,7 +1496,7 @@ async function runCausalRemoteInputTest(): Promise<void> {
     const script = [
       "select(STDOUT); $| = 1;",
       "system('stty raw -echo');",
-      `print qq{\\e[?1004h${readyMarker}\\r\\n};`,
+      `print qq{\\e[?1004h\\e[?2004h${readyMarker}\\r\\n};`,
       "my $composer = '';",
       "while (1) {",
       "  my $read = sysread(STDIN, my $chunk, 1);",
@@ -1193,6 +1507,27 @@ async function runCausalRemoteInputTest(): Promise<void> {
       "    last unless defined($tail_read) && $tail_read == 2;",
       "    if ($tail eq '[I' || $tail eq '[O') {",
       "      print qq{FOCUS_CONTROL:<$composer>\\r\\n};",
+      "      next;",
+      "    }",
+      "    if ($tail eq '[2') {",
+      "      my $header_end = '';",
+      "      my $header_read = sysread(STDIN, $header_end, 3);",
+      "      last unless defined($header_read) && $header_read == 3;",
+      "      if ($header_end eq '00~') {",
+      "        my $paste = '';",
+      "        while (1) {",
+      "          my $paste_read = sysread(STDIN, my $paste_byte, 1);",
+      "          last unless defined($paste_read) && $paste_read > 0;",
+      "          $paste .= $paste_byte;",
+      "          last if length($paste) >= 6 && substr($paste, -6) eq qq{\\e[201~};",
+      "        }",
+      "        $paste = substr($paste, 0, -6);",
+      "        $paste =~ s/\\r/<CR>/g;",
+      "        $paste =~ s/\\n/<LF>/g;",
+      "        print qq{PASTE:<$paste>\\r\\n};",
+      "        next;",
+      "      }",
+      "      $composer .= $chunk . $tail . $header_end;",
       "      next;",
       "    }",
       "    if ($tail eq '[0') {",
@@ -1254,9 +1589,10 @@ async function runCausalRemoteInputTest(): Promise<void> {
       // Drive the ordinary beforeinput -> input path that real typing uses so
       // this assertion covers the terminal's draft classification as well.
       await secondary.executeSync(`
-        const input = document.querySelector(
-          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
-        );
+        const entry = Array.from(document.querySelectorAll(
+          ".main-panel .cloud-terminal-cache-entry"
+        )).find((candidate) => candidate.getClientRects().length > 0);
+        const input = entry?.querySelector(".xterm-helper-textarea");
         if (!(input instanceof HTMLTextAreaElement)) {
           throw new Error("remote xterm textarea unavailable");
         }
@@ -1310,9 +1646,10 @@ async function runCausalRemoteInputTest(): Promise<void> {
       // synchronously through one onData and emits CR through a second onData.
       // That Enter commits the draft but is not a daemon submission boundary.
       await secondary.executeSync(`
-        const input = document.querySelector(
-          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
-        );
+        const entry = Array.from(document.querySelectorAll(
+          ".main-panel .cloud-terminal-cache-entry"
+        )).find((candidate) => candidate.getClientRects().length > 0);
+        const input = entry?.querySelector(".xterm-helper-textarea");
         if (!(input instanceof HTMLTextAreaElement)) {
           throw new Error("remote xterm textarea unavailable");
         }
@@ -1332,9 +1669,10 @@ async function runCausalRemoteInputTest(): Promise<void> {
       `);
       await sleep(50);
       await secondary.executeSync(`
-        const input = document.querySelector(
-          ".main-panel .cloud-terminal-shell .xterm-helper-textarea"
-        );
+        const entry = Array.from(document.querySelectorAll(
+          ".main-panel .cloud-terminal-cache-entry"
+        )).find((candidate) => candidate.getClientRects().length > 0);
+        const input = entry?.querySelector(".xterm-helper-textarea");
         if (!(input instanceof HTMLTextAreaElement)) {
           throw new Error("remote xterm textarea unavailable");
         }
@@ -1355,6 +1693,32 @@ async function runCausalRemoteInputTest(): Promise<void> {
       await secondary.pressKey("\uE007");
       await waitForRemoteTerminalLine(taskId, "SUBMIT:<>");
       await waitForRemoteTerminalLine(taskId, "PARSER_CONTROL:<>");
+
+      for (const [clipboard, expected] of [
+        ["single-line-paste", "PASTE:<single-line-paste>"],
+        ["first line\nsecond line", "PASTE:<first line<CR>second line>"],
+      ]) {
+        await secondary.executeSync(`
+          const entry = Array.from(document.querySelectorAll(
+            ".main-panel .cloud-terminal-cache-entry"
+          )).find((candidate) => candidate.getClientRects().length > 0);
+          const input = entry?.querySelector(".xterm-helper-textarea");
+          if (!(input instanceof HTMLTextAreaElement)) {
+            throw new Error("remote xterm textarea unavailable");
+          }
+          input.focus();
+          const paste = new Event("paste", { bubbles: true, cancelable: true });
+          Object.defineProperty(paste, "clipboardData", {
+            value: {
+              getData: (format) => format === "text/plain"
+                ? ${JSON.stringify(clipboard)}
+                : "",
+            },
+          });
+          input.dispatchEvent(paste);
+        `);
+        await waitForRemoteTerminalLine(taskId, expected);
+      }
 
       const submittedLines = await secondary.executeSync<string[]>(`
         const buffers = window.__KANNA_E2E__?.terminalBuffers;

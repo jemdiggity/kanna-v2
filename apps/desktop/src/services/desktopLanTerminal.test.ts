@@ -207,10 +207,11 @@ describe("createDesktopLanTerminalClient", () => {
     first.close();
     releaseFirst();
     releaseSecond();
-    await vi.waitFor(() => expect(secondEvents).toHaveLength(1));
+    await vi.waitFor(() => expect(observeCalls).toBe(2));
+    await Promise.resolve();
 
     expect(firstEvents).toEqual([]);
-    expect(secondEvents).toEqual([{ type: "ready", taskId: "task-1" }]);
+    expect(secondEvents).toEqual([]);
     const observeArgs = vi.mocked(invoke).mock.calls
       .filter(([command]) => command === "observe_transfer_peer_session")
       .map(([, args]) => args);
@@ -265,7 +266,10 @@ describe("createDesktopLanTerminalClient", () => {
       taskId: "task-1",
       listener: (event) => firstEvents.push(event),
     });
-    await vi.waitFor(() => expect(firstEvents).toHaveLength(1));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      "observe_transfer_peer_session",
+      expect.anything(),
+    ));
     const firstLease = vi.mocked(invoke).mock.calls
       .find(([command]) => command === "observe_transfer_peer_session")?.[1]
       ?.observerLeaseId;
@@ -275,7 +279,9 @@ describe("createDesktopLanTerminalClient", () => {
       taskId: "task-1",
       listener: (event) => replacementEvents.push(event),
     });
-    await vi.waitFor(() => expect(replacementEvents).toHaveLength(1));
+    await vi.waitFor(() => expect(invokeMock.mock.calls.filter(([command]) =>
+      command === "observe_transfer_peer_session"
+    )).toHaveLength(2));
     const replacementLease = vi.mocked(invoke).mock.calls
       .filter(([command]) => command === "observe_transfer_peer_session")
       .at(-1)?.[1]?.observerLeaseId;
@@ -299,8 +305,11 @@ describe("createDesktopLanTerminalClient", () => {
     });
 
     expect(replacementEvents).toEqual([
-      { type: "ready", taskId: "task-1" },
-      { type: "output", taskId: "task-1", text: "new" },
+      {
+        type: "output",
+        taskId: "task-1",
+        data: new TextEncoder().encode("new"),
+      },
     ]);
   });
 

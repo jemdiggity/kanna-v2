@@ -455,11 +455,46 @@ describe("createDesktopRelayTerminalClient", () => {
         data_b64: "aGVsbG8=",
       }),
     });
+    // KSP frames are byte boundaries, not UTF-8 character boundaries. Keep
+    // the split bytes intact so xterm's streaming decoder can join them.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: "5w==",
+      }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: "lYw=",
+      }),
+    });
 
     expect(events).toEqual([
-      { type: "output", taskId: "task-1", text: "" },
-      { type: "ready", taskId: "task-1" },
-      { type: "output", taskId: "task-1", text: "hello" },
+      {
+        type: "snapshot",
+        taskId: "task-1",
+        cols: 80,
+        rows: 24,
+        data: new Uint8Array(),
+      },
+      {
+        type: "output",
+        taskId: "task-1",
+        data: new TextEncoder().encode("hello"),
+      },
+      {
+        type: "output",
+        taskId: "task-1",
+        data: new Uint8Array([0xe7]),
+      },
+      {
+        type: "output",
+        taskId: "task-1",
+        data: new Uint8Array([0x95, 0x8c]),
+      },
     ]);
   });
 

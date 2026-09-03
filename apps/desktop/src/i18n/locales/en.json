@@ -184,7 +184,8 @@
     "transferFinalizationUnclean": "the source agent session did not end cleanly",
     "transferReservationOrphaned": "A duplicate transfer reservation could not be released and may be left on disk",
     "remoteCompanionStarting": "The visual companion is still starting. Try the link again in a moment.",
-    "remoteCompanionOpenFailed": "Could not open the visual companion."
+    "remoteCompanionOpenFailed": "Could not open the visual companion.",
+    "remoteTerminalFileDropUnavailable": "Files can’t be dropped into a terminal on another machine. Transfer the file to that machine, then paste its path."
   },
   "tags": {
     "inProgress": "In Progress",

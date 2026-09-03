@@ -184,7 +184,8 @@
     "transferFinalizationUnclean": "소스 에이전트 세션이 정상적으로 종료되지 않았습니다",
     "transferReservationOrphaned": "중복 전송 예약을 해제하지 못해 디스크에 남아 있을 수 있습니다",
     "remoteCompanionStarting": "비주얼 컴패니언을 시작하고 있습니다. 잠시 후 링크를 다시 열어 주세요.",
-    "remoteCompanionOpenFailed": "비주얼 컴패니언을 열 수 없습니다."
+    "remoteCompanionOpenFailed": "비주얼 컴패니언을 열 수 없습니다.",
+    "remoteTerminalFileDropUnavailable": "다른 컴퓨터의 터미널에는 파일을 놓을 수 없습니다. 파일을 해당 컴퓨터로 전송한 다음 경로를 붙여 넣으세요."
   },
   "tags": {
     "inProgress": "진행 중",

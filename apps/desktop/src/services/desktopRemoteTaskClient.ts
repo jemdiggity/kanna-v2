@@ -5,8 +5,8 @@ import type {
 } from "@kanna/stream-client";
 
 export type DesktopRemoteTerminalEvent =
-  | { type: "ready"; taskId: string }
-  | { type: "output"; taskId: string; text: string }
+  | { type: "snapshot"; taskId: string; cols: number; rows: number; data: Uint8Array }
+  | { type: "output"; taskId: string; data: Uint8Array }
   | { type: "exit"; taskId: string; code: number }
   | { type: "error"; taskId: string; message: string };
 

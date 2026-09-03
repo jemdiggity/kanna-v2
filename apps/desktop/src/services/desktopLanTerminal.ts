@@ -290,10 +290,6 @@ export function createDesktopLanTerminalClient(): DesktopRemoteTaskViewClient {
             observerLeaseId: observer.leaseId,
           }).then(() => true);
         })
-        .then((observing) => {
-          if (!observing || observers.get(key) !== observer) return;
-          options.listener({ type: "ready", taskId: options.taskId });
-        })
         .catch((error: unknown) => {
           if (observers.get(key) !== observer) return;
           options.listener({
@@ -606,10 +602,20 @@ function normalizeTerminalEvent(
   switch (event.type) {
     case "snapshot": {
       const snapshot = asRecord(event.snapshot);
-      return { type: "output", taskId, text: snapshot ? getStringField(snapshot, "vt") ?? "" : "" };
+      if (!snapshot) return null;
+      const cols = getNumberField(snapshot, "cols");
+      const rows = getNumberField(snapshot, "rows");
+      if (cols === null || rows === null) return null;
+      return {
+        type: "snapshot",
+        taskId,
+        cols,
+        rows,
+        data: new TextEncoder().encode(getStringField(snapshot, "vt") ?? ""),
+      };
     }
     case "output":
-      return { type: "output", taskId, text: decodeBytes(event.data) };
+      return { type: "output", taskId, data: decodeBytes(event.data) };
     case "exit":
       return { type: "exit", taskId, code: getNumberField(event, "code") ?? 0 };
     case "error":
@@ -645,9 +651,9 @@ function getNumberField(record: Record<string, unknown>, field: string): number 
   return typeof value === "number" ? value : null;
 }
 
-function decodeBytes(value: unknown): string {
-  if (!Array.isArray(value)) return "";
-  return new TextDecoder().decode(Uint8Array.from(value.filter((byte): byte is number =>
+function decodeBytes(value: unknown): Uint8Array {
+  if (!Array.isArray(value)) return new Uint8Array();
+  return Uint8Array.from(value.filter((byte): byte is number =>
     typeof byte === "number" && Number.isInteger(byte) && byte >= 0 && byte <= 255,
-  )));
+  ));
 }
