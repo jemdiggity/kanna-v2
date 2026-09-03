@@ -16,6 +16,32 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
 pub const LOGICAL_INPUT_SUBMIT_DELAY_MS: u64 = 150;
+const BRACKETED_PASTE_BEGIN: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Present a multiline logical message to the terminal as one paste.
+///
+/// A PTY is only a byte stream: without the terminal's bracketed-paste
+/// protocol, embedded line feeds are indistinguishable from independently
+/// typed input to an interactive agent TUI. Long stage-post prompts can then
+/// be consumed in pieces before the synthesized Enter arrives, leaving only a
+/// suffix at the composer. When the application has enabled the mode, the
+/// explicit paste boundary keeps every embedded newline inside one editor
+/// operation and closes that operation before the separately delayed Enter
+/// submits it. Otherwise the bytes stay untouched; sending unsupported control
+/// markers as literal composer text would be a worse corruption.
+fn frame_logical_message(mut data: Vec<u8>, bracketed_paste_mode: bool) -> Vec<u8> {
+    if !bracketed_paste_mode || !data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+        return data;
+    }
+
+    let mut framed =
+        Vec::with_capacity(BRACKETED_PASTE_BEGIN.len() + data.len() + BRACKETED_PASTE_END.len());
+    framed.extend_from_slice(BRACKETED_PASTE_BEGIN);
+    framed.append(&mut data);
+    framed.extend_from_slice(BRACKETED_PASTE_END);
+    framed
+}
 
 #[derive(Clone)]
 pub struct StreamControl {
@@ -224,6 +250,7 @@ impl PendingInput {
         data: Vec<u8>,
         written: Option<oneshot::Sender<()>>,
         released_from_draft: bool,
+        bracketed_paste_mode: bool,
     ) -> Self {
         if data.is_empty() {
             Self {
@@ -236,7 +263,7 @@ impl PendingInput {
             }
         } else {
             Self {
-                data,
+                data: frame_logical_message(data, bracketed_paste_mode),
                 kind: PendingInputKind::LogicalMessage,
                 declared_draft: false,
                 written,
@@ -455,6 +482,10 @@ pub struct SessionHandle {
     /// of that terminal can tell how old the frame it just read is relative to
     /// a declared-draft write.
     mirrored_chunks: AtomicU64,
+    /// The terminal application explicitly requested bracketed-paste input.
+    /// Logical multiline framing must follow the live mode instead of sending
+    /// control markers to a program that would treat them as literal text.
+    bracketed_paste_mode: AtomicBool,
     /// Permanently fences an outgoing incarnation from publishing output or
     /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
@@ -467,6 +498,7 @@ pub struct SessionHandle {
 fn dispatch_accepted_logical_inputs(
     input_tx: &mpsc::UnboundedSender<PendingInput>,
     state: &mut InputCoordinationState,
+    bracketed_paste_mode: bool,
 ) -> Result<(), InputQueueError> {
     if !state.raw_input_draft_state_known || state.draft_holds_input() {
         return Ok(());
@@ -480,6 +512,7 @@ fn dispatch_accepted_logical_inputs(
                 logical_input.data.clone(),
                 logical_input.written.take(),
                 logical_input.released_from_draft,
+                bracketed_paste_mode,
             ))
             .map_err(|_| InputQueueError::Closed)?;
         logical_input.dispatched = true;
@@ -491,7 +524,12 @@ impl SessionHandle {
     pub fn new(record: SessionRecord) -> Self {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let mut input_coordination = InputCoordinationState::from_record(&record);
-        if let Err(error) = dispatch_accepted_logical_inputs(&input_tx, &mut input_coordination) {
+        let bracketed_paste_mode = record.headless_terminal.bracketed_paste_mode();
+        if let Err(error) = dispatch_accepted_logical_inputs(
+            &input_tx,
+            &mut input_coordination,
+            bracketed_paste_mode,
+        ) {
             unreachable!("new session input receiver must be open: {error:?}");
         }
         Self {
@@ -512,6 +550,7 @@ impl SessionHandle {
             input_rx: Mutex::new(Some(input_rx)),
             input_coordination: std::sync::Mutex::new(input_coordination),
             mirrored_chunks: AtomicU64::new(0),
+            bracketed_paste_mode: AtomicBool::new(bracketed_paste_mode),
             retired: AtomicBool::new(false),
         }
     }
@@ -653,7 +692,12 @@ impl SessionHandle {
             .and_then(|logical_input| logical_input.written.take());
         if self
             .input_tx
-            .send(PendingInput::acknowledged_logical(data, queued_ack, false))
+            .send(PendingInput::acknowledged_logical(
+                data,
+                queued_ack,
+                false,
+                self.bracketed_paste_mode(),
+            ))
             .is_err()
         {
             state.logical_inputs.pop_back();
@@ -787,7 +831,7 @@ impl SessionHandle {
         // attestation here, and a counted draft that left no line stops
         // reading as typed.
         state.typed_draft_bytes = Some(0);
-        dispatch_accepted_logical_inputs(&self.input_tx, &mut state)
+        dispatch_accepted_logical_inputs(&self.input_tx, &mut state, self.bracketed_paste_mode())
             .map_err(|error| format!("{error:?}"))?;
         Ok(true)
     }
@@ -816,6 +860,10 @@ impl SessionHandle {
             .map_err(|_| InputQueueError::CoordinationUnavailable)?;
         state.logical_inputs.pop_front();
         Ok(())
+    }
+
+    pub fn bracketed_paste_mode(&self) -> bool {
+        self.bracketed_paste_mode.load(Ordering::SeqCst)
     }
 
     /// Legacy-v2 handoff payloads cannot preserve terminal draft coordination.
@@ -891,6 +939,10 @@ impl SessionHandle {
     ) -> Result<MirrorResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
         state.headless_terminal.write(data);
+        self.bracketed_paste_mode.store(
+            state.headless_terminal.bracketed_paste_mode(),
+            Ordering::SeqCst,
+        );
         // Counted before the frame is read back, so a reader that samples this
         // first and then reads the terminal knows its frame includes at least
         // that many chunks.
@@ -1858,8 +1910,10 @@ mod tests {
         let mut released = boundary.take_logical_after_write().into_iter();
         let (first_data, _, first_released) = released.next().expect("first released message");
         let (second_data, _, second_released) = released.next().expect("second released message");
-        let first = super::PendingInput::acknowledged_logical(first_data, None, first_released);
-        let second = super::PendingInput::acknowledged_logical(second_data, None, second_released);
+        let first =
+            super::PendingInput::acknowledged_logical(first_data, None, first_released, false);
+        let second =
+            super::PendingInput::acknowledged_logical(second_data, None, second_released, false);
         assert_eq!(first.kind, super::PendingInputKind::LogicalMessage);
         assert_eq!(first.data, b"manager one");
         assert_eq!(second.kind, super::PendingInputKind::LogicalMessage);
@@ -2010,6 +2064,79 @@ mod tests {
             .written
             .await
             .expect("acknowledgement once the Enter is written");
+        handle.kill().await.unwrap();
+    }
+
+    /// The production failure sent a multiline commit-post prompt to Claude
+    /// as undelimited terminal bytes. The TUI consumed that stream as a
+    /// partial paste and submitted only the final `sult:` suffix. A logical
+    /// message with embedded newlines must instead carry the terminal's paste
+    /// boundaries in the same write, with Enter remaining a later write.
+    #[tokio::test]
+    async fn multiline_logical_input_is_bracketed_before_its_terminating_enter() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .mirror_output(b"\x1b[?2004h", false)
+            .await
+            .expect("terminal enables bracketed paste mode");
+        assert!(handle.bracketed_paste_mode());
+
+        let mut accepted = handle
+            .enqueue_logical_input(
+                b"commit instructions\n\nPrevious implementation result:".to_vec(),
+            )
+            .expect("accept multiline logical input");
+        assert!(!accepted.held_by_raw_draft);
+
+        let mut pending = input_rx.recv().await.expect("logical message");
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(
+            pending.data,
+            b"\x1b[200~commit instructions\n\nPrevious implementation result:\x1b[201~"
+        );
+        assert!(
+            accepted.written.try_recv().is_err(),
+            "closing the paste still must not acknowledge submission"
+        );
+
+        assert!(pending.advance_logical_message_to_enter());
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalEnter);
+        assert_eq!(pending.data, b"\r");
+        pending.acknowledge_written();
+        accepted
+            .written
+            .await
+            .expect("acknowledgement once the discrete Enter is written");
+        handle.kill().await.unwrap();
+    }
+
+    #[test]
+    fn multiline_logical_input_does_not_send_unadvertised_terminal_controls() {
+        let message = b"first line\nsecond line".to_vec();
+
+        assert_eq!(
+            super::frame_logical_message(message.clone(), false),
+            message
+        );
+    }
+
+    #[tokio::test]
+    async fn single_line_logical_input_keeps_typing_semantics() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .mirror_output(b"\x1b[?2004h", false)
+            .await
+            .expect("terminal enables bracketed paste mode");
+
+        handle
+            .enqueue_logical_input(b"/quit".to_vec())
+            .expect("accept single-line logical input");
+        let pending = input_rx.recv().await.expect("logical message");
+
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(pending.data, b"/quit");
         handle.kill().await.unwrap();
     }
 

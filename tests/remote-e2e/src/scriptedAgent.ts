@@ -2,6 +2,7 @@ import { chmod, writeFile } from "node:fs/promises";
 
 export interface ScriptedAgentOptions {
   redactInput?: boolean;
+  terminalPasteSemantics?: boolean;
   tracePartialInput?: boolean;
   snapshotHistory?: {
     sentinel: string;
@@ -34,7 +35,7 @@ esac`;
   const partialInputTrace = options.tracePartialInput
     ? "printf 'SCRIPT_PARTIAL:%s\\n' \"$line\""
     : ":";
-  const bracketedPasteHandling = options.tracePartialInput
+  const bracketedPasteHandling = options.tracePartialInput || options.terminalPasteSemantics
     ? `if [ "$char" = "$escape" ]; then
     paste_marker=""
     marker_index=0
@@ -43,7 +44,12 @@ esac`;
       paste_marker="\${paste_marker}\${char}"
       marker_index=$((marker_index + 1))
     done
-    if [ "$paste_marker" = "[200~" ] || [ "$paste_marker" = "[201~" ]; then
+    if [ "$paste_marker" = "[200~" ]; then
+      paste_active=1
+      continue
+    fi
+    if [ "$paste_marker" = "[201~" ]; then
+      paste_active=0
       continue
     fi
     if [ "$paste_marker" = "[<65;" ]; then
@@ -65,6 +71,12 @@ esac`;
     continue
   fi`
     : "";
+  const submissionCondition = options.terminalPasteSemantics
+    ? `if [ "$char" = "$carriage_return" ] || { [ "$char" = "$line_feed" ] && [ "$paste_active" -eq 0 ]; }; then`
+    : `if [ "$char" = "$carriage_return" ]; then`;
+  const terminalModePrelude = options.terminalPasteSemantics
+    ? "printf '\\033[?2004h'"
+    : ":";
   const snapshotHistory = `${snapshotHistoryTrigger}
 if [ "$snapshot_history_enabled" -eq 1 ]; then
   history_line=1
@@ -77,7 +89,8 @@ fi
 `;
 
   return `#!/bin/sh
-${snapshotHistory}printf 'SCRIPT_READY\\n'
+${snapshotHistory}${terminalModePrelude}
+printf 'SCRIPT_READY\\n'
 
 heartbeat=0
 (
@@ -116,7 +129,10 @@ printf 'SCRIPT_INPUT_READY\\n'
 line=""
 menu_choice=""
 carriage_return=$(printf '\\r')
+line_feed=$(printf '\\n.')
+line_feed=\${line_feed%.}
 escape=$(printf '\\033')
+paste_active=0
 
 read_char() {
   # The sentinel prevents command substitution from stripping newline-only bytes.
@@ -127,7 +143,7 @@ read_char() {
 while :; do
   read_char
   ${bracketedPasteHandling}
-  if [ "$char" = "$carriage_return" ]; then
+  ${submissionCondition}
     if [ "$menu_choice" = "1" ]; then
       printf 'SCRIPT_MENU_SELECTED:1\\n'
       menu_choice=""

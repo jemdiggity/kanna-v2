@@ -278,8 +278,9 @@ pub enum Command {
         data: Vec<u8>,
     },
     /// One logical message for a PTY session. Unlike raw terminal input, the
-    /// daemon keeps the message and its synthesized Enter atomic and defers
-    /// both while a raw composer draft is active.
+    /// daemon keeps the message and its synthesized Enter atomic, frames
+    /// multiline text as one bracketed paste when the terminal requested that
+    /// mode, and defers the delivery while a raw composer draft is active.
     SubmitInput {
         session_id: String,
         data: Vec<u8>,

@@ -266,6 +266,7 @@ pub(crate) async fn stream_output(
                                         data,
                                         written,
                                         released_from_draft,
+                                        session.bracketed_paste_mode(),
                                     ));
                                 }
                                 if completed.kind == PendingInputKind::LogicalEnter

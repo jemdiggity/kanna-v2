@@ -344,10 +344,16 @@ one delivery in two writes — the message, then its delayed Enter — and the
 acknowledgement fires only after that Enter reaches the PTY. It travels with
 the message rather than with the call, so a message dispatched immediately, one
 released by a producer's boundary, and one released by composer attestation all
-acknowledge through the same channel. A message the daemon parks behind a
-declared raw draft has not been submitted, and is answered
-`logical_input_held_by_draft` rather than `Ok`: the message stays queued for
-the boundary, but no caller is told a delivery happened that did not. Once
+acknowledge through the same channel. When the application has enabled terminal
+bracketed-paste mode, a message containing CR or LF is framed with those markers
+in its first write, so an interactive TUI consumes every embedded newline as
+part of one editor operation before the delayed Enter. Unadvertised mode and
+single-line messages remain unframed, so unsupported controls never become
+literal text and slash commands keep their provider-native behavior. A message
+the daemon parks behind a declared raw draft has not been submitted, and is
+answered `logical_input_held_by_draft` rather than `Ok`: the message stays
+queued for the boundary, but no caller is told a delivery happened that did
+not. Once
 released, the writer pauses after each synthesized Enter before beginning the
 next message and emits `LogicalInputReleased` only after that Enter is written;
 this preserves both provider-composer and durable-record boundaries. `List`

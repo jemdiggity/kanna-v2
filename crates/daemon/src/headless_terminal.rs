@@ -170,6 +170,10 @@ impl HeadlessTerminal {
         self.terminal.vt_write(bytes);
     }
 
+    pub fn bracketed_paste_mode(&self) -> bool {
+        self.terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
+    }
+
     pub fn drain_pty_writes(&mut self) -> Vec<Vec<u8>> {
         self.pty_writes.borrow_mut().drain(..).collect()
     }
