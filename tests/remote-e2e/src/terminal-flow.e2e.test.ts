@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
 import { createRemoteTransport } from "../../../apps/mobile/src/lib/transports/remoteTransport";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
@@ -20,6 +21,16 @@ interface KspTestFrame extends Record<string, unknown> {
   type?: unknown;
   code?: unknown;
   task_id?: unknown;
+}
+
+interface TaskEvent {
+  type?: string;
+  payload?: Record<string, unknown>;
+}
+
+interface TaskEventFeed {
+  cursor?: string;
+  events?: TaskEvent[];
 }
 
 function rawDataToString(data: RawData): string {
@@ -82,6 +93,105 @@ describe("remote task terminal flow E2E", () => {
     if (!runId) throw new Error(`task ${taskId} has no latest run id`);
     return runId;
   }
+
+  async function waitForRuntimeState(
+    taskId: string,
+    expected: "busy" | "idle",
+    timeoutMs = 15_000,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + timeoutMs;
+    let detail: Record<string, unknown> = {};
+    while (Date.now() < deadline) {
+      detail = await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "GET",
+        path: `/v1/tasks/${taskId}`,
+        body: null,
+      }) as Record<string, unknown>;
+      if (detail.runtimeState === expected) {
+        return detail;
+      }
+      await sleep(100);
+    }
+    throw new Error(
+      `task ${taskId} did not reach ${expected}; last detail: ${JSON.stringify(detail)}`,
+    );
+  }
+
+  async function waitForTaskEvent(
+    taskId: string,
+    initialCursor: string,
+    predicate: (event: TaskEvent) => boolean,
+    timeoutMs = 20_000,
+  ): Promise<TaskEvent> {
+    const deadline = Date.now() + timeoutMs;
+    let cursor = initialCursor;
+    const observed: TaskEvent[] = [];
+    while (Date.now() < deadline) {
+      const feed = await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "GET",
+        path: `/v1/task-events?taskIds=${taskId}&localOnly=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=1`,
+        body: null,
+      }) as TaskEventFeed;
+      observed.push(...(feed.events ?? []));
+      const event = feed.events?.find(predicate);
+      if (event) return event;
+      if (feed.cursor) cursor = feed.cursor;
+    }
+    throw new Error(
+      `task ${taskId} did not emit the expected event; observed: ${JSON.stringify(observed)}`,
+    );
+  }
+
+  it("reports a Claude composer idle before and after daemon handoff", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Claude runtime handoff task",
+      agentProvider: "claude",
+    });
+
+    await waitForRuntimeState(task.taskId, "idle");
+    await harness.client.invokeDesktop({
+      desktopId: harness.desktopId,
+      method: "POST",
+      path: `/v1/tasks/${task.taskId}/input`,
+      body: { input: "settle-idle" },
+    });
+    await waitForRuntimeState(task.taskId, "busy");
+    const parked = await waitForRuntimeState(task.taskId, "idle");
+    expect(parked.activity).toBe("unread");
+
+    await harness.restartDaemon();
+    expect((await waitForRuntimeState(task.taskId, "idle")).runtimeState).toBe("idle");
+    const initial = await harness.client.invokeDesktop({
+      desktopId: harness.desktopId,
+      method: "GET",
+      path: `/v1/task-events?taskIds=${task.taskId}&localOnly=true&from=now&timeoutSecs=0`,
+      body: null,
+    }) as TaskEventFeed;
+    expect(initial.cursor).toEqual(expect.any(String));
+
+    await harness.client.invokeDesktop({
+      desktopId: harness.desktopId,
+      method: "POST",
+      path: `/v1/tasks/${task.taskId}/input`,
+      body: { input: "rederive-after-handoff" },
+    });
+    await waitForRuntimeState(task.taskId, "busy");
+    await waitForRuntimeState(task.taskId, "idle");
+
+    const settled = await waitForTaskEvent(
+      task.taskId,
+      initial.cursor ?? "",
+      (event) => event.type === "task.runtime_settled"
+        && event.payload?.previousRuntimeState === "busy"
+        && event.payload.runtimeState === "idle",
+    );
+    expect(settled.payload).toMatchObject({
+      previousRuntimeState: "busy",
+      runtimeState: "idle",
+    });
+  }, 90_000);
 
   it("streams snapshot, live output, and exit through observe_session and stops after unobserve", async () => {
     const task = await createScriptedTask(harness, {

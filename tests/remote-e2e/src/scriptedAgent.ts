@@ -20,6 +20,59 @@ export async function writeScriptedAgentBinary(
   await chmod(path, 0o755);
 }
 
+export async function writeScriptedClaudeStatusAgentBinary(path: string): Promise<void> {
+  await writeFile(path, scriptedClaudeStatusAgentSource());
+  await chmod(path, 0o755);
+}
+
+/**
+ * A long-lived PTY fixture that paints the measured Claude 2.1.259 status
+ * shapes. Every submitted line produces a stable busy frame followed by the
+ * idle composer with its divider and mode bar, so daemon handoff tests can
+ * exercise classification without spending an Anthropic turn.
+ */
+export function scriptedClaudeStatusAgentSource(): string {
+  return `#!/bin/sh
+if [ "\${1:-}" = "--version" ]; then
+  printf '2.1.259 (Claude Code)\\n'
+  exit 0
+fi
+
+original_tty=$(stty -g)
+stty -echo
+cleanup() {
+  stty "$original_tty" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+paint_busy() {
+  printf '\\033[2J\\033[HClaude Code\\r\\n'
+  printf 'SCRIPT_CLAUDE_BUSY\\r\\n'
+  printf '✻ Working (1s · esc to interrupt)\\r\\n'
+  printf '⏵⏵ bypass permissions on (shift+tab to cycle)\\r\\n'
+}
+
+paint_idle() {
+  printf '\\033[2J\\033[HClaude Code\\r\\n'
+  printf 'SCRIPT_CLAUDE_IDLE\\r\\n'
+  printf '✻ Churned for 1s · done 12:46 AM\\r\\n'
+  printf '────────────────────────────────────────────────────────────────────────────────\\r\\n'
+  printf '❯ \\r\\n'
+  printf '────────────────────────────────────────────────────────────────────────────────\\r\\n'
+  printf '⏵⏵ bypass permissions on (shift+tab to cycle)\\r\\n'
+}
+
+paint_idle
+while IFS= read -r line; do
+  paint_busy
+  # Long enough for the server watcher to reconnect and observe Busy after a
+  # daemon handoff before the composer is repainted.
+  sleep 3
+  paint_idle
+done
+`;
+}
+
 export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string {
   const inputReport = options.redactInput
     ? "printf 'SCRIPT_REDACTED_INPUT\\n'"

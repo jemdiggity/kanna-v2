@@ -103,6 +103,7 @@ export async function createScriptedTask(
     terminalPasteSemantics?: boolean;
     tracePartialInput?: boolean;
     waitingPromptSnippet?: string;
+    agentProvider?: "claude" | "codex";
   }
 ): Promise<ScriptedTask> {
   const repoPath = join(
@@ -140,7 +141,7 @@ export async function createScriptedTask(
       repoId: repo.id,
       prompt: taskPrompt,
       displayName: options.displayName,
-      agentProvider: "codex",
+      agentProvider: options.agentProvider ?? "codex",
       agentType: "pty"
     }
   }));
