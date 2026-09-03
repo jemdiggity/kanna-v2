@@ -14,6 +14,33 @@ function installerRepo(): string {
   return match?.[1] ?? "";
 }
 
+function updaterEndpoints(): string[] {
+  const tauriConfig = readFileSync(
+    resolve(repoRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"),
+    "utf8",
+  );
+  const desktopBuild = readFileSync(
+    resolve(repoRoot, "apps", "desktop", "src-tauri", "BUILD.bazel"),
+    "utf8",
+  );
+  const productionMatch = tauriConfig.match(
+    /https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/latest\/download\/latest\.json/,
+  );
+  const stagingMatch = desktopBuild.match(
+    /https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\/desktop-staging\/latest-staging\.json/,
+  );
+
+  expect(
+    productionMatch,
+    "tauri.conf.json must declare the production updater endpoint",
+  ).not.toBeNull();
+  expect(
+    stagingMatch,
+    "BUILD.bazel must stamp the staging updater endpoint",
+  ).not.toBeNull();
+  return [productionMatch?.[0] ?? "", stagingMatch?.[0] ?? ""];
+}
+
 describe("install script", () => {
   it("downloads from the repository published by the origin remote", () => {
     const originUrl = execFileSync("git", ["remote", "get-url", "origin"], {
@@ -30,5 +57,18 @@ describe("install script", () => {
     expect(readme).toContain(
       `https://raw.githubusercontent.com/${installerRepo()}/main/scripts/install.sh`,
     );
+  });
+
+  it("keeps both desktop updater channels on the canonical release repository", () => {
+    const originUrl = execFileSync("git", ["remote", "get-url", "origin"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    const releaseRepo = releaseRepoSlug(originUrl);
+
+    expect(updaterEndpoints()).toEqual([
+      `https://github.com/${releaseRepo}/releases/latest/download/latest.json`,
+      `https://github.com/${releaseRepo}/releases/download/desktop-staging/latest-staging.json`,
+    ]);
   });
 });

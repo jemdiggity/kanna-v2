@@ -6,7 +6,7 @@ import tauriConf from "../src-tauri/tauri.conf.json";
 
 const repoRoot = resolve(process.cwd(), "../..");
 const UPDATE_ENDPOINT =
-  "https://github.com/jemdiggity/kanna/releases/latest/download/latest.json";
+  "https://github.com/tampopogk/kanna/releases/latest/download/latest.json";
 
 describe("desktop updater runtime", () => {
   it("adds the official updater and process JavaScript plugins", () => {
