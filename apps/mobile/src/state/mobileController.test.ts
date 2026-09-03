@@ -6966,7 +6966,7 @@ describe("createMobileController", () => {
     const store = createSessionStore();
     const client = createClientMock();
     let routeIdentity = "lan:desktop-a:task-1";
-    let publishRouteChange: (() => void) | null = null;
+    let publishRouteChange: ((clientGeneration: number) => void) | null = null;
     const unsubscribe = vi.fn();
     const streams: Array<{ close: ReturnType<typeof vi.fn> }> = [];
     client.getTaskRouteIdentity = vi.fn(() => routeIdentity);
@@ -6986,16 +6986,95 @@ describe("createMobileController", () => {
     controller.openTask("task-1");
     expect(streams).toHaveLength(1);
 
-    publishRouteChange?.();
+    publishRouteChange?.(0);
     expect(streams).toHaveLength(1);
 
     routeIdentity = "cloud:task-1";
-    publishRouteChange?.();
+    publishRouteChange?.(0);
     expect(streams).toHaveLength(2);
     expect(streams[0]!.close).toHaveBeenCalledOnce();
 
     controller.dispose();
     expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("rebinds every selected-task stream when the relay client generation changes", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let publishRouteChange: ((clientGeneration: number) => void) | null = null;
+    const terminalStreams: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+    const agentStreams: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+    const companionStreams: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+
+    client.listRecentTasks.mockResolvedValue([
+      {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Terminal task",
+        stage: "in progress"
+      },
+      {
+        id: "task-agent",
+        repoId: "repo-1",
+        title: "SDK agent task",
+        stage: "in progress",
+        agentType: "agent"
+      }
+    ]);
+    client.getTaskRouteIdentity = vi.fn((taskId) => `relay-route:${taskId}`);
+    client.observeTaskTerminal.mockImplementation(() => {
+      const close = vi.fn();
+      terminalStreams.push({ close });
+      return { close };
+    });
+    client.observeTaskAgent.mockImplementation(() => {
+      const close = vi.fn();
+      agentStreams.push({ close });
+      return { close };
+    });
+    client.observeTaskCompanion.mockImplementation(() => {
+      const close = vi.fn();
+      companionStreams.push({ close });
+      return { close };
+    });
+    const controller = createMobileController(client, store, undefined, {
+      subscribeTaskRouteChanges(listener) {
+        publishRouteChange = listener;
+        return () => undefined;
+      }
+    });
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    expect(terminalStreams).toHaveLength(1);
+    expect(companionStreams).toHaveLength(1);
+
+    // A route publication from the same client is still deduplicated.
+    publishRouteChange?.(0);
+    expect(terminalStreams).toHaveLength(1);
+    expect(companionStreams).toHaveLength(1);
+
+    // Replacing the relay client keeps the logical route but must replace all
+    // subscriptions owned by the disposed client.
+    publishRouteChange?.(1);
+    expect(terminalStreams).toHaveLength(2);
+    expect(terminalStreams[0]!.close).toHaveBeenCalledOnce();
+    expect(companionStreams).toHaveLength(2);
+    expect(companionStreams[0]!.close).toHaveBeenCalledOnce();
+
+    controller.openTask("task-agent");
+    expect(agentStreams).toHaveLength(1);
+    expect(companionStreams).toHaveLength(3);
+
+    publishRouteChange?.(2);
+    expect(agentStreams).toHaveLength(2);
+    expect(agentStreams[0]!.close).toHaveBeenCalledOnce();
+    expect(companionStreams).toHaveLength(4);
+    expect(companionStreams[2]!.close).toHaveBeenCalledOnce();
+
+    publishRouteChange?.(2);
+    expect(agentStreams).toHaveLength(2);
+    expect(companionStreams).toHaveLength(4);
   });
 
   it("ignores buffered terminal events from the previous route after rebinding", async () => {

@@ -183,7 +183,9 @@ export interface MobileControllerOptions {
   pairingService?: MachinePairingService;
   replaceClientForTrustChange?: () => void;
   revokeAnonymousPushPairing?: (desktop: TrustedDesktopRecord) => Promise<void>;
-  subscribeTaskRouteChanges?: (listener: () => void) => () => void;
+  subscribeTaskRouteChanges?: (
+    listener: (clientGeneration: number) => void
+  ) => () => void;
   /** Phone-local pin/dismiss record. Defaults to AsyncStorage. */
   taskListPreferencesStore?: TaskListPreferencesStore;
   repoCheckoutPollIntervalMs?: number;
@@ -238,6 +240,7 @@ export function createMobileController(
     | {
         taskId: string;
         routeIdentity: string;
+        clientGeneration: number;
         subscription: TaskTerminalSubscription;
         retagTaskId(taskId: string): void;
       }
@@ -249,6 +252,7 @@ export function createMobileController(
     | {
         taskId: string;
         routeIdentity: string;
+        clientGeneration: number;
         subscription: TaskAgentSubscription;
         retagTaskId(taskId: string): void;
       }
@@ -257,6 +261,7 @@ export function createMobileController(
     | {
         taskId: string;
         routeIdentity: string;
+        clientGeneration: number;
         subscription: TaskCompanionSubscription;
         setOpen(isOpen: boolean): void;
         retagTaskId(taskId: string): void;
@@ -265,6 +270,7 @@ export function createMobileController(
   let taskTerminalGeneration = 0;
   let taskAgentGeneration = 0;
   let taskCompanionGeneration = 0;
+  let activeClientGeneration = 0;
   let taskDetailGeneration = 0;
   /** Fences the per-task attachment-capability read against task switching. */
   let taskAttachmentSupportGeneration = 0;
@@ -963,7 +969,8 @@ export function createMobileController(
     if (
       nextTask?.agentType !== "agent" &&
       activeTaskTerminal?.taskId === previousDurableTaskId &&
-      activeTaskTerminal.routeIdentity === nextRouteIdentity
+      activeTaskTerminal.routeIdentity === nextRouteIdentity &&
+      activeTaskTerminal.clientGeneration === activeClientGeneration
     ) {
       activeTaskTerminal.taskId = nextTaskId;
       activeTaskTerminal.retagTaskId(nextTaskId);
@@ -971,7 +978,8 @@ export function createMobileController(
     }
     if (
       activeTaskCompanion?.taskId === previousTaskId &&
-      activeTaskCompanion.routeIdentity === nextRouteIdentity
+      activeTaskCompanion.routeIdentity === nextRouteIdentity &&
+      activeTaskCompanion.clientGeneration === activeClientGeneration
     ) {
       activeTaskCompanion.taskId = nextTaskId;
       activeTaskCompanion.retagTaskId(nextTaskId);
@@ -980,7 +988,8 @@ export function createMobileController(
     if (
       nextTask?.agentType === "agent" &&
       activeTaskAgent?.taskId === previousDurableTaskId &&
-      activeTaskAgent.routeIdentity === nextRouteIdentity
+      activeTaskAgent.routeIdentity === nextRouteIdentity &&
+      activeTaskAgent.clientGeneration === activeClientGeneration
     ) {
       activeTaskAgent.taskId = nextTaskId;
       activeTaskAgent.retagTaskId(nextTaskId);
@@ -1166,7 +1175,8 @@ export function createMobileController(
     const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
     if (
       activeTaskTerminal?.taskId === taskId &&
-      activeTaskTerminal.routeIdentity === routeIdentity
+      activeTaskTerminal.routeIdentity === routeIdentity &&
+      activeTaskTerminal.clientGeneration === activeClientGeneration
     ) {
       return;
     }
@@ -1246,6 +1256,7 @@ export function createMobileController(
       activeTaskTerminal = {
         taskId,
         routeIdentity,
+        clientGeneration: activeClientGeneration,
         subscription,
         retagTaskId(nextTaskId) {
           streamTaskId = nextTaskId;
@@ -1269,7 +1280,8 @@ export function createMobileController(
     const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
     if (
       activeTaskAgent?.taskId === taskId &&
-      activeTaskAgent.routeIdentity === routeIdentity
+      activeTaskAgent.routeIdentity === routeIdentity &&
+      activeTaskAgent.clientGeneration === activeClientGeneration
     ) {
       return;
     }
@@ -1295,6 +1307,7 @@ export function createMobileController(
       activeTaskAgent = {
         taskId,
         routeIdentity,
+        clientGeneration: activeClientGeneration,
         subscription,
         retagTaskId(nextTaskId) {
           streamTaskId = nextTaskId;
@@ -1316,7 +1329,8 @@ export function createMobileController(
     const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
     if (
       activeTaskCompanion?.taskId === taskId &&
-      activeTaskCompanion.routeIdentity === routeIdentity
+      activeTaskCompanion.routeIdentity === routeIdentity &&
+      activeTaskCompanion.clientGeneration === activeClientGeneration
     ) {
       return;
     }
@@ -1338,6 +1352,7 @@ export function createMobileController(
       activeTaskCompanion = {
         taskId,
         routeIdentity,
+        clientGeneration: activeClientGeneration,
         subscription,
         setOpen(nextIsOpen) {
           isOpen = nextIsOpen;
@@ -1493,7 +1508,8 @@ export function createMobileController(
     }
   };
 
-  const reconcileSelectedTaskRoute = () => {
+  const reconcileSelectedTaskRoute = (clientGeneration: number) => {
+    activeClientGeneration = clientGeneration;
     const selectedTaskId = store.getState().selectedTaskId;
     const durableTaskId = durableTaskIdForSelection(selectedTaskId);
     if (durableTaskId && findTask(durableTaskId)) {

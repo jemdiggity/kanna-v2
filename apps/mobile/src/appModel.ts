@@ -181,9 +181,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let lanDiscoveryRefreshQueued = false;
   let activeAuthUid = signedInUid(authSession.getState());
   let activeAuthVerified = isVerified(authSession.getState());
-  const taskRouteListeners = new Set<() => void>();
+  const taskRouteListeners = new Set<(clientGeneration: number) => void>();
   const publishTaskRouteChange = () => {
-    for (const listener of taskRouteListeners) listener();
+    for (const listener of taskRouteListeners) listener(clientGeneration);
   };
   // Native discovery can settle after the first cloud snapshot and relay
   // presence read. Feed it through the same complete-snapshot drain so the
