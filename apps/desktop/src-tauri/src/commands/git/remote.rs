@@ -14,14 +14,22 @@ pub struct GitRepositoryState {
 
 #[tauri::command]
 pub fn git_default_branch(repo_path: String) -> Result<String, String> {
-    Ok(git_repository_state(repo_path)?.default_branch)
+    let repo = discover_repo(&repo_path)?;
+    let has_commits = repository_has_commits(&repo)?;
+    Ok(resolve_local_default_branch(&repo, !has_commits).branch)
+}
+
+#[tauri::command]
+pub fn git_repository_has_commits(repo_path: String) -> Result<bool, String> {
+    let repo = discover_repo(&repo_path)?;
+    repository_has_commits(&repo)
 }
 
 #[tauri::command]
 pub fn git_repository_state(repo_path: String) -> Result<GitRepositoryState, String> {
     let repo = discover_repo(&repo_path)?;
     let has_commits = repository_has_commits(&repo)?;
-    let resolution = resolve_default_branch(&repo, !has_commits)?;
+    let resolution = resolve_registration_default_branch(&repo, !has_commits)?;
 
     Ok(GitRepositoryState {
         default_branch: resolution.branch,
@@ -55,7 +63,7 @@ fn repository_has_commits(repo: &Repository) -> Result<bool, String> {
     Ok(false)
 }
 
-fn resolve_default_branch(
+fn resolve_registration_default_branch(
     repo: &Repository,
     is_empty: bool,
 ) -> Result<DefaultBranchResolution, String> {
@@ -107,25 +115,29 @@ fn resolve_default_branch(
         return Err("origin did not advertise a default-branch HEAD symref".to_string());
     }
 
+    Ok(resolve_local_default_branch(repo, is_empty))
+}
+
+fn resolve_local_default_branch(repo: &Repository, is_empty: bool) -> DefaultBranchResolution {
     if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
         if let Some(branch) = reference
             .symbolic_target()
             .and_then(|target| target.strip_prefix("refs/remotes/origin/"))
         {
-            return Ok(DefaultBranchResolution {
+            return DefaultBranchResolution {
                 branch: branch.to_string(),
                 source: "origin_head".to_string(),
-            });
+            };
         }
     }
 
     for name in &["main", "master"] {
         let refname = format!("refs/heads/{}", name);
         if repo.find_reference(&refname).is_ok() {
-            return Ok(DefaultBranchResolution {
+            return DefaultBranchResolution {
                 branch: name.to_string(),
                 source: "local_branch".to_string(),
-            });
+            };
         }
     }
 
@@ -138,18 +150,18 @@ fn resolve_default_branch(
                 .symbolic_target()
                 .and_then(|target| target.strip_prefix("refs/heads/"))
             {
-                return Ok(DefaultBranchResolution {
+                return DefaultBranchResolution {
                     branch: branch.to_string(),
                     source: "local_head".to_string(),
-                });
+                };
             }
         }
     }
 
-    Ok(DefaultBranchResolution {
+    DefaultBranchResolution {
         branch: "main".to_string(),
         source: "fallback_main".to_string(),
-    })
+    }
 }
 
 #[tauri::command]
@@ -337,7 +349,8 @@ pub fn git_fetch(repo_path: String, branch: Option<String>) -> Result<(), String
 mod tests {
     use super::{
         git_branch_upstream, git_current_branch, git_default_branch, git_list_base_branches,
-        git_repository_state, parse_remote_base_branches, GitRepositoryState,
+        git_repository_has_commits, git_repository_state, parse_remote_base_branches,
+        GitRepositoryState,
     };
     use crate::commands::git::test_support::{create_commit, TempRepo};
     use git2::Repository;
@@ -428,6 +441,38 @@ mod tests {
                 has_commits: true,
             }
         );
+    }
+
+    #[test]
+    fn ordinary_repository_reads_remain_local_with_an_unavailable_origin() {
+        let temp_repo = TempRepo::new("offline-default-branch");
+        let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
+        let commit_id = create_commit(&repo, &temp_repo.path);
+        let commit = repo
+            .find_commit(commit_id)
+            .expect("commit should be readable");
+        repo.branch("main", &commit, true)
+            .expect("main should be created");
+        repo.remote(
+            "origin",
+            temp_repo
+                .path
+                .join("unavailable-origin")
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .expect("unavailable origin should be configured");
+        drop(commit);
+        drop(repo);
+
+        let repo_path = temp_repo.path.to_string_lossy().into_owned();
+        assert_eq!(
+            git_default_branch(repo_path.clone()).expect("local branch lookup should succeed"),
+            "main"
+        );
+        assert!(git_repository_has_commits(repo_path.clone())
+            .expect("local commit lookup should succeed"));
+        assert!(git_repository_state(repo_path).is_err());
     }
 
     #[test]

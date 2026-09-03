@@ -60,6 +60,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   kill_session: () => ({}),
   git_diff: () => "",
   git_default_branch: () => "main",
+  git_repository_has_commits: () => true,
   git_repository_state: () => ({ defaultBranch: "main", hasCommits: true }),
   git_current_branch: () => null,
   git_list_base_branches: () => ["origin/main", "main"],

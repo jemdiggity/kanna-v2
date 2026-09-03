@@ -126,9 +126,7 @@ describe("useAppTaskCreation", () => {
       if (command === "read_text_file") return "";
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["origin/main"];
-      if (command === "git_repository_state") {
-        return { defaultBranch: "main", hasCommits: true };
-      }
+      if (command === "git_repository_has_commits") return true;
       return "";
     });
   });
@@ -867,9 +865,7 @@ describe("useAppTaskCreation", () => {
 
   it("skips the setup agent when an imported repository already has .kanna", async () => {
     invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
-      if (command === "git_repository_state") {
-        return { defaultBranch: "main", hasCommits: true };
-      }
+      if (command === "git_repository_has_commits") return true;
       if (command === "file_exists" && args?.path === "/repo/.kanna") return true;
       return "";
     });
@@ -885,6 +881,8 @@ describe("useAppTaskCreation", () => {
     await creation.handleImportRepo("/repo", "repo", "main");
 
     expect(store.importRepo).toHaveBeenCalledWith("/repo", "repo", "main");
+    expect(invokeMock).toHaveBeenCalledWith("git_repository_has_commits", { repoPath: "/repo" });
+    expect(invokeMock).not.toHaveBeenCalledWith("git_repository_state", expect.anything());
     expect(invokeMock).toHaveBeenCalledWith("file_exists", { path: "/repo/.kanna" });
     expect(selectedCloudRepoId.value).toBeNull();
     expect(selectedCloudItemId.value).toBeNull();
@@ -895,9 +893,7 @@ describe("useAppTaskCreation", () => {
 
   it("launches the setup agent when an imported repository has no .kanna", async () => {
     invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
-      if (command === "git_repository_state") {
-        return { defaultBranch: "main", hasCommits: true };
-      }
+      if (command === "git_repository_has_commits") return true;
       if (command === "file_exists" && args?.path === "/repo/.kanna") return false;
       return "";
     });
@@ -926,9 +922,7 @@ describe("useAppTaskCreation", () => {
 
   it("guides an imported zero-commit repository without attempting a setup task", async () => {
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "git_repository_state") {
-        return { defaultBranch: "trunk", hasCommits: false };
-      }
+      if (command === "git_repository_has_commits") return false;
       return "";
     });
     const { creation, store, toast } = createTaskCreationHarness();
@@ -945,9 +939,7 @@ describe("useAppTaskCreation", () => {
 
   it("skips the setup agent when a cloned repository already has .kanna", async () => {
     invokeMock.mockImplementation(async (command: string, args?: { path?: string }) => {
-      if (command === "git_repository_state") {
-        return { defaultBranch: "main", hasCommits: true };
-      }
+      if (command === "git_repository_has_commits") return true;
       if (command === "file_exists" && args?.path === "/clone/.kanna") return true;
       return "";
     });
@@ -976,9 +968,7 @@ describe("useAppTaskCreation", () => {
 
   it("guides a newly created zero-commit repository instead of launching a setup task", async () => {
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "git_repository_state") {
-        return { defaultBranch: "main", hasCommits: false };
-      }
+      if (command === "git_repository_has_commits") return false;
       return "";
     });
     const { creation, store, toast } = createTaskCreationHarness();

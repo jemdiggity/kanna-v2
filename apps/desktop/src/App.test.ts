@@ -276,6 +276,7 @@ const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>)
   if (command === "list_dir") return ["default.json"];
   if (command === "read_text_file") return "";
   if (command === "git_default_branch") return "main";
+  if (command === "git_repository_has_commits") return true;
   if (command === "git_repository_state") {
     return { defaultBranch: "main", hasCommits: true };
   }
@@ -1202,6 +1203,7 @@ describe("App", () => {
       if (command === "list_dir") return ["default.json"];
       if (command === "read_text_file") return "";
       if (command === "git_default_branch") return "main";
+      if (command === "git_repository_has_commits") return true;
       if (command === "git_repository_state") {
         return { defaultBranch: "main", hasCommits: true };
       }
@@ -5969,6 +5971,7 @@ describe("App", () => {
       if (command === "list_dir") return ["default.json"];
       if (command === "read_text_file") return "";
       if (command === "git_default_branch") return "main";
+      if (command === "git_repository_has_commits") return true;
       if (command === "git_repository_state") {
         return { defaultBranch: "main", hasCommits: true };
       }
