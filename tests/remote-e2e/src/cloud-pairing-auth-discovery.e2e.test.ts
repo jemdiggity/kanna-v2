@@ -657,15 +657,16 @@ function asDesktopDescriptors(value: unknown): DesktopDescriptor[] {
 }
 
 /**
- * The harness server runs with only its stub `codex` reachable
- * (`serverProviderPath`), so anything describing it must name codex and must
- * not name a provider this host does not also expose in the directories
- * executable resolution probes globally.
+ * The harness server runs with its stub `codex` and `claude` executables
+ * reachable (`serverProviderPath`), so anything describing it must name both
+ * and must not name a provider this host does not also expose in the
+ * directories executable resolution probes globally.
  */
 function expectHarnessAgentProviders(reported: string[] | undefined): void {
   expect(reported).toBeDefined();
   expect(reported).toContain("codex");
-  const unavoidable = new Set(["codex", ...hostInstalledAgentProviders()]);
+  expect(reported).toContain("claude");
+  const unavoidable = new Set(["codex", "claude", ...hostInstalledAgentProviders()]);
   expect(
     (reported ?? []).filter((provider) => !unavoidable.has(provider))
   ).toEqual([]);
