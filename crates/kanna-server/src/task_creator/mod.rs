@@ -75,11 +75,13 @@ pub(crate) use lifecycle::{
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
 pub(crate) use prompt::RevisionRound;
+#[cfg(test)]
+pub(crate) use stages::{prepare_advance_stage_for_api, prepare_stage_completion_for_api};
 pub(crate) use stages::{
-    prepare_advance_stage_for_api, prepare_fresh_restart_after_rejected_resume,
-    prepare_resume_task_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
-    resolve_revision_budget, resolve_revision_limit, resolve_stage_transition,
-    stage_declares_merge_approve_post, RevisionBudget,
+    prepare_advance_stage_for_api_with_trigger, prepare_fresh_restart_after_rejected_resume,
+    prepare_resume_task_for_api, prepare_revision_task_for_api,
+    prepare_stage_completion_for_api_with_trigger, resolve_revision_budget, resolve_revision_limit,
+    resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
 };
 pub(crate) use worktree::{local_branch_exists, resolve_current_source_worktree_branch};
 
@@ -530,6 +532,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
             branch: Some(branch),
             base_ref: source_task.base_ref.as_deref(),
             source_worktree: source_worktree.as_deref(),
+            stage_trigger: "unspecified",
             vars: repo_config.vars.as_ref(),
         },
     );
@@ -639,6 +642,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         &stage_name,
         &workflow_name,
         Some(current_stage.policy.transition.as_str()),
+        "unspecified",
         prompt,
         model,
         effort.clone(),
@@ -776,6 +780,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             &resolved.stage_name,
             &resolved.workflow_name,
             Some(resolved.stage_transition.as_str()),
+            "unspecified",
             resolved.final_prompt,
             resolved.model.clone(),
             resolved.effort.clone(),
@@ -896,6 +901,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         &resolved.stage_name,
         &resolved.workflow_name,
         Some(resolved.stage_transition.as_str()),
+        "unspecified",
         resolved.final_prompt,
         model.clone(),
         effort.clone(),
@@ -982,6 +988,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     source_agent_type: Option<&str>,
     overrides: SpawnAgentOverrides,
     fallback_provider: Option<&str>,
+    trigger: crate::db::StageTrigger,
 ) -> Result<PreparedStageRunSpawn, String> {
     let agent = match target_stage.agent.as_deref() {
         Some(agent_name) => Some(definitions.agent(agent_name)?),
@@ -1125,6 +1132,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             &target_stage.name,
             workflow_name,
             Some(completion_transition.as_str()),
+            trigger.as_str(),
             final_prompt.clone(),
             model.clone(),
             effort.clone(),
@@ -1213,6 +1221,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         model: stage_run_model,
         effort: stage_run_effort,
         completion_transition,
+        trigger,
         feedback,
         provider_session_id,
         resumed_from_run_id,
@@ -1287,6 +1296,7 @@ pub(crate) fn finish_deferred_stage_setup(
         &prepared.run_stage,
         &deferred.workflow_name,
         Some(prepared.completion_transition.as_str()),
+        prepared.trigger.as_str(),
         deferred.final_prompt,
         model.clone(),
         effort.clone(),
@@ -1550,6 +1560,7 @@ fn build_prepared_session(
     stage_name: &str,
     workflow_name: &str,
     stage_transition: Option<&str>,
+    stage_trigger: &str,
     final_prompt: String,
     model: Option<String>,
     effort: Option<String>,
@@ -1623,6 +1634,7 @@ fn build_prepared_session(
                 stage_name,
                 workflow_name,
                 stage_transition,
+                stage_trigger,
                 mcp_config_path.as_deref(),
             );
             let agent_cmd = build_agent_command(
@@ -1685,6 +1697,7 @@ fn build_prepared_session(
                 stage_name,
                 workflow_name,
                 stage_transition,
+                stage_trigger,
                 mcp_config_path.as_deref(),
             );
             (
@@ -2292,6 +2305,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
             branch: base_ref.as_deref(),
             base_ref: base_ref.as_deref(),
             source_worktree: None,
+            stage_trigger: "unspecified",
             vars: repo_config.vars.as_ref(),
         },
     );
@@ -2436,6 +2450,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         &stage_name,
         &workflow_name,
         Some(stage.policy.transition.as_str()),
+        "unspecified",
         final_prompt,
         model,
         effort,
@@ -2955,6 +2970,7 @@ fn resolve_task_spawn(
                     .as_deref()
                     .or(request.base_ref.as_deref()),
                 source_worktree: None,
+                stage_trigger: "unspecified",
                 vars: repo_config.vars.as_ref(),
             },
         )
@@ -3358,6 +3374,7 @@ fn prepare_new_task_session(
         &resolved.stage_name,
         &resolved.workflow_name,
         Some(resolved.stage_transition.as_str()),
+        "unspecified",
         resolved.final_prompt.clone(),
         model.clone(),
         effort.clone(),

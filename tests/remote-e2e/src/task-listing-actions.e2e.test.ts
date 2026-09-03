@@ -328,7 +328,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       harness,
       "POST",
       `/v1/tasks/${advanceTask.taskId}/actions/advance-stage`,
-      null
+      { source: "operator" }
     ));
     expect(advanceResponse.taskId).toBe(advanceTask.taskId);
     await waitForTaskStage(harness, advanceTask.taskId, "review");
@@ -354,6 +354,13 @@ describe("remote task listing, creation, and actions E2E", () => {
       "--verify",
       `refs/heads/task-${advanceTask.taskId}-2`
     ])).toContain(`task-${advanceTask.taskId}-2`);
+    const advanceDetail = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/tasks/${advanceTask.taskId}`,
+      null
+    ));
+    expect(getString(asRecord(advanceDetail.latestRun), "trigger")).toBe("operator");
     const advanceReviewRun = await latestRunRow(harness, advanceTask.taskId);
 
     const successTask = await createScriptedTask(harness, {
@@ -383,7 +390,8 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(await latestRunRow(harness, successTask.taskId)).toMatchObject({
       stage: "review",
       kind: "main",
-      status: "running"
+      status: "running",
+      trigger: "auto"
     });
 
     const failureTask = await createScriptedTask(harness, {
@@ -684,7 +692,7 @@ async function taskRow(harness: RemoteHarness, taskId: string): Promise<JsonReco
 async function latestRunRow(harness: RemoteHarness, taskId: string): Promise<JsonRecord> {
   const rows = await querySql(
     harness,
-    `SELECT id, stage, kind, status, feedback
+    `SELECT id, stage, kind, status, feedback, COALESCE(trigger, 'unspecified') AS trigger
        FROM stage_run
       WHERE task_id = ?1
       ORDER BY started_at DESC, id DESC

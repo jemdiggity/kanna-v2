@@ -246,6 +246,7 @@ describe("buildKannaRuntimeSystemPrompt", () => {
 
     expect(result).toContain("## Kanna Task Environment");
     expect(result).toContain("This session was launched by Kanna");
+    expect(result).toContain("This stage was entered by: unspecified");
     expect(result).toContain("This task's id is in the `KANNA_TASK_ID` environment variable.");
     expect(result).toContain("You are not running inside a Kanna sandbox");
     expect(result).toContain("Prefer the `kanna_*` MCP tools");
@@ -348,11 +349,13 @@ describe("buildKannaRuntimeSystemPrompt", () => {
       stage: "in progress",
       workflow: "default",
       transition: "manual",
+      stageTrigger: "manager",
     });
 
     expect(result).toContain(
       "This session was launched by Kanna as task `task-abc`, stage `in progress` of workflow `default` (transition: `manual`)."
     );
+    expect(result).toContain("This stage was entered by: manager");
   });
 });
 

@@ -66,7 +66,7 @@ describe("remote transport", () => {
       desktopId: "desktop-1",
       method: "POST",
       path: "/v1/tasks/task-1/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -778,7 +778,7 @@ describe("remote transport", () => {
       desktopId: "desktop-1",
       method: "POST",
       path: "/v1/tasks/task-1/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
     expect(invokeDesktop).toHaveBeenNthCalledWith(8, {
       desktopId: "desktop-1",
@@ -915,7 +915,7 @@ describe("remote transport", () => {
       desktopId: "desktop-new-owner",
       method: "POST",
       path: "/v1/tasks/local-task-new/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -1338,7 +1338,7 @@ describe("remote transport", () => {
       desktopId: "desktop-created-here",
       method: "POST",
       path: "/v1/tasks/task-created/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
     expect(listCloudTasks).toHaveBeenCalledTimes(1);
   });
@@ -1404,7 +1404,7 @@ describe("remote transport", () => {
       desktopId: "desktop-created-here",
       method: "POST",
       path: "/v1/tasks/task-created/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
     expect(invokeDesktop).not.toHaveBeenCalledWith(
       expect.objectContaining({ desktopId: "desktop-selected-elsewhere" })
@@ -1459,7 +1459,7 @@ describe("remote transport", () => {
       desktopId: "desktop-created-here",
       method: "POST",
       path: "/v1/tasks/task-created/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -1530,7 +1530,7 @@ describe("remote transport", () => {
       method: "POST",
       path:
         "/v1/tasks/cloud%3Adesktop-created-here%3Arepo-local%3Atask-created/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
     expect(invokeDesktop).not.toHaveBeenCalledWith(
       expect.objectContaining({ desktopId: "desktop-created-here" })
@@ -1573,7 +1573,7 @@ describe("remote transport", () => {
       method: "POST",
       path:
         "/v1/tasks/cloud%3Adesktop-created-here%3Arepo-1%3Atask-created/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -1649,7 +1649,7 @@ describe("remote transport", () => {
       desktopId: "desktop-selected-elsewhere",
       method: "POST",
       path: "/v1/tasks/task-created/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -1778,7 +1778,7 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/task-created/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -1943,7 +1943,7 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-task-1/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -2058,7 +2058,7 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-task-1/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
     expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
       desktopId: "desktop-owner",
@@ -2070,7 +2070,7 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-next/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 
@@ -2113,7 +2113,7 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-next/actions/advance-stage",
-      body: null
+      body: { source: "operator" }
     });
   });
 

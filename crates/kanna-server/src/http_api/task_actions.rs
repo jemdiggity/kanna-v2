@@ -4,7 +4,7 @@ use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
 };
 use super::task_input::submit_task_input;
-use crate::db::Db;
+use crate::db::{Db, StageTrigger};
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -36,6 +36,7 @@ fn resume_action_error_status(error: &str) -> axum::http::StatusCode {
 #[serde(rename_all = "camelCase")]
 pub(super) struct AdvanceStageRequest {
     expected_transition_revision: Option<String>,
+    source: Option<String>,
 }
 
 pub(super) async fn resolve_task_id_for_mutation(
@@ -844,6 +845,15 @@ pub(super) async fn advance_stage(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     payload: Option<Json<AdvanceStageRequest>>,
 ) -> Result<Response, (axum::http::StatusCode, String)> {
+    let payload = payload.map(|Json(payload)| payload);
+    let trigger = match payload
+        .as_ref()
+        .and_then(|payload| payload.source.as_deref())
+    {
+        Some(source) => StageTrigger::from_caller_declared(source)
+            .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?,
+        None => StageTrigger::Unspecified,
+    };
     let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
@@ -855,7 +865,7 @@ pub(super) async fn advance_stage(
     };
 
     if let Some(expected_transition_revision) =
-        payload.and_then(|Json(payload)| payload.expected_transition_revision)
+        payload.and_then(|payload| payload.expected_transition_revision)
     {
         let current_transition_revision = {
             let state = Arc::clone(&state);
@@ -918,9 +928,14 @@ pub(super) async fn advance_stage(
             {
                 return Ok(None);
             }
-            crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
-                .map(Some)
-                .map_err(|e| (stage_action_error_status(&e), e))
+            crate::task_creator::prepare_advance_stage_for_api_with_trigger(
+                &db,
+                &state.config,
+                &task_id,
+                trigger,
+            )
+            .map(Some)
+            .map_err(|e| (stage_action_error_status(&e), e))
         })
         .await?
     };
@@ -1547,6 +1562,7 @@ pub(super) async fn complete_stage(
             let finished_run = Some(crate::db::FinishedStageRun {
                 kind: current_run.kind,
                 completion_transition: current_run.completion_transition,
+                trigger: current_run.trigger,
             });
             db.finish_stage_run(
                 &payload_run_id,
@@ -1602,7 +1618,7 @@ pub(super) async fn complete_stage(
                     format!("db error: {}", e),
                 )
             })?;
-            crate::task_creator::prepare_stage_completion_for_api(
+            crate::task_creator::prepare_stage_completion_for_api_with_trigger(
                 &db,
                 &state.config,
                 &task_id,
@@ -1610,6 +1626,7 @@ pub(super) async fn complete_stage(
                 finished_run
                     .as_ref()
                     .and_then(|run| run.completion_transition.as_deref()),
+                finished_run.as_ref().map(|run| run.trigger.as_str()),
             )
             .map_err(|e| (stage_action_error_status(&e), e))
         })

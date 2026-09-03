@@ -316,13 +316,14 @@
     },
     {
       "name": "kanna_advance_stage",
-      "description": "Schedule a Kanna task to advance to the next workflow stage. The success response means the serialized transition was accepted; execution continues under the server's task mutation lease, and run.finished/stage.changed/task.closed events report the durable outcome or recorded failure. If the current stage declares a post, the post prompt runs in the current agent session first. A transition forks a fresh branch and worktree from the committed tip and starts the next stage's agent there; the task id stays the same. Advancing past the final stage closes the task.",
+      "description": "Schedule a Kanna task to advance to the next workflow stage. The success response means the serialized transition was accepted; execution continues under the server's task mutation lease, and run.finished/stage.changed/task.closed events report the durable outcome or recorded failure. If the current stage declares a post, the post prompt runs in the current agent session first. A transition forks a fresh branch and worktree from the committed tip and starts the next stage's agent there; the task id stays the same. Advancing past the final stage closes the task. Declare source as operator for a human action or manager for a task-manager agent; the server records the declaration without authentication. Omission is recorded as unspecified, while engine policy transitions record auto.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/advance-stage",
       "response": "json",
       "params": [
         { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
-        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
+        { "name": "source", "description": "Who initiated this explicit advance: \"operator\" for a human action or \"manager\" for a task-manager agent. The server records this caller declaration without verifying it. Omit only for an older or genuinely unspecified caller.", "type": "string", "required": false, "location": "body", "enum": ["operator", "manager"] }
       ]
     },
     {
@@ -467,7 +468,7 @@
       "sections": [
         {
           "title": "Definition shape",
-          "body": "A workflow requires `name` and a non-empty `stages` array and should declare `\"$schema\": \"./schema.json\"`. It may define `description`, named `environments` with setup/teardown commands, and `revision_limit` (default 5 agent-requested rounds; `0` means unlimited). Each stage requires `name` and `policy.transition` (`manual` or `auto`), and may set `agent`, `prompt`, `agent_provider`, `environment`, and a `post`. Stage prompts support Kanna runtime variables such as `$TASK_PROMPT`, `$BRANCH`, `$BASE_REF`, `$PREV_RESULT`, and `$PREV_MAIN_RESULT`.",
+          "body": "A workflow requires `name` and a non-empty `stages` array and should declare `\"$schema\": \"./schema.json\"`. It may define `description`, named `environments` with setup/teardown commands, and `revision_limit` (default 5 agent-requested rounds; `0` means unlimited). Each stage requires `name` and `policy.transition` (`manual` or `auto`), and may set `agent`, `prompt`, `agent_provider`, `environment`, and a `post`. Stage prompts support Kanna runtime variables such as `$TASK_PROMPT`, `$BRANCH`, `$BASE_REF`, `$PREV_RESULT`, `$PREV_MAIN_RESULT`, and `$STAGE_TRIGGER` (`auto`, `operator`, `manager`, or `unspecified`).",
           "schemaPaths": []
         },
         {

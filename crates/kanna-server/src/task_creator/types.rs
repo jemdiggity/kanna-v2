@@ -262,6 +262,9 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,
     pub(super) completion_transition: WorkflowStageTransition,
+    /// How this run's stage was entered. This is caller-declared for explicit
+    /// advances and server-owned for automatic policy transitions.
+    pub(super) trigger: crate::db::StageTrigger,
     pub(super) feedback: Option<String>,
     /// The agent CLI's own session id this run starts (fresh assign) or
     /// continues (resume); recorded on the stage run.

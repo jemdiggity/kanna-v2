@@ -498,6 +498,7 @@ pub(super) fn build_kanna_preamble(
     stage_name: &str,
     workflow_name: &str,
     transition: Option<&str>,
+    stage_trigger: &str,
     mcp_config_path: Option<&str>,
 ) -> String {
     let transition = transition.unwrap_or("manual");
@@ -513,6 +514,7 @@ pub(super) fn build_kanna_preamble(
     let rendered = KANNA_TASK_ENVIRONMENT_TEMPLATE
         .trim_end()
         .replace("{{TASK_CONTEXT}}", &task_context)
+        .replace("{{STAGE_TRIGGER}}", stage_trigger)
         .replace("{{COMPLETION}}", completion);
     match mcp_config_path {
         Some(_) => rendered.replace("{{MCP_STATUS}}", &kanna_mcp_launch_line(*provider)),

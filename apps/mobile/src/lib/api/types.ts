@@ -393,6 +393,7 @@ export interface TaskLatestRun {
   id: string;
   stage: string;
   kind: string;
+  trigger?: "auto" | "operator" | "manager" | "unspecified";
   agent?: string | null;
   status: string;
   summary?: string | null;

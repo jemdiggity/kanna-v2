@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "060_repo_default_branch_source");
+    assert_eq!(latest_migration, "061_stage_run_trigger");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -266,6 +266,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(stage_run_sql.contains("resumed_from_run_id"));
     assert!(stage_run_sql.contains("completion_transition"));
     assert!(stage_run_sql.contains("completion_bound"));
+    assert!(stage_run_sql.contains("trigger"));
     let mut transfer_columns_stmt = db
         .conn
         .prepare("PRAGMA table_info(task_transfer)")
@@ -1709,6 +1710,7 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
     assert_eq!(runs[0].status, "running");
     assert_eq!(runs[0].session_id.as_deref(), Some("session-1"));
     assert_eq!(runs[0].completion_transition.as_deref(), Some("auto"));
+    assert_eq!(runs[0].trigger, "unspecified");
     assert!(!runs[0].started_at.is_empty());
 
     let result = r#"{"status":"success","summary":"implemented"}"#;
@@ -1720,6 +1722,20 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
     assert_eq!(runs[0].result.as_deref(), Some(result));
     assert_eq!(runs[0].feedback.as_deref(), Some("implemented"));
     assert!(runs[0].finished_at.is_some());
+}
+
+#[test]
+fn stage_trigger_accepts_only_caller_declared_sources() {
+    assert_eq!(
+        super::StageTrigger::from_caller_declared("operator"),
+        Ok(super::StageTrigger::Operator)
+    );
+    assert_eq!(
+        super::StageTrigger::from_caller_declared("manager"),
+        Ok(super::StageTrigger::Manager)
+    );
+    assert!(super::StageTrigger::from_caller_declared("auto").is_err());
+    assert!(super::StageTrigger::from_caller_declared("unspecified").is_err());
 }
 
 #[test]

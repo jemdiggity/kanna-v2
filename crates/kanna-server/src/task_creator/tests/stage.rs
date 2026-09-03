@@ -159,6 +159,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         Some(branch),
         Some("origin/main"),
         Some(branch),
+        "unspecified",
     )
     .unwrap();
     assert!(prompt.contains("V1_AGENT"), "{prompt}");
@@ -184,6 +185,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         Some("agent"),
         super::super::SpawnAgentOverrides::default(),
         Some("claude"),
+        crate::db::StageTrigger::Unspecified,
     )
     .unwrap();
     assert_eq!(run.env.get("V1_ENV").map(String::as_str), Some("yes"));
@@ -479,6 +481,7 @@ async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
         model: None,
         effort: None,
         completion_transition: WorkflowStageTransition::Manual,
+        trigger: crate::db::StageTrigger::Unspecified,
         feedback: None,
         provider_session_id: None,
         resumed_from_run_id: None,
@@ -960,6 +963,7 @@ fn prepare_advance_stage_uses_stored_workflow_snapshot_for_existing_task() {
 
     assert_eq!(run.task_id, "task-1");
     assert_eq!(run.next_stage, "review");
+    assert_eq!(run.trigger, crate::db::StageTrigger::Unspecified);
     match run.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
@@ -2455,6 +2459,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
 
     assert_eq!(run.task_id, "task-1");
     assert_eq!(run.next_stage, "pr");
+    assert_eq!(run.trigger, crate::db::StageTrigger::Auto);
     // The auto transition forks; $BRANCH resolves to the fork (the branch
     // the next agent actually works on) while $SOURCE_WORKTREE still points
     // at the previous stage's worktree.
@@ -2884,6 +2889,7 @@ fn stage_completion_of_post_run_swaps_past_manual_gate() {
             ),
         };
     assert_eq!(run.next_stage, "pr");
+    assert_eq!(run.trigger, crate::db::StageTrigger::Unspecified);
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -2919,7 +2925,13 @@ fn prepare_revision_completion_uses_run_transition() {
     let automatic =
         super::prepare_stage_completion_for_api(&db, &config, "task-1", Some("main"), Some("auto"))
             .unwrap();
-    assert!(matches!(automatic, Some(PreparedStageTransition::Post(_))));
+    let automatic = automatic.unwrap();
+    match automatic {
+        PreparedStageTransition::Post(post) => {
+            assert_eq!(post.fallback.trigger, crate::db::StageTrigger::Auto)
+        }
+        _ => unreachable!(),
+    }
 
     let manual = super::prepare_stage_completion_for_api(
         &db,
@@ -2930,6 +2942,46 @@ fn prepare_revision_completion_uses_run_transition() {
     )
     .unwrap();
     assert!(manual.is_none());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn post_completion_preserves_declared_advance_trigger() {
+    let repo_root = init_git_repo("post-completion-preserves-trigger");
+    write_post_workflow_fixtures(&repo_root);
+    let config = test_config("post-completion-preserves-trigger");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_workflow_task(&config, &db, &repo_root);
+
+    let post = match super::super::prepare_advance_stage_for_api_with_trigger(
+        &db,
+        &config,
+        "task-1",
+        crate::db::StageTrigger::Manager,
+    )
+    .unwrap()
+    {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    assert_eq!(post.fallback.trigger, crate::db::StageTrigger::Manager);
+
+    let next = super::super::prepare_stage_completion_for_api_with_trigger(
+        &db,
+        &config,
+        "task-1",
+        Some("post"),
+        None,
+        Some(post.fallback.trigger.as_str()),
+    )
+    .unwrap();
+    match next {
+        Some(PreparedStageTransition::Run(run)) => {
+            assert_eq!(run.trigger, crate::db::StageTrigger::Manager)
+        }
+        _ => panic!("expected post completion to spawn next stage"),
+    }
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

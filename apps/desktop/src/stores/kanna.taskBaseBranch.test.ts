@@ -2603,7 +2603,11 @@ describe("kanna store task base branch integration", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-existing/actions/advance-stage",
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "operator" }),
+      },
     );
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("git_worktree_add", expect.anything());
   });
@@ -2718,7 +2722,11 @@ describe("kanna store task base branch integration", () => {
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-source/actions/advance-stage",
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "operator" }),
+      },
     );
     expect(store.currentItem?.stage).toBe("review");
     expect(store.sortedItemsForCurrentRepo.find((item) => item.id === "item-source")?.stage).toBe("review");

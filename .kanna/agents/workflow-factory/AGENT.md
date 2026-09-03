@@ -64,6 +64,7 @@ When `.kanna/workflows/schema.json` exists in this repo, read it before writing.
 | `$SOURCE_WORKTREE` | The previous stage's worktree path |
 | `$PREV_RESULT` | The latest finished run's result of any kind — after a stage with a post, that is the post's result |
 | `$PREV_MAIN_RESULT` | The previous stage agent's own run result, skipping posts — use this when a stage must read what the previous stage agent reported |
+| `$STAGE_TRIGGER` | How the current stage was entered: `auto`, `operator`, `manager`, or `unspecified` |
 | `$KANNA_TASK_ID` | Resolved from the session environment at runtime |
 
 ## Built-in Agents

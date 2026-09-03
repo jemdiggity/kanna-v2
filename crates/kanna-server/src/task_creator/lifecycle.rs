@@ -521,10 +521,11 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     }
     match &prepared.workspace {
         PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => {
-            if let Err(error) = db.update_pipeline_item_stage_and_branch(
+            if let Err(error) = db.update_pipeline_item_stage_and_branch_with_trigger(
                 &task_id,
                 &prepared.next_stage,
                 &workspace.branch,
+                prepared.trigger,
             ) {
                 if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
                     if let Err(kill_error) =
@@ -549,7 +550,11 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             .map_err(|e| format!("db error: {}", e))?;
         }
         PreparedRunWorkspace::Current => {
-            if let Err(error) = db.update_pipeline_item_stage(&task_id, &prepared.next_stage) {
+            if let Err(error) = db.update_pipeline_item_stage_with_trigger(
+                &task_id,
+                &prepared.next_stage,
+                prepared.trigger,
+            ) {
                 if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
                     if let Err(kill_error) =
                         kill_session_replacing(daemon, replacements, &session_id).await
@@ -586,7 +591,7 @@ fn record_stage_transition_run(
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {e}"))?;
     db.with_immediate_transaction(|db| -> rusqlite::Result<()> {
-        db.insert_stage_run_with_completion_binding(
+        db.insert_stage_run_with_completion_binding_and_trigger(
             NewStageRun {
                 id: run_id,
                 task_id: &prepared.task_id,
@@ -606,6 +611,7 @@ fn record_stage_transition_run(
             },
             Some(prepared.completion_transition.as_str()),
             true,
+            Some(prepared.trigger),
         )?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
             db.set_stage_run_resume_fallback_reason(run_id, reason)?;
@@ -638,7 +644,7 @@ fn record_stage_transition_failure(
             .map_err(|db_error| format!("db error: {db_error}"))?;
         let run_id = generate_stage_run_id(&prepared.task_id);
         let result = format!("failed to start stage {}: {error}", prepared.run_stage);
-        db.insert_stage_run_with_completion_transition(
+        db.insert_stage_run_with_completion_binding_and_trigger(
             NewStageRun {
                 id: &run_id,
                 task_id: &prepared.task_id,
@@ -657,6 +663,8 @@ fn record_stage_transition_failure(
                 resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
             },
             Some(prepared.completion_transition.as_str()),
+            false,
+            Some(prepared.trigger),
         )
         .map_err(|db_error| format!("db error: {db_error}"))?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
@@ -958,7 +966,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             ),
         };
         let run_id = generate_stage_run_id(&task_id);
-        db.insert_stage_run_with_completion_binding(
+        db.insert_stage_run_with_completion_binding_and_trigger(
             NewStageRun {
                 id: &run_id,
                 task_id: &task_id,
@@ -978,6 +986,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             },
             Some(prepared.fallback.completion_transition.as_str()),
             true,
+            Some(prepared.fallback.trigger),
         )
         .map_err(|e| format!("db error: {}", e))?;
         if let Some(inherited_run_id) = inherited_run_id.as_deref() {

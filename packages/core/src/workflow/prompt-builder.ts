@@ -14,6 +14,8 @@ export interface KannaRuntimeContext {
   workflow?: string;
   /** Stage transition policy ("manual" | "auto"); defaults to manual like the Rust side. */
   transition?: string;
+  /** How this stage was entered; legacy and initial contexts default to unspecified. */
+  stageTrigger?: "auto" | "operator" | "manager" | "unspecified";
   /** Agent provider, used with mcpConfigured to describe MCP registration. */
   provider?: string;
   /** True when this session was launched with the Kanna MCP server registered. */
@@ -27,6 +29,8 @@ export interface KannaRuntimeContext {
 export const KANNA_TASK_ENVIRONMENT_TEMPLATE = `## Kanna Task Environment
 
 {{TASK_CONTEXT}}
+
+This stage was entered by: {{STAGE_TRIGGER}}
 
 Kanna is a desktop app that orchestrates coding agent tasks. Each task moves through the stages of a workflow (for example: in progress -> review -> pr). The task itself is durable — its id, run history, and blockers survive every stage, and \`KANNA_TASK_ID\` always holds that id — but each stage transition forks a fresh workspace: a new branch and worktree named \`task-<taskid>-<n>\` cut from the previous stage's committed tip. A workspace is an ephemeral manifestation of the task: the name carries the durable task id plus a per-workspace counter (the creation workspace is plain \`task-<taskid>\`). Only committed work crosses a stage boundary; uncommitted changes stay behind in the old worktree. You are the agent for the current stage. Do not move the task between stages yourself unless a prompt explicitly asks you to.
 
@@ -106,6 +110,7 @@ export function buildKannaRuntimeSystemPrompt(context?: KannaRuntimeContext): st
     "{{TASK_CONTEXT}}",
     buildKannaTaskContextLine(context)
   )
+    .replace("{{STAGE_TRIGGER}}", context?.stageTrigger ?? "unspecified")
     .replace(mcpStatus ? "{{MCP_STATUS}}" : "- {{MCP_STATUS}}\n", mcpStatus ?? "")
     .replace("{{COMPLETION}}", buildKannaCompletionLine(context));
 }

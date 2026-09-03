@@ -13,6 +13,7 @@ pub(super) fn build_target_stage_prompt(
     branch: Option<&str>,
     base_ref: Option<&str>,
     source_worktree_branch: Option<&str>,
+    stage_trigger: &str,
 ) -> Result<String, String> {
     build_target_stage_prompt_with_instructions(
         definitions,
@@ -24,6 +25,7 @@ pub(super) fn build_target_stage_prompt(
         branch,
         base_ref,
         source_worktree_branch,
+        stage_trigger,
         None,
     )
 }
@@ -39,6 +41,7 @@ pub(super) fn build_target_stage_prompt_with_instructions(
     branch: Option<&str>,
     base_ref: Option<&str>,
     source_worktree_branch: Option<&str>,
+    stage_trigger: &str,
     additional_agent_instructions: Option<&str>,
 ) -> Result<String, String> {
     let source_worktree =
@@ -50,6 +53,7 @@ pub(super) fn build_target_stage_prompt_with_instructions(
         branch,
         base_ref,
         source_worktree: source_worktree.as_deref(),
+        stage_trigger,
         vars: definitions.config().vars.as_ref(),
     };
     if let Some(agent_name) = stage.agent.as_deref() {
@@ -97,6 +101,9 @@ pub(super) struct PromptContext<'a> {
     pub(super) branch: Option<&'a str>,
     pub(super) base_ref: Option<&'a str>,
     pub(super) source_worktree: Option<&'a str>,
+    /// How this stage was entered: engine policy, declared operator/manager,
+    /// or unspecified for a legacy/undeclared caller.
+    pub(super) stage_trigger: &'a str,
     /// Repo-declared config vars (`.kanna/config.json` `vars`), substituted
     /// in the same single pass as the runtime bindings below.
     pub(super) vars: Option<&'a HashMap<String, String>>,
@@ -111,6 +118,7 @@ const RESERVED_PROMPT_VARS: &[&str] = &[
     "PREV_MAIN_RESULT",
     "PREV_RESULT",
     "SOURCE_WORKTREE",
+    "STAGE_TRIGGER",
     "TASK_PROMPT",
 ];
 
@@ -125,6 +133,7 @@ fn prompt_var_value<'a>(name: &str, context: &'a PromptContext<'_>) -> Option<&'
         "BRANCH" => Some(context.branch.unwrap_or("")),
         "BASE_REF" => Some(context.base_ref.unwrap_or("")),
         "SOURCE_WORKTREE" => Some(context.source_worktree.unwrap_or("")),
+        "STAGE_TRIGGER" => Some(context.stage_trigger),
         _ if RESERVED_PROMPT_VARS.contains(&name) => None,
         _ => context
             .vars

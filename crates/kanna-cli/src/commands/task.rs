@@ -665,10 +665,11 @@ pub(crate) async fn run(command: TaskCommands) {
         }
         TaskCommands::AdvanceStage {
             task_id,
+            source,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let advanced = advance_stage_via_api(&base_url, &task_id)
+            let advanced = advance_stage_via_api(&base_url, &task_id, source.as_deref())
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");

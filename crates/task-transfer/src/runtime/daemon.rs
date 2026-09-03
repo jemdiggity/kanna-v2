@@ -321,13 +321,10 @@ pub(super) async fn advance_owner_task_stage(
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
-    let body = expected_transition_revision
-        .map(|revision| {
-            serde_json::json!({
-                "expectedTransitionRevision": revision,
-            })
-        })
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut body = serde_json::json!({ "source": "operator" });
+    if let Some(revision) = expected_transition_revision {
+        body["expectedTransitionRevision"] = serde_json::Value::String(revision.to_string());
+    }
     post_local_kanna_task_action(port, task_id, "advance-stage", &body).await
 }
 

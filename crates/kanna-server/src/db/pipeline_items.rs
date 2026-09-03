@@ -1283,7 +1283,17 @@ impl Db {
         })
     }
 
+    #[cfg(test)]
     pub fn update_pipeline_item_stage(&self, id: &str, stage: &str) -> Result<(), rusqlite::Error> {
+        self.update_pipeline_item_stage_with_trigger(id, stage, super::StageTrigger::Unspecified)
+    }
+
+    pub fn update_pipeline_item_stage_with_trigger(
+        &self,
+        id: &str,
+        stage: &str,
+        trigger: super::StageTrigger,
+    ) -> Result<(), rusqlite::Error> {
         let from_stage = self.pipeline_item_stage(id)?;
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
@@ -1292,7 +1302,7 @@ impl Db {
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        self.append_stage_changed_event(id, from_stage.as_deref(), stage, None)
+        self.append_stage_changed_event(id, from_stage.as_deref(), stage, None, trigger)
     }
 
     /// One `stage.changed` event per real transition. A rewrite to the stage a
@@ -1304,6 +1314,7 @@ impl Db {
         from_stage: Option<&str>,
         to_stage: &str,
         branch: Option<&str>,
+        trigger: super::StageTrigger,
     ) -> Result<(), rusqlite::Error> {
         if from_stage == Some(to_stage) {
             return Ok(());
@@ -1315,6 +1326,7 @@ impl Db {
                 "fromStage": from_stage,
                 "toStage": to_stage,
                 "branch": branch,
+                "trigger": trigger.as_str(),
             }),
         )
     }
@@ -1437,11 +1449,12 @@ impl Db {
 
     /// Stage transition into a freshly forked workspace: the task's current
     /// branch moves with the stage.
-    pub fn update_pipeline_item_stage_and_branch(
+    pub fn update_pipeline_item_stage_and_branch_with_trigger(
         &self,
         id: &str,
         stage: &str,
         branch: &str,
+        trigger: super::StageTrigger,
     ) -> Result<(), rusqlite::Error> {
         let from_stage = self.pipeline_item_stage(id)?;
         let rows_affected = self.conn.execute(
@@ -1451,7 +1464,7 @@ impl Db {
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        self.append_stage_changed_event(id, from_stage.as_deref(), stage, Some(branch))
+        self.append_stage_changed_event(id, from_stage.as_deref(), stage, Some(branch), trigger)
     }
 
     /// Point the task's workspace identity at the branch that actually holds

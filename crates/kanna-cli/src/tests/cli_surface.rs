@@ -85,6 +85,34 @@ fn dependent_tasks_exist_requires_task_id() {
 }
 
 #[test]
+fn advance_stage_accepts_only_declared_operator_or_manager_sources() {
+    let manager = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "advance-stage",
+        "--task-id",
+        "task-1",
+        "--source",
+        "manager",
+    ]);
+    assert!(manager.is_ok());
+
+    let invalid = match crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "advance-stage",
+        "--task-id",
+        "task-1",
+        "--source",
+        "auto",
+    ]) {
+        Ok(_) => panic!("auto is server-owned"),
+        Err(error) => error,
+    };
+    assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
+}
+
+#[test]
 fn parses_new_repo_and_task_subcommands() {
     let cli = crate::Cli::try_parse_from([
         "kanna-cli",

@@ -604,7 +604,7 @@ describe("createDesktopRelayTerminalClient", () => {
     expect(advanceRequest).toMatchObject({
       type: "request",
       method: "POST",
-      body: { expectedTransitionRevision: "run-1" },
+      body: { source: "operator", expectedTransitionRevision: "run-1" },
     });
     expect(markReadRequest).toMatchObject({
       type: "request",

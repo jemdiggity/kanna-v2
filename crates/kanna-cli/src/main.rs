@@ -452,6 +452,10 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         task_id: String,
 
+        /// Declared transition source: "operator" or "manager"
+        #[arg(long, value_parser = ["operator", "manager"])]
+        source: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,

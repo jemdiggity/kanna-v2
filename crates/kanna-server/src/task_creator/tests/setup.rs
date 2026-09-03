@@ -93,6 +93,7 @@ fn pty_setup_keeps_sidecar_provider_directory_as_path_fallback() {
         "in progress",
         "default",
         Some("manual"),
+        "unspecified",
         "Run Codex".to_string(),
         None,
         None,
