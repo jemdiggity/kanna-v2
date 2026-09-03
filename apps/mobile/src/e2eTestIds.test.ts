@@ -62,6 +62,9 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.accountSheet).toBe("mobile.account-sheet");
     expect(MOBILE_E2E_IDS.accountCloseButton).toBe("mobile.account-close");
     expect(MOBILE_E2E_IDS.accountMachinesButton).toBe("mobile.account-machines");
+    expect(MOBILE_E2E_IDS.accountRelayInput).toBe("mobile.account-relay-input");
+    expect(MOBILE_E2E_IDS.accountRelaySaveButton).toBe("mobile.account-relay-save");
+    expect(MOBILE_E2E_IDS.accountRelayResetButton).toBe("mobile.account-relay-reset");
     expect(MOBILE_E2E_IDS.machinesScreen).toBe("mobile.machines-screen");
     expect(MOBILE_E2E_IDS.machinesBackButton).toBe("mobile.machines-back");
     expect(MOBILE_E2E_IDS.machinesAddButton).toBe("mobile.machines-add");

@@ -298,6 +298,59 @@ describe("createAppModel", () => {
     ).toBe("wss://relay.env.example");
   });
 
+  it("closes and replaces relay clients when the persisted endpoint changes", async () => {
+    const relayClients: Array<{ relayUrl: string; client: RelayDesktopClient }> = [];
+    const save = vi.fn().mockResolvedValue(undefined);
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          mobileDeviceId: null,
+          customRelayUrl: "wss://relay.home.example",
+          selectedDesktopId: null,
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks"
+        }),
+        save
+      },
+      authSession: createSignedInAuthSession(),
+      options: {
+        relayUrl: "wss://relay.default.example",
+        taskIndex: {
+          listDesktops: vi.fn().mockResolvedValue([]),
+          listRecentTasks: vi.fn().mockResolvedValue([]),
+          subscribeRecentTasks: vi.fn(() => () => undefined)
+        },
+        createRelayClient: ({ relayUrl }) => {
+          const client = createRelayClientMock();
+          relayClients.push({ relayUrl, client });
+          return client;
+        },
+        bonjourBrowser: createStaticBonjourBrowser([])
+      }
+    });
+
+    await model.initialize();
+    expect(relayClients.map(({ relayUrl }) => relayUrl)).toEqual([
+      "wss://relay.default.example",
+      "wss://relay.home.example"
+    ]);
+    expect(relayClients[0]?.client.close).toHaveBeenCalledOnce();
+
+    await model.setCustomRelayUrl("wss://relay.changed.example/socket");
+    expect(relayClients.at(-1)?.relayUrl)
+      .toBe("wss://relay.changed.example/socket");
+    expect(relayClients[1]?.client.close).toHaveBeenCalledOnce();
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+      customRelayUrl: "wss://relay.changed.example/socket"
+    }));
+
+    await model.setCustomRelayUrl(null);
+    expect(relayClients.at(-1)?.relayUrl).toBe("wss://relay.default.example");
+    expect(relayClients[2]?.client.close).toHaveBeenCalledOnce();
+  });
+
   it("parses the force-cloud override from Expo public env", () => {
     expect(resolveForceCloud({ EXPO_PUBLIC_KANNA_FORCE_CLOUD: "1" })).toBe(true);
     expect(resolveForceCloud({ EXPO_PUBLIC_KANNA_FORCE_CLOUD: "false" })).toBe(false);

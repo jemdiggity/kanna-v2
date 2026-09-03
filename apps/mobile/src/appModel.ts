@@ -47,6 +47,11 @@ import {
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
 import { readKannaExpoExtra } from "./mobileEnvironment";
+import {
+  normalizeCustomRelayUrl,
+  resolveRelayUrl,
+  type ExpoRelayEnv
+} from "./relaySettings";
 import type {
   DesktopSummary,
   PushPairingMaterial,
@@ -58,19 +63,14 @@ import {
   type AnonymousPushBindingCoordinator
 } from "./lib/notifications/mobilePush";
 
-const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 const CLOUD_TASK_RECOVERY_INITIAL_RETRY_MS = 1_000;
 const CLOUD_TASK_RECOVERY_MAX_RETRY_MS = 30_000;
 
-interface ExpoPublicEnv {
-  EXPO_PUBLIC_KANNA_RELAY_URL?: string;
+interface ExpoPublicEnv extends ExpoRelayEnv {
   EXPO_PUBLIC_KANNA_FORCE_CLOUD?: string;
 }
 
-interface RelayUrlOptions {
-  dev?: boolean;
-  extraRelayUrl?: string | null;
-}
+export { resolveRelayUrl } from "./relaySettings";
 
 export interface AppModel {
   client: KannaClient;
@@ -78,6 +78,8 @@ export interface AppModel {
   initialize(): Promise<void>;
   getAuthIdToken(forceRefresh?: boolean): Promise<string | null>;
   sessionStore: SessionStore;
+  defaultRelayUrl: string | null;
+  setCustomRelayUrl(relayUrl: string | null): Promise<void>;
   setForceCloud(enabled: boolean): void;
   setForeground?(foreground: boolean): void;
   anonymousPushBindingCoordinator: AnonymousPushBindingCoordinator;
@@ -122,25 +124,6 @@ function isDevRuntime(): boolean {
   return (globalThis as { __DEV__?: boolean }).__DEV__ === true;
 }
 
-export function resolveRelayUrl(
-  env: ExpoPublicEnv = readExpoPublicEnv(),
-  options: RelayUrlOptions = {},
-): string | null {
-  if (env.EXPO_PUBLIC_KANNA_RELAY_URL !== undefined) {
-    const relayUrl = env.EXPO_PUBLIC_KANNA_RELAY_URL.trim();
-    return relayUrl && relayUrl.length > 0 ? relayUrl : null;
-  }
-
-  const extraRelayUrl = normalizeOptionalString(options.extraRelayUrl);
-  if (extraRelayUrl) {
-    return extraRelayUrl;
-  }
-
-  if (options.dev ?? isDevRuntime()) return null;
-
-  return PRODUCTION_RELAY_URL;
-}
-
 export function resolveForceCloud(env: ExpoPublicEnv = readExpoPublicEnv()): boolean {
   const rawValue = env.EXPO_PUBLIC_KANNA_FORCE_CLOUD?.trim().toLowerCase();
   return rawValue === "1" || rawValue === "true" || rawValue === "yes";
@@ -175,6 +158,10 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     (request, init) => fetchImpl(request, init)
   );
   const extra = readKannaExpoExtra(readExpoConfig());
+  const defaultRelayUrl = options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
+    dev: isDevRuntime(),
+    extraRelayUrl: extra?.relayUrl
+  });
   let forceCloud = options.forceCloud ?? resolveForceCloud();
   // Lazily create the cloud task index only when the live subscription is
   // actually used (sign-in time, when Firebase is initialized). Creating it
@@ -293,9 +280,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         });
       },
       onTaskRoutesChanged: publishTaskRouteChange,
-      relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
-        extraRelayUrl: extra?.relayUrl
-      }),
+      relayUrl: sessionStore.getState().customRelayUrl ?? defaultRelayUrl,
       taskIndex: options.taskIndex,
       desktopRepoWaitMs: options.desktopRepoWaitMs
     });
@@ -719,7 +704,15 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       await controller.bootstrap();
     },
     sessionStore,
+    defaultRelayUrl,
     anonymousPushBindingCoordinator,
+    async setCustomRelayUrl(relayUrl) {
+      const normalized = relayUrl === null ? null : normalizeCustomRelayUrl(relayUrl);
+      if (sessionStore.getState().customRelayUrl === normalized) return;
+      sessionStore.setCustomRelayUrl(normalized);
+      replaceActiveClient();
+      await persistContext();
+    },
     setForceCloud(enabled) {
       forceCloud = enabled;
       replaceActiveClient();

@@ -217,6 +217,8 @@ function createModel() {
     initialize: vi.fn().mockResolvedValue(undefined),
     navigator: { tabs: [], utilityActions: [] },
     sessionStore,
+    defaultRelayUrl: "wss://relay.default.example",
+    setCustomRelayUrl: vi.fn().mockResolvedValue(undefined),
     setForceCloud: vi.fn(),
     setForeground: vi.fn()
   } as unknown as AppModel;
@@ -705,6 +707,22 @@ describe("App component wiring", () => {
 
     expect(model.setForceCloud).toHaveBeenCalledWith(true);
     expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("routes relay setting changes through the app model", async () => {
+    const { model, sessionStore } = createModel();
+    sessionStore.setCustomRelayUrl("wss://relay.current.example");
+    const renderer = await mountModel(model);
+    const accountSheet = renderer.root.findByType("AccountSheet");
+
+    expect(accountSheet.props).toMatchObject({
+      customRelayUrl: "wss://relay.current.example",
+      defaultRelayUrl: "wss://relay.default.example"
+    });
+    await accountSheet.props.onSaveCustomRelayUrl("wss://relay.next.example");
+    expect(model.setCustomRelayUrl).toHaveBeenCalledWith(
+      "wss://relay.next.example"
+    );
   });
 
   it.each(["idle", "error"] as const)(

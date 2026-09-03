@@ -135,6 +135,7 @@ function AppContent() {
   const machineSummary = useMemo(() => summarizeMachines(machines), [machines]);
   const mobileExtra = readKannaExpoExtra(readExpoConfig());
   const subscriptionUrl = resolveAccountPortalUrl(mobileExtra?.appEnv);
+  const effectiveRelayUrl = state.customRelayUrl ?? model.defaultRelayUrl;
   const e2eTaskSnapshotMarker =
     process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1"
       ? state.recentTasks
@@ -391,10 +392,9 @@ function AppContent() {
     ) {
       return;
     }
-    const mobileExtra = readKannaExpoExtra(readExpoConfig());
-    const relayUrl = mobileExtra?.relayUrl
+    const relayUrl = effectiveRelayUrl
       ?? anonymousPushPairings[0]?.desktopPushIdentity.relayUrl;
-    if (!relayUrl || mobileExtra?.appEnv === "dev") return;
+    if (!relayUrl || (mobileExtra?.appEnv === "dev" && !state.customRelayUrl)) return;
 
     let disposed = false;
     let stop: () => void = () => undefined;
@@ -426,8 +426,10 @@ function AppContent() {
     };
   }, [
     anonymousPushPairingKey,
+    effectiveRelayUrl,
     model,
     state.auth.status,
+    state.customRelayUrl,
     state.mobileDeviceId
   ]);
   return (
@@ -490,6 +492,8 @@ function AppContent() {
         ) : null}
         <AccountSheet
           auth={state.auth}
+          customRelayUrl={state.customRelayUrl}
+          defaultRelayUrl={model.defaultRelayUrl}
           machineCount={machineSummary.total}
           availableMachineCount={machineSummary.available}
           quickRepliesReady={quickRepliesHydrated}
@@ -518,6 +522,7 @@ function AppContent() {
           onSignOut={() => {
             void controller.signOut();
           }}
+          onSaveCustomRelayUrl={(relayUrl) => model.setCustomRelayUrl(relayUrl)}
           subscriptionUrl={subscriptionUrl}
           onDeleteAccount={async () => {
             await requestMobileAccountDeletion();

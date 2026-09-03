@@ -46,6 +46,34 @@ describe("createSessionPersistence", () => {
     });
   });
 
+  it("round-trips a valid custom relay and drops an invalid stored endpoint", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    const context = {
+      selectedDesktopId: null,
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks" as const,
+      mobileDeviceId: null
+    };
+
+    await persistence.save({
+      ...context,
+      customRelayUrl: "wss://relay.home.example/socket"
+    });
+    await expect(persistence.load()).resolves.toMatchObject({
+      customRelayUrl: "wss://relay.home.example/socket"
+    });
+
+    await storage.setItem("kanna.mobile.context.v1", JSON.stringify({
+      ...context,
+      customRelayUrl: "ws://insecure.example"
+    }));
+    await expect(persistence.load()).resolves.toMatchObject({
+      customRelayUrl: null
+    });
+  });
+
   it("round-trips a valid pending task creation attempt", async () => {
     const storage = createMemoryStorage();
     const persistence = createSessionPersistence(storage);

@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 
 const reactState = vi.hoisted(() => ({
   index: 0,
@@ -165,6 +166,59 @@ function textContent(node: ElementNode | ElementNode[] | string | null | undefin
 }
 
 describe("AccountSheet", () => {
+  it("validates, saves, indicates, and resets a custom relay", async () => {
+    if (!AccountSheet) throw new Error("AccountSheet was not loaded");
+    const onSaveCustomRelayUrl = vi.fn().mockResolvedValue(undefined);
+    const props = {
+      auth: { status: "signedOut" as const },
+      machineCount: 0,
+      availableMachineCount: 0,
+      customRelayUrl: null,
+      defaultRelayUrl: "wss://relay.default.example",
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onCreateAccount: vi.fn(),
+      onRefreshAccount: vi.fn(),
+      onSignOut: vi.fn(),
+      onSaveCustomRelayUrl,
+      subscriptionUrl: "https://portal.example.test/subscribe"
+    };
+
+    let tree = AccountSheet(props) as ElementNode;
+    findNodeByTestId(tree, MOBILE_E2E_IDS.accountRelayInput)?.props
+      ?.onChangeText?.("http://relay.home.example");
+    reactState.index = 0;
+    tree = AccountSheet(props) as ElementNode;
+    expect(textContent(findNodeByTestId(tree, MOBILE_E2E_IDS.accountRelayError)))
+      .toContain("wss://");
+    expect(findNodeByTestId(tree, MOBILE_E2E_IDS.accountRelaySaveButton)?.props?.disabled)
+      .toBe(true);
+
+    findNodeByTestId(tree, MOBILE_E2E_IDS.accountRelayInput)?.props
+      ?.onChangeText?.(" wss://relay.home.example/socket ");
+    reactState.index = 0;
+    tree = AccountSheet(props) as ElementNode;
+    findNodeByTestId(tree, MOBILE_E2E_IDS.accountRelaySaveButton)?.props?.onPress?.();
+    await Promise.resolve();
+    expect(onSaveCustomRelayUrl).toHaveBeenCalledWith(
+      "wss://relay.home.example/socket"
+    );
+
+    reactState.index = 0;
+    tree = AccountSheet({
+      ...props,
+      customRelayUrl: "wss://relay.home.example/socket"
+    }) as ElementNode;
+    expect(textContent(tree)).toContain("Using custom relay");
+    findNodeByTestId(tree, MOBILE_E2E_IDS.accountRelayResetButton)?.props?.onPress?.();
+    await Promise.resolve();
+    expect(onSaveCustomRelayUrl).toHaveBeenLastCalledWith(null);
+  });
+
   it("creates an account with the entered email and password", () => {
     if (!AccountSheet) throw new Error("AccountSheet was not loaded");
     const onCreateAccount = vi.fn();

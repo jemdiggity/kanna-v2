@@ -9,11 +9,13 @@ import type {
   PushPairingCertificate
 } from "../lib/api/types";
 import { isAgentProvider } from "@kanna/agent-protocol";
+import { normalizePersistedCustomRelayUrl } from "../relaySettings";
 
 const MOBILE_CONTEXT_STORAGE_KEY = "kanna.mobile.context.v1";
 
 export interface PersistedSessionContext {
   mobileDeviceId: string | null;
+  customRelayUrl?: string | null;
   selectedDesktopId: string | null;
   selectedRepoId: string | null;
   selectedTaskId: string | null;
@@ -101,6 +103,7 @@ function parsePersistedSessionContext(
       mobileDeviceId: isNonBlankString(parsed.mobileDeviceId)
         ? parsed.mobileDeviceId.trim()
         : null,
+      customRelayUrl: normalizePersistedCustomRelayUrl(parsed.customRelayUrl),
       selectedDesktopId: normalizeNullableString(parsed.selectedDesktopId),
       selectedRepoId: normalizeNullableString(parsed.selectedRepoId),
       selectedTaskId: normalizeNullableString(parsed.selectedTaskId),
