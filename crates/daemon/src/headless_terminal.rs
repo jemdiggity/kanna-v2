@@ -924,6 +924,20 @@ fn claude_lines_have_active_subagent_footer(lines: &[String]) -> bool {
             .any(|line| line_starts_with_prompt(line, &[CLAUDE_IDLE_PROMPT]))
 }
 
+/// Claude draws the composer above a divider and its mode/status bar. The
+/// composer therefore is not generally the last meaningful row, even though
+/// it is the positive proof that the turn has parked. Only accept it when
+/// everything below the last composer is measured provider chrome; busy and
+/// waiting markers retain priority in [`claude_status_from_lines`].
+fn claude_lines_have_parked_composer(lines: &[String]) -> bool {
+    let Some(composer_index) = composer_index_from_lines(lines, AgentProvider::Claude) else {
+        return false;
+    };
+    lines[composer_index + 1..]
+        .iter()
+        .all(|line| line_is_provider_chrome(line, AgentProvider::Claude))
+}
+
 fn claude_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
     if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
         return Some(SessionStatus::Waiting);
@@ -937,7 +951,7 @@ fn claude_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
     if lines.iter().any(|line| line_is_selected_menu_option(line)) {
         return Some(SessionStatus::Waiting);
     }
-    if line_starts_with_prompt(last_non_empty_line(lines), &[CLAUDE_IDLE_PROMPT]) {
+    if claude_lines_have_parked_composer(lines) {
         return Some(SessionStatus::Idle);
     }
 
@@ -2460,7 +2474,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_permission_footer_without_interrupt_marker_does_not_map_to_waiting() {
+    fn claude_idle_composer_above_permission_footer_reports_idle() {
         let mut headless_terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
         headless_terminal.write(
             concat!(
@@ -2478,13 +2492,12 @@ mod tests {
             headless_terminal
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
-            None
+            Some(SessionStatus::Idle)
         );
     }
 
     #[test]
-    fn claude_permission_footer_without_interrupt_marker_does_not_map_to_waiting_even_with_blank_rows_below(
-    ) {
+    fn claude_idle_composer_above_permission_footer_reports_idle_with_blank_rows_below() {
         let mut headless_terminal = HeadlessTerminal::new(120, 42, 10_000).unwrap();
         headless_terminal.write(
             concat!(
@@ -2505,7 +2518,32 @@ mod tests {
             headless_terminal
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
-            None
+            Some(SessionStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn captured_incident_claude_composer_reports_idle() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude/idle-composer-2.1.259-280x81.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["inheritedStatus"], "busy");
+        let snapshot: TerminalSnapshot =
+            serde_json::from_value(fixture["snapshot"].clone()).unwrap();
+        let mut terminal = HeadlessTerminal::from_snapshot(&snapshot, 10_000).unwrap();
+
+        assert_eq!(
+            terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Idle)
+        );
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Empty
         );
     }
 

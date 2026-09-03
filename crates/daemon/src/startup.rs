@@ -30,6 +30,18 @@ struct AdoptedPtyReader {
     cols: u16,
 }
 
+fn adopted_runtime_status(
+    headless_terminal: &mut headless_terminal::HeadlessTerminal,
+    agent_provider: Option<kanna_daemon::protocol::AgentProvider>,
+    inherited_status: kanna_daemon::protocol::SessionStatus,
+) -> Result<(kanna_daemon::protocol::SessionStatus, bool), Box<dyn std::error::Error + Send + Sync>>
+{
+    let detected_status = headless_terminal.visible_status(agent_provider)?;
+    let status_observed = detected_status.is_some()
+        || inherited_status != headless_terminal::initial_session_status(agent_provider);
+    Ok((detected_status.unwrap_or(inherited_status), status_observed))
+}
+
 /// Wait for the replaced daemon to actually exit before this daemon adopts
 /// sessions or publishes itself. Liveness is identity-checked (start time),
 /// so a zombie or a recycled pid counts as exited. If the old daemon
@@ -300,11 +312,37 @@ pub(crate) async fn run_daemon() {
                     .expect("failed to create headless terminal for adopted session")
                 }
             };
-            let status_observed = matches!(
-                headless_terminal.visible_status(handoff.agent_provider),
-                Ok(Some(_))
-            ) || handoff.status
-                != headless_terminal::initial_session_status(handoff.agent_provider);
+            // The snapshot is the live frame quiesced by the old daemon. Its
+            // rendered verdict is newer evidence than the status field being
+            // transferred beside it, which may be the conservative startup
+            // `Busy` value the old classifier never managed to replace.
+            let (status, status_observed) = match adopted_runtime_status(
+                &mut headless_terminal,
+                handoff.agent_provider,
+                handoff.status,
+            ) {
+                Ok(derived) => derived,
+                Err(error) => {
+                    log::warn!(
+                        "[handoff] failed to re-derive runtime status for adopted session {}: {}",
+                        session_id,
+                        error
+                    );
+                    (
+                        handoff.status,
+                        handoff.status
+                            != headless_terminal::initial_session_status(handoff.agent_provider),
+                    )
+                }
+            };
+            if status != handoff.status {
+                log::info!(
+                    "[handoff] re-derived adopted session {} status from live snapshot: {:?} -> {:?}",
+                    session_id,
+                    handoff.status,
+                    status
+                );
+            }
             let rows = handoff.rows;
             let cols = handoff.cols;
             let stream_control = StreamControl::new();
@@ -313,7 +351,7 @@ pub(crate) async fn run_daemon() {
                 headless_terminal,
                 stream_control: None,
                 agent_provider: handoff.agent_provider,
-                status: handoff.status,
+                status,
                 status_observed,
                 last_status_check_at: None,
                 operator_input_only: handoff.operator_input_only
@@ -545,5 +583,32 @@ pub(crate) async fn run_daemon() {
                 log::error!("accept error: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod adopted_runtime_status_tests {
+    use crate::headless_terminal::HeadlessTerminal;
+    use kanna_daemon::protocol::{AgentProvider, SessionStatus, TerminalSnapshot};
+
+    #[test]
+    fn handoff_rederives_idle_from_incident_frame_instead_of_inheriting_busy() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude/idle-composer-2.1.259-280x81.json"
+        ))
+        .unwrap();
+        let snapshot: TerminalSnapshot =
+            serde_json::from_value(fixture["snapshot"].clone()).unwrap();
+        let mut terminal = HeadlessTerminal::from_snapshot(&snapshot, 10_000).unwrap();
+
+        let (status, observed) = super::adopted_runtime_status(
+            &mut terminal,
+            Some(AgentProvider::Claude),
+            SessionStatus::Busy,
+        )
+        .unwrap();
+
+        assert_eq!(status, SessionStatus::Idle);
+        assert!(observed);
     }
 }

@@ -100,6 +100,15 @@ per-session classification throttle. The periodic status tick performs an
 independent settled-frame classification, so cosmetic output checks cannot
 starve convergence to the provider's idle composer.
 
+Provider idle detection is a positive rendered-chrome match. Claude's `❯`
+composer is followed by a divider and its permission/mode bar, so the last
+composer is idle when every row below it is measured Claude chrome and no
+busy, subagent, or waiting marker is present. On transactional handoff, the
+adopter classifies the restored live snapshot before publishing its session
+list and prefers that positive verdict to the status copied beside the
+snapshot. An inherited conservative `Busy` therefore cannot override a frame
+that already proves the provider is parked.
+
 ## Reconnection
 
 The daemon does **not** buffer raw scrollback. Reconnection uses the headless terminal snapshot:

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  scriptedClaudeStatusAgentSource,
   writeScriptedAgentBinary,
   scriptedAgentSource,
   type ScriptedAgentOptions,
@@ -61,6 +62,15 @@ async function observeSubmittedInput(
 }
 
 describe("scripted remote E2E agent", () => {
+  it("paints Claude busy and idle frames with the measured composer footer", () => {
+    const source = scriptedClaudeStatusAgentSource();
+
+    expect(source).toContain("esc to interrupt");
+    expect(source).toContain("SCRIPT_CLAUDE_IDLE");
+    expect(source).toContain("❯ ");
+    expect(source).toContain("bypass permissions on");
+  });
+
   it("can prime a retained terminal snapshot with a unique final sentinel", () => {
     const configurableSource = scriptedAgentSource as unknown as (options: {
       snapshotHistory: { sentinel: string };

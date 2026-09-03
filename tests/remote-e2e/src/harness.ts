@@ -24,7 +24,10 @@ import {
   createDesktopPairingSession as requestDesktopPairingSession,
   type DesktopPairingSession
 } from "./desktopPairing";
-import { writeScriptedAgentBinary } from "./scriptedAgent";
+import {
+  writeScriptedAgentBinary,
+  writeScriptedClaudeStatusAgentBinary
+} from "./scriptedAgent";
 import { AGENT_PROVIDER_SPECS } from "../../../packages/agent-protocol/src/index";
 import type { RelayDesktopClient } from "../../../apps/mobile/src/lib/transports/relayClient";
 
@@ -64,6 +67,7 @@ export interface RemoteHarness {
   relayUrl: string;
   getIdToken(): Promise<string>;
   restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
+  restartDaemon(): Promise<void>;
   startRelay(): Promise<void>;
   startServer(): Promise<void>;
   stopRelay(): Promise<void>;
@@ -322,6 +326,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
   const processes: ManagedProcess[] = [];
   let relayProcess: ManagedProcess | null = null;
   let serverProcess: ManagedProcess | null = null;
+  let daemonProcess: ManagedProcess | null = null;
   let client: RelayDesktopClient | null = null;
   let idToken: string | null = null;
   let stopped = false;
@@ -426,6 +431,49 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     await startServer();
   };
 
+  const launchDaemon = (): ManagedProcess => {
+    const launched = startManagedProcess("daemon", join(repoRoot, ".build/debug/kanna-daemon"), [], {
+      cwd: repoRoot,
+      inventoryRoot: repoRoot,
+      env: {
+        ...process.env,
+        KANNA_DAEMON_DIR: daemonDir,
+        KANNA_SERVER_EXECUTABLE: join(repoRoot, ".build/debug/kanna-server"),
+        HOME: zshStartupDir,
+        PATH: prependPath(fakeAgentBinDir, process.env.PATH),
+        ZDOTDIR: zshStartupDir
+      }
+    });
+    processes.push(launched);
+    return launched;
+  };
+
+  const restartDaemon = async (): Promise<void> => {
+    const previous = daemonProcess;
+    const replacement = launchDaemon();
+    daemonProcess = replacement;
+    const expectedPid = replacement.process.pid;
+    if (!expectedPid) {
+      throw new Error("replacement daemon has no pid");
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const publishedPid = await readFile(join(daemonDir, "daemon.pid"), "utf8")
+        .then((value) => Number(value.trim()))
+        .catch(() => null);
+      if (publishedPid === expectedPid) {
+        return;
+      }
+      if (replacement.process.exitCode !== null || replacement.process.signalCode !== null) {
+        throw new Error("replacement daemon exited before publishing its pid");
+      }
+      await sleep(100);
+    }
+    throw new Error(
+      `replacement daemon ${expectedPid} did not publish after daemon ${String(previous?.process.pid)}`
+    );
+  };
+
   const stop = async () => {
     if (stopped) {
       return;
@@ -443,7 +491,10 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
   try {
     await mkdir(daemonDir, { recursive: true });
     await mkdir(fakeAgentBinDir, { recursive: true });
-    await writeScriptedAgentBinary(join(fakeAgentBinDir, "codex"));
+    await Promise.all([
+      writeScriptedAgentBinary(join(fakeAgentBinDir, "codex")),
+      writeScriptedClaudeStatusAgentBinary(join(fakeAgentBinDir, "claude"))
+    ]);
     await writeRemoteHarnessZshStartupFiles(zshStartupDir);
     await buildBinaries(repoRoot, environment);
     await createHarnessDatabase(repoRoot, dbPath);
@@ -481,18 +532,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
 
     await startRelay();
 
-    processes.push(startManagedProcess("daemon", join(repoRoot, ".build/debug/kanna-daemon"), [], {
-      cwd: repoRoot,
-      inventoryRoot: repoRoot,
-      env: {
-        ...process.env,
-        KANNA_DAEMON_DIR: daemonDir,
-        KANNA_SERVER_EXECUTABLE: join(repoRoot, ".build/debug/kanna-server"),
-        HOME: zshStartupDir,
-        PATH: prependPath(fakeAgentBinDir, process.env.PATH),
-        ZDOTDIR: zshStartupDir
-      }
-    }));
+    daemonProcess = launchDaemon();
     await waitForFile(join(daemonDir, "daemon.pid"), timeoutMs);
 
     await startServer();
@@ -521,6 +561,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
         return idToken;
       },
       restartServerWithIdentity,
+      restartDaemon,
       startRelay,
       startServer,
       stopRelay,
