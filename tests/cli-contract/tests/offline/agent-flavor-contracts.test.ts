@@ -95,7 +95,7 @@ describe("bundled agent flavor contracts", () => {
     });
   }
 
-  for (const role of ["pr", "merge", "review", "commit", "approve"]) {
+  for (const role of ["pr", "merge", "review", "commit", "approve", "ship"]) {
     const contractPath = join(agentsRoot, role, "CONTRACT.md");
 
     it(`${role} contract doc ships next to the agent definition`, () => {

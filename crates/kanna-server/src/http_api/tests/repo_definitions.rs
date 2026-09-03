@@ -986,6 +986,38 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
         "architect"
     );
     assert_eq!(consultation["definition"]["visibility"], "internal");
+
+    let (status, ship) =
+        json_response(&app, "/v1/repos/repo-1/kanna-definitions/agents/ship").await;
+    assert_eq!(status, StatusCode::OK);
+    let ship_prompt = ship["definition"]["prompt"].as_str().unwrap();
+    assert!(ship_prompt.contains("shipping is not configured"));
+    assert!(ship_prompt.contains(".kanna/agents/ship/EXTEND.md"));
+    assert!(!ship_prompt.contains("./kd release"));
+}
+
+#[tokio::test]
+async fn repo_definition_route_layers_a_repo_ship_procedure_onto_the_bundled_contract() {
+    let (_temp, repo) = published_definitions_repo(
+        "ship-extension",
+        &[(
+            ".kanna/agents/ship/EXTEND.md",
+            "---\nagent_provider: codex, claude\n---\nREPO_SHIP_PROCEDURE".to_string(),
+        )],
+    );
+    let app = manifest_router("definitions-ship-extension", &repo);
+
+    let (status, ship) =
+        json_response(&app, "/v1/repos/repo-1/kanna-definitions/agents/ship").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        ship["definition"]["agent_provider"],
+        json!(["codex", "claude"])
+    );
+    let prompt = ship["definition"]["prompt"].as_str().unwrap();
+    assert!(prompt.contains("shipping is not configured"));
+    assert!(prompt.ends_with("REPO_SHIP_PROCEDURE"));
 }
 
 #[tokio::test]

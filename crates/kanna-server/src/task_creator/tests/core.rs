@@ -3180,7 +3180,7 @@ fn builtin_authoring_agents_use_catalog_guides_and_scaffold_the_config_schema() 
 }
 
 #[test]
-fn read_agent_definition_loads_builtin_ship_agent_with_codex_first() {
+fn read_agent_definition_loads_repo_agnostic_builtin_ship_agent() {
     let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-ship");
 
     let definition = resolve_test_agent_definition(&repo_root, "ship").unwrap();
@@ -3188,28 +3188,40 @@ fn read_agent_definition_loads_builtin_ship_agent_with_codex_first() {
     assert_eq!(definition.name, "ship");
     assert_eq!(
         definition.agent_providers.first().map(String::as_str),
-        Some("codex")
+        Some("claude")
     );
-    assert!(definition
-        .prompt
-        .contains("./kd release ship --staging --dry-run"));
-    assert!(definition.prompt.contains("do not ask questions"));
+    assert!(definition.prompt.contains("shipping is not configured"));
     assert!(definition
         .prompt
         .contains("Production is never your decision"));
-    assert!(definition.prompt.contains("Refuse `--production`"));
+    assert!(definition.prompt.contains(".kanna/agents/ship/EXTEND.md"));
+    assert!(!definition.prompt.contains("./kd release"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn repo_ship_extension_layers_kanna_release_policy_onto_the_builtin_contract() {
+    let repo_root = init_git_repo_without_provider_fixtures("agent-kanna-ship-extension");
+    let agent_dir = repo_root.join(".kanna/agents/ship");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("EXTEND.md"),
+        "---\nagent_provider: codex, claude\n---\nKanna procedure: run `./kd release status` first.",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish Kanna ship extension");
+
+    let definition = resolve_test_agent_definition(&repo_root, "ship").unwrap();
+
+    assert_eq!(
+        definition.agent_providers.first().map(String::as_str),
+        Some("codex")
+    );
+    assert!(definition.prompt.contains("shipping is not configured"));
     assert!(definition
         .prompt
-        .contains("explicitly identifies a named human"));
-    assert!(definition.prompt.contains("git cherry-pick -x"));
-    assert!(definition
-        .prompt
-        .contains("./kd release promote X.Y.Z-staging.N"));
-    assert!(definition.prompt.contains("runtimeVersion"));
-    assert!(definition.prompt.contains("Call `kanna_info`"));
-    assert!(definition
-        .prompt
-        .contains("authoritative server environment/version"));
+        .ends_with("Kanna procedure: run `./kd release status` first."));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

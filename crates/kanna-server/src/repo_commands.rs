@@ -737,7 +737,7 @@ Deploy safely.
     }
 
     #[test]
-    fn builtin_ship_launch_binds_the_canonical_agent_in_interactive_mode() {
+    fn builtin_ship_launch_binds_the_generic_agent_in_interactive_mode() {
         let repo_dir = tempfile::tempdir().expect("temporary repository");
         let repo = Repo {
             id: "repo-1".to_string(),
@@ -761,6 +761,10 @@ Deploy safely.
         assert_eq!(launch.agent.as_deref(), Some("ship"));
         assert_eq!(launch.agent_type.as_deref(), Some("pty"));
         assert!(launch.prompt.contains("interactive palette mode"));
+        assert!(launch
+            .prompt
+            .contains("repository-specific release procedure"));
+        assert!(!launch.prompt.contains("./kd release"));
         assert!(!launch.prompt.contains("git cherry-pick -x"));
     }
 

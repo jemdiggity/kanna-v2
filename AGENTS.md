@@ -257,6 +257,12 @@ acknowledging transferred descriptors.
   them before setup runs. See `docs/dev/dev-workflow.md`.
 - Built-in agent/workflow definitions must ship as Tauri bundled resources,
   **not** as TypeScript string constants.
+- The built-in `ship` agent is a repository-agnostic authorization and
+  completion contract. A repository owns its actual release procedure in
+  `.kanna/agents/ship/EXTEND.md` (or a complete repo-authored `AGENT.md`), and
+  the bundled Ship task stops when that procedure is absent. Kanna's `kd`
+  release runbook follows the same rule; never move it back into the public
+  base agent or task template.
 
 ## Database
 

@@ -2,7 +2,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
-import { parseAgentDefinition } from "./agent-loader";
+import {
+  applyAgentExtension,
+  parseAgentDefinition,
+  parseAgentExtension,
+} from "./agent-loader";
 import {
   buildKannaRuntimeUserPrompt,
   buildStagePrompt,
@@ -66,7 +70,10 @@ describe("QA workflow assets", () => {
       })
     );
     const kannaAgents = readRepoPhrases("AGENTS.md");
-    const ship = parseAgentDefinition(readRepoFile(".kanna/agents/ship/AGENT.md"));
+    const ship = applyAgentExtension(
+      parseAgentDefinition(readRepoFile(".kanna/agents/ship/AGENT.md")),
+      parseAgentExtension(readRepoFile(".kanna/agents/ship/EXTEND.md")),
+    );
     const kannaShipPrompt = buildKannaRuntimeUserPrompt(
       buildStagePrompt(ship.prompt, "$TASK_PROMPT", {
         taskPrompt: "Publish the authorized staging release.",

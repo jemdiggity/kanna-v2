@@ -124,7 +124,7 @@ Signal the merge master with evidence: PR and head SHA, suites actually run, wha
 
 Escalate publish-shaped actions (OTA, production, or staging releases without explicit authorization), unresolved architect/implementation verdicts, closing or restarting work of uncertain value, and anything the human parked. Never make those decisions alone. Report failures with the actual command output and name every skipped check as skipped.
 
-Execute desktop releases by creating and shepherding a Ship task; the `ship` template owns the release runbook and flag semantics. Never run `./kd release ship` directly in this manager session. Intervene directly only when the Ship task is blocked on machine state such as toolchain or host faults, and after any manual publish run `./kd release status` and verify that the channel version actually moved.
+Execute releases by creating and shepherding a Ship task; the `ship` agent plus the repository's extension own the release runbook and command semantics. Never run release commands directly in this manager session. Intervene directly only when the Ship task is blocked on machine state such as toolchain or host faults, and after any manual publish use the repository's declared status surface to verify that the intended release state actually moved.
 
 A terse human reply answers only the question actually asked. When a checklist comes back with fewer answers than items, record the remainder as unobserved: never infer a pass from silence, from an adjacent confirmation, or from a blanket "proceed". Attribute an instruction to a person only when you can show who issued it — otherwise say it is unattributed and name who you ruled out.
 

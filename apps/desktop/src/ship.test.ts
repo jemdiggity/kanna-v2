@@ -170,18 +170,33 @@ function alphaBounds(png: DecodedPng): AlphaBounds {
 }
 
 describe("kd release workflow", () => {
-  it("binds the command-palette ship wrapper to the canonical interactive agent", () => {
+  it("keeps the public ship task generic and Kanna's release procedure repo-local", () => {
     const shipWrapper = readFileSync(
       resolve(repoRoot, ".kanna/tasks/ship/agent.md"),
+      "utf8",
+    );
+    const shipAgent = readFileSync(
+      resolve(repoRoot, ".kanna/agents/ship/AGENT.md"),
+      "utf8",
+    );
+    const kannaShipExtension = readFileSync(
+      resolve(repoRoot, ".kanna/agents/ship/EXTEND.md"),
       "utf8",
     );
 
     expect(shipWrapper).toContain("execution_mode: pty");
     expect(shipWrapper).toContain("agent: ship");
     expect(shipWrapper).toContain("interactive palette mode");
-    expect(shipWrapper).toContain("./kd release status");
+    expect(shipWrapper).toContain("repository-specific release procedure");
+    expect(shipWrapper).not.toContain("./kd release");
     expect(shipWrapper).not.toContain("git cherry-pick -x");
     expect(shipWrapper).not.toContain("./kd release promote");
+    expect(shipAgent).toContain("repository's shipping agent");
+    expect(shipAgent).toContain("shipping is not configured");
+    expect(shipAgent).not.toContain("./kd release");
+    expect(kannaShipExtension).toContain("./kd release status");
+    expect(kannaShipExtension).toContain("./kd release ship");
+    expect(kannaShipExtension).toContain("--release");
   });
 
   it("uses the VERSION file as the source of truth for the target version", () => {

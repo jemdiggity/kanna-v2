@@ -557,8 +557,10 @@ five-minute decision about a build that already proved itself, not a project.
   `--branch main|release/X.Y` to declare RC provenance explicitly from Kanna
   task worktrees (which always run on `task-*` branches).
 
-The shipping agent (`.kanna/agents/ship/AGENT.md`) owns the process end to end;
-the command-palette task is only an interactive wrapper around that definition:
+The shipping agent's bundled contract (`.kanna/agents/ship/AGENT.md`) and
+Kanna-specific procedure (`.kanna/agents/ship/EXTEND.md`) own the process end
+to end; the command-palette task is only an interactive wrapper around that
+resolved definition:
 cutting branches, shipping RCs, applying release-candidate backports
 (cherry-pick from main, test, push, re-RC), and promoting.
 Promoting production remains a human decision: agents may cut branches, ship
