@@ -268,6 +268,17 @@ pub struct TaskDetail {
     pub child_task_ids: Vec<String>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
+    /// Declared ports currently claimed for this task. `null` means there is
+    /// no previewable port; absence identifies a server predating previews.
+    #[serde(default)]
+    pub ports: Option<Vec<TaskPort>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskPort {
+    pub name: String,
+    pub port: u16,
 }
 
 /// What a task's agent session has at its prompt, and what the daemon can
@@ -833,6 +844,16 @@ impl MobileApi {
             ._db
             .queued_task_input_reason(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let ports = self
+            ._db
+            .list_task_ports_for_item(&item.id)
+            .map_err(|e| format!("db error: {}", e))?
+            .into_iter()
+            .filter_map(|(name, port)| {
+                let port = u16::try_from(port).ok()?;
+                (port != 0).then_some(TaskPort { name, port })
+            })
+            .collect::<Vec<_>>();
         Ok(Some(map_task_detail(
             item,
             repo.as_ref(),
@@ -846,6 +867,7 @@ impl MobileApi {
                 delivered_input_count,
                 queued_input_count,
                 queued_input_reason,
+                ports,
             },
         )))
     }
@@ -1080,6 +1102,7 @@ struct TaskDetailRelations {
     delivered_input_count: i64,
     queued_input_count: i64,
     queued_input_reason: Option<String>,
+    ports: Vec<TaskPort>,
 }
 
 fn map_task_detail(
@@ -1097,6 +1120,7 @@ fn map_task_detail(
         delivered_input_count,
         queued_input_count,
         queued_input_reason,
+        mut ports,
     } = relations;
     let prompt = item.prompt.clone();
     let title = item
@@ -1174,6 +1198,7 @@ fn map_task_detail(
         .as_ref()
         .and_then(|run| run.agent_provider.clone())
         .or(item.agent_provider);
+    ports.sort_by(|left, right| left.port.cmp(&right.port).then(left.name.cmp(&right.name)));
     TaskDetail {
         id: item.id,
         repo_id: item.repo_id,
@@ -1211,6 +1236,7 @@ fn map_task_detail(
         parent_task_id: item.parent_task_id,
         child_task_ids,
         blocked_by_task_ids,
+        ports: (!ports.is_empty()).then_some(ports),
     }
 }
 

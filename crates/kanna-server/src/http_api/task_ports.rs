@@ -172,6 +172,7 @@ pub(super) async fn release_task_ports(
     let task_id = resolve_existing_task_id(&db, &task_id)?;
     db.release_task_ports(&task_id)
         .map_err(|e| db_write_error("db error", e))?;
+    state.preview_sessions.revoke_task(&task_id).await;
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(serde_json::json!({ "taskId": task_id })))
 }

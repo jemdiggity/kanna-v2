@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Keyboard,
   Pressable,
@@ -25,6 +26,8 @@ import type {
   TaskFileMentionInput,
   TaskFileMentionResolution,
   TaskInputAttachment,
+  TaskPort,
+  TaskPreviewOpenResult,
   TaskSummary
 } from "../lib/api/types";
 import { isTaskBlocked, type BlockerTaskRef } from "../lib/api/taskIdentity";
@@ -54,6 +57,7 @@ import type {
 } from "@kanna/agent-protocol";
 import { AgentMessageView } from "./AgentMessageView";
 import { TaskDiffPreview } from "./TaskDiffPreview";
+import { TaskPreviewModal } from "./TaskPreviewModal";
 import { TaskFilePreview } from "./TaskFilePreview";
 import { TaskMentionedFiles } from "./TaskMentionedFiles";
 import { RepoExplorer } from "./RepoExplorer";
@@ -134,6 +138,9 @@ interface TaskScreenProps {
   onListTaskDirectory(path: string, showAllFiles?: boolean, offset?: number, filter?: string): Promise<RepoDirectoryListing>;
   onReadTaskFileRange(path: string, startLine: number, lineCount: number, metadataOnly?: boolean, startByte?: number): Promise<RepoFileRange>;
   onReadTaskDiff(request: TaskDiffRequest): Promise<TaskDiffContent>;
+  taskPreviewRouteAvailable?: boolean;
+  onOpenTaskPreview?(portName?: string): Promise<TaskPreviewOpenResult>;
+  onCloseTaskPreview?(): Promise<void>;
   onSendInput(input: string, attachment?: TaskInputAttachment): void;
   /** Injected by the attachment tests; production uses the Expo picker. */
   pickAttachment?(source: ImageAttachmentSource): Promise<PreparedImageAttachment | null>;
@@ -189,6 +196,10 @@ export function TaskScreen({
   onListTaskDirectory,
   onReadTaskFileRange,
   onReadTaskDiff,
+  taskPreviewRouteAvailable = true,
+  onOpenTaskPreview = () =>
+    Promise.reject(new Error("This desktop does not support dev-server preview.")),
+  onCloseTaskPreview = () => Promise.resolve(),
   onSendInput,
   pickAttachment = pickImageAttachment,
   onSendTerminalInput,
@@ -252,6 +263,7 @@ export function TaskScreen({
     null
   );
   const [diffModalTaskId, setDiffModalTaskId] = useState<string | null>(null);
+  const [previewModalTaskId, setPreviewModalTaskId] = useState<string | null>(null);
   const [explorerTaskId, setExplorerTaskId] = useState<string | null>(null);
   const companionLifecycleRef = useRef<{
     isOpen: boolean;
@@ -574,6 +586,11 @@ export function TaskScreen({
     Keyboard.dismiss();
   };
   const isTaskActionPending = pendingTaskAction !== null;
+  const previewPorts: readonly TaskPort[] = task.ports ?? [];
+  const previewAvailable =
+    taskCreationPhase === "idle" &&
+    taskPreviewRouteAvailable &&
+    previewPorts.length > 0;
   const openTaskActionMenu = () => {
     if (isTaskActionPending) {
       return;
@@ -581,10 +598,14 @@ export function TaskScreen({
     showTaskActionMenu(
       {
         mentionedFilesLabel: mentionedFilesActionLabel(activeMentionedFiles),
+        ...(previewAvailable ? { previewAvailable: true } : {}),
         ...(taskCreationPhase !== "idle" ? { taskCreation: true } : {})
       },
       (action: TaskAction) => {
         switch (action) {
+          case "preview":
+            setPreviewModalTaskId(task.id);
+            break;
           case "browse-files":
             setExplorerTaskId(task.id);
             break;
@@ -633,6 +654,7 @@ export function TaskScreen({
     );
     setCompanionModalTaskId(null);
     setDiffModalTaskId(null);
+    setPreviewModalTaskId(null);
     removeAttachment();
     return () => {
       if (!lifecycle.isOpen) return;
@@ -991,6 +1013,17 @@ export function TaskScreen({
         ]}
       >
         <View style={styles.composerActions}>
+          {previewAvailable ? (
+            <Pressable
+              accessibilityLabel="Preview dev server"
+              accessibilityRole="button"
+              onPress={() => setPreviewModalTaskId(task.id)}
+              style={styles.companionButton}
+              testID={MOBILE_E2E_IDS.taskPreviewButton}
+            >
+              <Text style={styles.companionButtonLabel}>Preview</Text>
+            </Pressable>
+          ) : null}
           {companionSnapshot ||
           (companionStatus === "error" && companionErrorMessage) ? (
             <Pressable
@@ -1244,6 +1277,24 @@ export function TaskScreen({
           onSendEvent={(sessionId, revision, event) =>
             onSendCompanionEvent?.(sessionId, revision, event)
           }
+        />
+      ) : null}
+      {previewModalTaskId === task.id ? (
+        <TaskPreviewModal
+          ports={previewPorts}
+          taskTitle={task.title}
+          onClose={() => {
+            setPreviewModalTaskId(null);
+            void onCloseTaskPreview().catch((error: unknown) => {
+              Alert.alert(
+                "Couldn’t close preview",
+                error instanceof Error
+                  ? error.message
+                  : "The preview will expire automatically."
+              );
+            });
+          }}
+          onOpen={onOpenTaskPreview}
         />
       ) : null}
     </View>

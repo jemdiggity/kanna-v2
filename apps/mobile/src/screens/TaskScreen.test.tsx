@@ -149,6 +149,10 @@ vi.mock("./VisualCompanionModal", () => ({
   VisualCompanionModal: "VisualCompanionModal"
 }));
 
+vi.mock("./TaskPreviewModal", () => ({
+  TaskPreviewModal: "TaskPreviewModal"
+}));
+
 vi.mock("./QuickReplySendControl", () => ({
   QuickReplySendControl: "QuickReplySendControl"
 }));
@@ -229,10 +233,20 @@ interface RenderTaskScreenOptions {
     patch: string;
     truncated: boolean;
   }>;
+  onOpenTaskPreview?: () => Promise<{
+    url: string;
+    portName: string;
+    port: number;
+    expiresAt: number;
+    ports: Array<{ name: string; port: number; listening: boolean }>;
+  }>;
+  onCloseTaskPreview?: () => Promise<void>;
+  taskPreviewRouteAvailable?: boolean;
   taskId?: string;
   ownerLocalTaskId?: string;
   title?: string;
   prompt?: string;
+  ports?: Array<{ name: string; port: number }>;
   queuedInputCount?: number;
   queuedInputReason?: "input_held_by_draft" | "delivery_uncertain" | "sending";
   quickReplies?: readonly TaskQuickReply[];
@@ -292,10 +306,14 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       patch: "",
       truncated: false
     }),
+    onOpenTaskPreview = vi.fn().mockRejectedValue(new Error("unavailable")),
+    onCloseTaskPreview = vi.fn().mockResolvedValue(undefined),
+    taskPreviewRouteAvailable = true,
     taskId = "task-1",
     ownerLocalTaskId,
     title = "Task",
     prompt,
+    ports,
     queuedInputCount,
     queuedInputReason,
     quickReplies = DEFAULT_TASK_QUICK_REPLIES,
@@ -322,6 +340,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       repoId: "repo-1",
       title,
       prompt,
+      ports,
       stage: "in progress",
       agentType,
       activity,
@@ -369,6 +388,9 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     }),
     onReadTaskFileRange: vi.fn(),
     onReadTaskDiff,
+    onOpenTaskPreview,
+    onCloseTaskPreview,
+    taskPreviewRouteAvailable,
     onCompanionOpenChange,
     onSendCompanionEvent
   }) as ElementNode;
@@ -718,6 +740,60 @@ describe("TaskScreen", () => {
     pressByTestId(tree, "mobile.task-more-button");
 
     expect(componentMocks.showTaskActionMenu).toHaveBeenCalledOnce();
+  });
+
+  it("offers preview only for a task with declared ports and opens its modal", () => {
+    expect(
+      findByTestId(renderTaskScreen(), MOBILE_E2E_IDS.taskPreviewButton)
+    ).toBeNull();
+
+    let tree = renderTaskScreen({
+      ports: [{ name: "DEV_PORT", port: 8471 }]
+    });
+    const previewButton = findByTestId(
+      tree,
+      MOBILE_E2E_IDS.taskPreviewButton
+    );
+    expect(previewButton?.props).toMatchObject({
+      accessibilityLabel: "Preview dev server",
+      accessibilityRole: "button"
+    });
+
+    pressByTestId(tree, MOBILE_E2E_IDS.taskPreviewButton);
+    tree = renderTaskScreen({ ports: [{ name: "DEV_PORT", port: 8471 }] });
+    expect(findByType(tree, "TaskPreviewModal")?.props).toMatchObject({
+      ports: [{ name: "DEV_PORT", port: 8471 }],
+      taskTitle: "Task"
+    });
+
+    expect(
+      findByTestId(
+        renderTaskScreen({
+          ports: [{ name: "DEV_PORT", port: 8471 }],
+          taskPreviewRouteAvailable: false
+        }),
+        MOBILE_E2E_IDS.taskPreviewButton
+      )
+    ).toBeNull();
+  });
+
+  it("closes the server preview when the preview modal closes", async () => {
+    const onCloseTaskPreview = vi.fn().mockResolvedValue(undefined);
+    let tree = renderTaskScreen({
+      ports: [{ name: "DEV_PORT", port: 8471 }],
+      onCloseTaskPreview
+    });
+    pressByTestId(tree, MOBILE_E2E_IDS.taskPreviewButton);
+    tree = renderTaskScreen({
+      ports: [{ name: "DEV_PORT", port: 8471 }],
+      onCloseTaskPreview
+    });
+
+    const previewModal = findByType(tree, "TaskPreviewModal");
+    (previewModal?.props?.onClose as () => void)();
+    await Promise.resolve();
+
+    expect(onCloseTaskPreview).toHaveBeenCalledOnce();
   });
 
   it.each([

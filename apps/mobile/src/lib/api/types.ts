@@ -357,6 +357,27 @@ export interface TaskSummary {
   /** Messages accepted by the desktop but not yet confirmed at the agent. */
   queuedInputCount?: number;
   queuedInputReason?: "input_held_by_draft" | "delivery_uncertain" | "sending" | null;
+  /** Declared ports claimed for this task. Null means this desktop supports
+   * preview discovery but the task has no previewable ports; absence means an
+   * older desktop. */
+  ports?: TaskPort[] | null;
+}
+
+export interface TaskPort {
+  name: string;
+  port: number;
+}
+
+export interface TaskPreviewPort extends TaskPort {
+  listening: boolean;
+}
+
+export interface TaskPreviewOpenResult {
+  url: string;
+  portName: string;
+  port: number;
+  expiresAt: number;
+  ports: TaskPreviewPort[];
 }
 
 export type TaskInputResult =

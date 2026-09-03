@@ -1997,12 +1997,22 @@ describe("createMobileController", () => {
     expect(client.getTask).toHaveBeenCalledWith(cloudTask.id);
     expect(store.getState().recentTasks[0]?.prompt).toBe(promptSnippet);
 
-    detail.resolve({ ...cloudTask, prompt: fullPrompt });
+    detail.resolve({
+      ...cloudTask,
+      prompt: fullPrompt,
+      ports: [{ name: "DEV_PORT", port: 8471 }]
+    });
     await flushMicrotasks();
 
     expect(store.getState().selectedTaskId).toBe(cloudTask.id);
     expect(store.getState().recentTasks[0]?.prompt).toBe(fullPrompt);
     expect(store.getState().repoTasks[0]?.prompt).toBe(fullPrompt);
+    expect(store.getState().recentTasks[0]?.ports).toEqual([
+      { name: "DEV_PORT", port: 8471 }
+    ]);
+    expect(store.getState().repoTasks[0]?.ports).toEqual([
+      { name: "DEV_PORT", port: 8471 }
+    ]);
     expect(store.getState().recentTasks[0]?.prompt).toContain(
       "END-OF-CANONICAL-PROMPT"
     );

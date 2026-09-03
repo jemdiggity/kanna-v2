@@ -33,6 +33,7 @@ pub struct AppState {
     transfer_sidecar: Arc<crate::transfer_sidecar::TransferSidecarSupervisor>,
     transfer_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     cloud_transfer_proxies: crate::cloud_transfer_proxy::CloudTransferProxyState,
+    pub(super) preview_sessions: super::preview::PreviewSessions,
     pub(crate) companion_resources: crate::ksp::CompanionResources,
     pub(crate) terminal_taps: crate::ksp::TerminalTapRegistry,
     pub(crate) agent_histories: crate::ksp::AgentHistoryRegistry,
@@ -350,6 +351,7 @@ impl AppState {
             transfer_sidecar,
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
+            preview_sessions: super::preview::PreviewSessions::default(),
             pairing_session: Arc::new(Mutex::new(None)),
             pairing_persistence_mutation: Arc::new(Mutex::new(())),
             #[cfg(debug_assertions)]

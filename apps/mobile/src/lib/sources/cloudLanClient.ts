@@ -1532,6 +1532,27 @@ export function createCloudLanClient(
         removeMatchingProvisionalRoutes(route.desktopId, route.taskId);
       }
     },
+    canOpenTaskPreview: (taskId) => {
+      const route = routeForTask(taskId);
+      return route.source === "lan" && Boolean(route.client.openTaskPreview);
+    },
+    openTaskPreview: (taskId, portName) => {
+      const route = routeForTask(taskId);
+      if (route.source === "unavailable") {
+        return Promise.reject(new Error(route.message));
+      }
+      if (route.source !== "lan" || !route.client.openTaskPreview) {
+        return Promise.reject(
+          new Error("Dev-server preview is available when this phone is connected to the task's desktop over LAN.")
+        );
+      }
+      return route.client.openTaskPreview(route.taskId, portName);
+    },
+    closeTaskPreview: async (taskId) => {
+      const route = routeForTask(taskId);
+      if (route.source !== "lan" || !route.client.closeTaskPreview) return;
+      await route.client.closeTaskPreview(route.taskId);
+    },
     sendTaskInput: (taskId, input, attachment) =>
       invokeTaskRoute(taskId, (client, routedTaskId) =>
         attachment

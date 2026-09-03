@@ -357,6 +357,7 @@ export interface SessionStore {
   ): void;
   setLocalTaskListPreferences(preferences: LocalTaskListPreferences): void;
   setTaskPrompt(taskId: string, prompt: string): void;
+  setTaskPorts(taskId: string, ports: TaskSummary["ports"]): void;
   setSelectedTask(taskId: string | null): void;
   beginTaskAction(taskId: string, action: TaskStageAction): boolean;
   finishTaskAction(taskId: string, action: TaskStageAction): void;
@@ -1229,6 +1230,30 @@ export function createSessionStore(): SessionStore {
       if (!changed) return;
 
       state = { ...state, repoTasks, recentTasks, searchResults };
+      publish();
+    },
+    setTaskPorts(taskId, ports) {
+      let changed = false;
+      const serialized = JSON.stringify(ports);
+      const updateTask = (task: TaskSummary): TaskSummary => {
+        if (task.id !== taskId || JSON.stringify(task.ports) === serialized) {
+          return task;
+        }
+        changed = true;
+        return { ...task, ports };
+      };
+      const updateTasks = (tasks: readonly TaskSummary[]): TaskSummary[] =>
+        tasks.map(updateTask);
+      const repoTasks = updateTasks(state.repoTasks);
+      const recentTasks = updateTasks(state.recentTasks);
+      const searchResults = updateTasks(state.searchResults);
+      const taskUiSlots = state.taskUiSlots.map((slot) =>
+        slot.state === "ready" && slot.task.id === taskId
+          ? { ...slot, task: updateTask(slot.task) }
+          : slot
+      );
+      if (!changed) return;
+      state = { ...state, repoTasks, recentTasks, searchResults, taskUiSlots };
       publish();
     },
     setSelectedTask(selectedTaskId) {

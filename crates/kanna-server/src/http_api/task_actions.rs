@@ -662,6 +662,7 @@ pub(super) async fn close_task(
         &state.config.db_path,
         &pipeline_item_id,
     );
+    state.preview_sessions.revoke_task(&pipeline_item_id).await;
     start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await;
     state.publish_state_changed(StateChangeScope::Tasks);
     state.publish_state_changed(StateChangeScope::Blockers);
@@ -816,6 +817,7 @@ async fn close_task_after_final_stage(
     })?;
     crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &task_id);
     crate::task_input_attachments::remove_task_attachments(&state.config.db_path, &task_id);
+    state.preview_sessions.revoke_task(&task_id).await;
     if has_workspace_teardown {
         crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
             daemon,
@@ -994,10 +996,12 @@ pub(super) async fn advance_stage(
 async fn execute_stage_transition(
     state: &Arc<AppState>,
     daemon: &mut crate::daemon_client::DaemonClient,
+    task_id: &str,
     transition: crate::task_creator::PreparedStageTransition,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     match transition {
         crate::task_creator::PreparedStageTransition::Run(prepared) => {
+            state.preview_sessions.revoke_task(task_id).await;
             let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
                 &state.config.db_path,
                 daemon,
@@ -1102,7 +1106,7 @@ fn execute_stage_transition_detached_holding(
                         }
                     };
                 if let Err((_, message)) =
-                    execute_stage_transition(&state, &mut daemon, transition).await
+                    execute_stage_transition(&state, &mut daemon, &task_id, transition).await
                 {
                     log::error!("stage transition for {} failed: {}", task_id, message);
                     state.publish_state_changed(StateChangeScope::Tasks);
@@ -1325,6 +1329,10 @@ pub(super) async fn rerun_stage(
                         return;
                     }
                 };
+                rerun_state
+                    .preview_sessions
+                    .revoke_task(&rerun_task_id)
+                    .await;
                 if let Err(error) = crate::task_creator::rerun_prepared_stage_for_api(
                     &rerun_state.config.db_path,
                     &mut daemon,

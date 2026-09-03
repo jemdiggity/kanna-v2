@@ -12,6 +12,7 @@ import type {
   TaskFileMentionInput,
   TaskFileMentionResolution,
   TaskInputAttachment,
+  TaskPreviewOpenResult,
   TaskSummary
 } from "../lib/api/types";
 import type {
@@ -119,6 +120,9 @@ export interface MobileController {
     mentions: readonly TaskFileMentionInput[]
   ): Promise<TaskFileMentionResolution>;
   readTaskDiff(taskId: string, request?: TaskDiffRequest): Promise<TaskDiffContent>;
+  canOpenTaskPreview?(taskId: string): boolean;
+  openTaskPreview(taskId: string, portName?: string): Promise<TaskPreviewOpenResult>;
+  closeTaskPreview(taskId: string): Promise<void>;
   sendTaskInput(
     taskId: string,
     input: string,
@@ -280,7 +284,12 @@ export function createMobileController(
   let taskAttachmentSupportGeneration = 0;
   let activeTaskDetailIdentity: string | null = null;
   let loadedTaskPrompt:
-    | { taskId: string; routeIdentity: string; prompt: string }
+    | {
+        taskId: string;
+        routeIdentity: string;
+        prompt: string;
+        ports: TaskSummary["ports"];
+      }
     | null = null;
   /**
    * The attachment-capability read currently in flight, tagged with the
@@ -539,6 +548,7 @@ export function createMobileController(
       loadedTaskPrompt.routeIdentity === routeIdentity
     ) {
       store.setTaskPrompt(taskId, loadedTaskPrompt.prompt);
+      store.setTaskPorts(taskId, loadedTaskPrompt.ports);
       return;
     }
     if (activeTaskDetailIdentity === detailIdentity) {
@@ -554,14 +564,19 @@ export function createMobileController(
           return;
         }
         activeTaskDetailIdentity = null;
-        if (
-          durableTaskIdForSelection(store.getState().selectedTaskId) !== taskId ||
-          typeof detail.prompt !== "string"
-        ) {
+        if (durableTaskIdForSelection(store.getState().selectedTaskId) !== taskId) {
           return;
         }
-        loadedTaskPrompt = { taskId, routeIdentity, prompt: detail.prompt };
-        store.setTaskPrompt(taskId, detail.prompt);
+        store.setTaskPorts(taskId, detail.ports);
+        if (typeof detail.prompt === "string") {
+          loadedTaskPrompt = {
+            taskId,
+            routeIdentity,
+            prompt: detail.prompt,
+            ports: detail.ports
+          };
+          store.setTaskPrompt(taskId, detail.prompt);
+        }
       })
       .catch(() => {
         if (generation === taskDetailGeneration) {
@@ -579,7 +594,11 @@ export function createMobileController(
     return tasks.map((task) =>
       task.id === loadedTaskPrompt?.taskId &&
       taskPromptRouteIdentity(task) === loadedTaskPrompt.routeIdentity
-        ? { ...task, prompt: loadedTaskPrompt.prompt }
+        ? {
+            ...task,
+            prompt: loadedTaskPrompt.prompt,
+            ports: loadedTaskPrompt.ports
+          }
         : task
     );
   };
@@ -2777,6 +2796,21 @@ export function createMobileController(
 
     openTask(taskId) {
       openTask(taskId);
+    },
+
+    openTaskPreview(taskId, portName) {
+      if (!client.openTaskPreview) {
+        return Promise.reject(new Error("This desktop does not support dev-server preview."));
+      }
+      return client.openTaskPreview(taskId, portName);
+    },
+
+    canOpenTaskPreview(taskId) {
+      return client.canOpenTaskPreview?.(taskId) ?? false;
+    },
+
+    closeTaskPreview(taskId) {
+      return client.closeTaskPreview?.(taskId) ?? Promise.resolve();
     },
 
     closeTask(taskId) {

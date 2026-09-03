@@ -1,7 +1,7 @@
 import { ActionSheetIOS, Alert, Platform } from "react-native";
 import type { TaskStageAction } from "../state/sessionStore";
 
-export type TaskAction = "browse-files" | "mentioned-files" | "view-diff" | TaskStageAction;
+export type TaskAction = "preview" | "browse-files" | "mentioned-files" | "view-diff" | TaskStageAction;
 
 interface TaskActionDefinition {
   id: TaskAction;
@@ -12,6 +12,7 @@ interface TaskActionDefinition {
 export interface TaskActionMenuOptions {
   mentionedFilesLabel: string;
   taskCreation?: boolean;
+  previewAvailable?: boolean;
 }
 
 const MENU_TITLE = "Task Actions";
@@ -23,6 +24,9 @@ export function showTaskActionMenu(
   onDismiss: () => void = () => undefined
 ): void {
   const allTaskActions: readonly TaskActionDefinition[] = [
+    ...(options.previewAvailable
+      ? [{ id: "preview" as const, label: "Preview Dev Server" }]
+      : []),
     { id: "browse-files", label: "Browse Files" },
     { id: "mentioned-files", label: options.mentionedFilesLabel },
     { id: "view-diff", label: "View Diff" },
