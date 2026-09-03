@@ -11,6 +11,7 @@ import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 import { reconcileTaskUiSlots, taskUiSlotToSidebarItem } from "./taskUiSlots";
 import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
+import type { TaskStateChange } from "@kanna/agent-protocol";
 
 const setTitleMock = vi.hoisted(() => vi.fn(async () => {}));
 
@@ -50,6 +51,7 @@ const mockState = vi.hoisted(() => {
       agent_type: "pty",
       agent_provider: "claude",
       activity: "idle",
+      activity_revision: 0,
       activity_changed_at: now,
       unread_at: null,
       port_offset: 1421,
@@ -72,14 +74,20 @@ const mockState = vi.hoisted(() => {
   let items: PipelineItem[] = [];
   let unblockedItems: PipelineItem[] = [];
   const listenMock = vi.fn(async () => () => {});
-  const stateChangedListeners: Array<(scope: string) => void> = [];
+  const stateChangedListeners: Array<(
+    scope: string,
+    taskState?: TaskStateChange | null,
+  ) => void> = [];
   const connectionListeners: Array<(connected: boolean) => void> = [];
   let sharedConnectionState = {
     connected: false,
     revision: 0,
   };
   const streamClientMock = {
-    onStateChanged: vi.fn((listener: (scope: string) => void) => {
+    onStateChanged: vi.fn((listener: (
+      scope: string,
+      taskState?: TaskStateChange | null,
+    ) => void) => {
       stateChangedListeners.push(listener);
       return vi.fn();
     }),
@@ -1397,6 +1405,91 @@ describe("createInitApi", () => {
     if (!unreadSlot) throw new Error("background task slot disappeared");
     expect(taskUiSlotToSidebarItem(unreadSlot).activity).toBe("unread");
     expect(state.selectedItemId.value).toBe(selectedTask.id);
+  });
+
+  it("coalesces a same-task scoped burst into one in-place update and no snapshot fetch", async () => {
+    mockState.tauri = true;
+    const task = mockState.makeItem({ id: "task-burst", activity: "idle", activity_revision: 0 });
+    const slot = makeReadyTaskSlot(task, task.id);
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [task];
+    state.taskUiSlots.value = [slot];
+    state.selectedRepoId.value = task.repo_id;
+    state.selectedItemId.value = task.id;
+    const itemsIdentity = state.items.value;
+    const slotsIdentity = state.taskUiSlots.value;
+
+    const reloadSnapshot = vi.fn(async () => {});
+    const applyTaskStateChange = vi.fn((change: TaskStateChange) => {
+      Object.assign(task, {
+        activity: change.activity as PipelineItem["activity"],
+        activity_revision: change.activity_revision,
+        runtime_state: change.runtime_state,
+        read_state: change.read_state as PipelineItem["read_state"],
+      });
+      return true;
+    });
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      applyTaskStateChange,
+      selectedTaskId: computed(() => task.id),
+      currentTaskSlot: computed(() => slot),
+      currentItem: computed(() => task),
+      restoreSelection: vi.fn(),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+      windowWorkspace: {
+        onSharedInvalidation: vi.fn(async () => () => undefined),
+        persistSelection: vi.fn(async () => {}),
+      },
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+    await flushAsync();
+    reloadSnapshot.mockClear();
+
+    for (let revision = 1; revision <= 20; revision += 1) {
+      mockState.stateChangedListeners[0]("tasks", {
+        version: 1,
+        task_id: task.id,
+        activity: revision === 20 ? "unread" : "working",
+        activity_revision: revision,
+        activity_changed_at: `2026-09-03T18:30:${String(revision).padStart(2, "0")}.000Z`,
+        unread_at: revision === 20 ? "2026-09-03T18:30:20.000Z" : null,
+        runtime_state: revision === 20 ? "idle" : "busy",
+        read_state: revision === 20 ? "unread" : "read",
+        last_output_preview: `status ${revision}`,
+      });
+    }
+    await flushAsync();
+
+    expect(reloadSnapshot).not.toHaveBeenCalled();
+    expect(applyTaskStateChange).toHaveBeenCalledTimes(1);
+    expect(applyTaskStateChange).toHaveBeenCalledWith(expect.objectContaining({
+      task_id: task.id,
+      activity_revision: 20,
+      activity: "unread",
+    }));
+    expect(state.items.value).toBe(itemsIdentity);
+    expect(state.taskUiSlots.value).toBe(slotsIdentity);
+    expect(slot.task).toBe(task);
+    expect(task.activity).toBe("unread");
   });
 
   it("coalesces KSP state change bursts into one active and one trailing refresh", async () => {

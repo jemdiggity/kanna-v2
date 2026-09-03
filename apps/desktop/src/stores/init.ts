@@ -1,4 +1,4 @@
-import type { StateChangeScope } from "@kanna/agent-protocol";
+import type { StateChangeScope, TaskStateChange } from "@kanna/agent-protocol";
 import type { DbHandle, PipelineItem, TaskBlocker } from "../types/kanna";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
@@ -415,7 +415,42 @@ export function createInitApi(
         console.error("[store] KSP state change handler failed:", error);
       },
     );
-    const handleKspStateChange = (scope: StateChangeScope) => {
+    const pendingTaskStateChanges = new Map<string, TaskStateChange>();
+    let taskStateFlushQueued = false;
+    const flushTaskStateChanges = () => {
+      taskStateFlushQueued = false;
+      const changes = [...pendingTaskStateChanges.values()];
+      pendingTaskStateChanges.clear();
+      const applyTaskStateChange = context.services.applyTaskStateChange;
+      const unapplied = applyTaskStateChange
+        ? changes.find((change) => !applyTaskStateChange(change))
+        : changes[0];
+      if (unapplied) {
+        console.debug("[store] scoped KSP task state change requires snapshot fallback", {
+          taskId: unapplied.task_id,
+          version: unapplied.version,
+          activityRevision: unapplied.activity_revision,
+        });
+        refreshAfterKspStateChange();
+        return;
+      }
+      console.debug(`[store] applied ${changes.length} scoped KSP task state change(s)`);
+    };
+    const handleKspStateChange = (
+      scope: StateChangeScope,
+      taskState: TaskStateChange | null,
+    ) => {
+      if (scope === "tasks" && taskState) {
+        const previous = pendingTaskStateChanges.get(taskState.task_id);
+        if (!previous || taskState.activity_revision >= previous.activity_revision) {
+          pendingTaskStateChanges.set(taskState.task_id, taskState);
+        }
+        if (!taskStateFlushQueued) {
+          taskStateFlushQueued = true;
+          queueMicrotask(flushTaskStateChanges);
+        }
+        return;
+      }
       if (scope === "repos") definitionsNeedRefresh = true;
       refreshAfterKspStateChange();
     };

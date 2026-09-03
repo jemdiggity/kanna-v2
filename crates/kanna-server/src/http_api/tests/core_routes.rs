@@ -1924,7 +1924,7 @@ async fn task_detail_omits_the_composer_until_a_session_reports_one() {
 
 #[tokio::test]
 async fn task_activity_routes_persist_runtime_status_and_mark_read() {
-    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_pipeline_item(
             "task-1",
@@ -1936,6 +1936,8 @@ async fn task_activity_routes_persist_runtime_status_and_mark_read() {
         )
         .unwrap();
     });
+    let mut state_changes = state.subscribe_state_changes();
+    let app = super::router(state);
 
     let busy_response = app
         .clone()
@@ -1950,6 +1952,25 @@ async fn task_activity_routes_persist_runtime_status_and_mark_read() {
         .await
         .unwrap();
     assert_eq!(busy_response.status(), StatusCode::OK);
+    let busy_change = state_changes.try_recv().expect("busy state change");
+    assert!(matches!(
+        busy_change,
+        kanna_agent_protocol::ServerFrame::StateChanged {
+            scope: kanna_agent_protocol::StateChangeScope::Tasks,
+            task_state: Some(kanna_agent_protocol::TaskStateChange {
+                version: 1,
+                ref task_id,
+                ref activity,
+                activity_revision: 1,
+                ref runtime_state,
+                ref read_state,
+                ..
+            }),
+        } if task_id == "task-1"
+            && activity == "working"
+            && runtime_state.as_deref() == Some("busy")
+            && read_state == "read"
+    ));
 
     let exited_response = app
         .clone()
@@ -1964,6 +1985,22 @@ async fn task_activity_routes_persist_runtime_status_and_mark_read() {
         .await
         .unwrap();
     assert_eq!(exited_response.status(), StatusCode::OK);
+    let idle_change = state_changes.try_recv().expect("idle state change");
+    assert!(matches!(
+        idle_change,
+        kanna_agent_protocol::ServerFrame::StateChanged {
+            task_state: Some(kanna_agent_protocol::TaskStateChange {
+                ref activity,
+                activity_revision: 2,
+                ref runtime_state,
+                ref read_state,
+                ..
+            }),
+            ..
+        } if activity == "unread"
+            && runtime_state.as_deref() == Some("idle")
+            && read_state == "unread"
+    ));
 
     let unread_snapshot = app
         .clone()
@@ -1989,6 +2026,22 @@ async fn task_activity_routes_persist_runtime_status_and_mark_read() {
         .await
         .unwrap();
     assert_eq!(mark_read_response.status(), StatusCode::OK);
+    let read_change = state_changes.try_recv().expect("read state change");
+    assert!(matches!(
+        read_change,
+        kanna_agent_protocol::ServerFrame::StateChanged {
+            task_state: Some(kanna_agent_protocol::TaskStateChange {
+                ref activity,
+                activity_revision: 3,
+                ref runtime_state,
+                ref read_state,
+                ..
+            }),
+            ..
+        } if activity == "idle"
+            && runtime_state.as_deref() == Some("idle")
+            && read_state == "read"
+    ));
 
     let read_snapshot = app
         .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())

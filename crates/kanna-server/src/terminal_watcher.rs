@@ -111,28 +111,33 @@ pub(crate) fn composer_attestation_label(
     }
 }
 
+struct WatcherRuntimeStatusResult {
+    task_id: String,
+    changed: bool,
+}
+
 fn apply_watcher_runtime_status(
     state: &http_api::AppState,
     session_id: &str,
     status: kanna_daemon::protocol::SessionStatus,
     waiting_prompt: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<Option<WatcherRuntimeStatusResult>, String> {
     let db = crate::db::Db::open(&state.config().db_path)
         .map_err(|error| format!("db error: {error}"))?;
     let Some(task_id) = db
         .resolve_pipeline_item_id(session_id)
         .map_err(|error| format!("db error: {error}"))?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(item) = db
         .get_pipeline_item(&task_id)
         .map_err(|error| format!("db error: {error}"))?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     if item.closed_at.is_some() {
-        return Ok(false);
+        return Ok(None);
     }
 
     let status = match status {
@@ -160,7 +165,7 @@ fn apply_watcher_runtime_status(
     // client because only it knows whether the task is selected (idle) or
     // unselected (unread).
     if state.terminal_attachments().is_attached(session_id) && status != "busy" {
-        return Ok(changed);
+        return Ok(Some(WatcherRuntimeStatusResult { task_id, changed }));
     }
 
     let Some(activity) = http_api::task_activity::activity_for_runtime_status(
@@ -168,12 +173,15 @@ fn apply_watcher_runtime_status(
         status,
         false,
     ) else {
-        return Ok(changed);
+        return Ok(Some(WatcherRuntimeStatusResult { task_id, changed }));
     };
 
     db.update_pipeline_item_activity(&task_id, activity)
         .map_err(|error| format!("db error: {error}"))?;
-    Ok(true)
+    Ok(Some(WatcherRuntimeStatusResult {
+        task_id,
+        changed: true,
+    }))
 }
 
 /// Mirror the daemon's blocked-input verdict onto the task.
@@ -348,8 +356,12 @@ async fn reconcile_detached_terminal_status(
                 // The runtime-status helper re-checks the lease after the
                 // daemon round-trip, closing a concurrent reattach race for
                 // selection-dependent idle/waiting updates.
-                if apply_watcher_runtime_status(state, session_id, session.status, None)? {
-                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+                if let Some(result) =
+                    apply_watcher_runtime_status(state, session_id, session.status, None)?
+                {
+                    if result.changed {
+                        state.publish_task_state_changed(&result.task_id);
+                    }
                 }
             }
             Ok(())
@@ -471,7 +483,8 @@ pub(crate) async fn terminal_state_watcher_once(
                 };
                 match apply_watcher_runtime_status(state, &session.session_id, session.status, None)
                 {
-                    Ok(status_changed) => changed |= status_changed,
+                    Ok(Some(result)) => changed |= result.changed,
+                    Ok(None) => {}
                     Err(error) => log::warn!(
                         "failed to reconcile terminal status for {}: {}",
                         session.session_id,
@@ -590,13 +603,18 @@ pub(crate) async fn terminal_state_watcher_once(
                         ),
                     }
                 }
+                let mut changed_task_id = None;
                 match apply_watcher_runtime_status(
                     state,
                     &session_id,
                     status,
                     waiting_prompt_snippet.as_deref(),
                 ) {
-                    Ok(status_changed) => changed |= status_changed,
+                    Ok(Some(result)) => {
+                        changed |= result.changed;
+                        changed_task_id = Some(result.task_id);
+                    }
+                    Ok(None) => {}
                     Err(error) => log::warn!(
                         "failed to apply terminal status for {}: {}",
                         session_id,
@@ -604,7 +622,11 @@ pub(crate) async fn terminal_state_watcher_once(
                     ),
                 }
                 if changed {
-                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+                    if let Some(task_id) = changed_task_id {
+                        state.publish_task_state_changed(&task_id);
+                    } else {
+                        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+                    }
                 }
             }
             DaemonEvent::ComposerChanged {
@@ -1603,7 +1625,8 @@ mod tests {
         assert!(matches!(
             state_changes.try_recv(),
             Ok(kanna_agent_protocol::ServerFrame::StateChanged {
-                scope: kanna_agent_protocol::StateChangeScope::Tasks
+                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                ..
             })
         ));
         assert!(matches!(
@@ -1910,7 +1933,8 @@ mod tests {
         assert!(matches!(
             frame,
             kanna_agent_protocol::ServerFrame::StateChanged {
-                scope: kanna_agent_protocol::StateChangeScope::Tasks
+                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                ..
             }
         ));
     }
@@ -2096,8 +2120,20 @@ mod tests {
         assert!(matches!(
             state_changes.try_recv(),
             Ok(kanna_agent_protocol::ServerFrame::StateChanged {
-                scope: kanna_agent_protocol::StateChangeScope::Tasks
-            })
+                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                task_state: Some(kanna_agent_protocol::TaskStateChange {
+                    version: 1,
+                    ref task_id,
+                    ref activity,
+                    activity_revision: 1,
+                    ref runtime_state,
+                    ref read_state,
+                    ..
+                }),
+            }) if task_id == "task-child"
+                && activity == "working"
+                && runtime_state.as_deref() == Some("busy")
+                && read_state == "read"
         ));
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
@@ -2420,7 +2456,8 @@ mod tests {
         assert!(matches!(
             state_changes.try_recv(),
             Ok(kanna_agent_protocol::ServerFrame::StateChanged {
-                scope: kanna_agent_protocol::StateChangeScope::Tasks
+                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                ..
             })
         ));
         let _ = std::fs::remove_file(socket_path);

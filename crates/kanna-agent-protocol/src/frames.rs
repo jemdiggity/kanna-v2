@@ -92,8 +92,9 @@ pub struct CompanionEvent {
     pub timestamp: u64,
 }
 
-/// Coarse data-model invalidation scopes. Clients should re-fetch the
-/// snapshot rather than applying row-level deltas.
+/// Data-model invalidation scopes. A `tasks` frame may carry a versioned task
+/// state payload that capable clients can apply in place; otherwise clients
+/// re-fetch the snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
@@ -102,6 +103,25 @@ pub enum StateChangeScope {
     Repos,
     Blockers,
     Settings,
+}
+
+/// Additive, versioned state for one existing task. Version 1 deliberately
+/// contains only fields whose changes cannot alter task membership or sidebar
+/// ordering. A client that does not understand the version must use the
+/// surrounding `StateChanged` scope as a full-snapshot invalidation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub struct TaskStateChange {
+    pub version: u8,
+    pub task_id: String,
+    pub activity: String,
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
+    pub activity_revision: i64,
+    pub activity_changed_at: Option<String>,
+    pub unread_at: Option<String>,
+    pub runtime_state: Option<String>,
+    pub read_state: String,
+    pub last_output_preview: Option<String>,
 }
 
 /// A journaled agent event paired with its sequence number (wire mirror of
@@ -469,6 +489,8 @@ pub enum ServerFrame {
     },
     StateChanged {
         scope: StateChangeScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_state: Option<TaskStateChange>,
     },
     SessionExit {
         task_id: String,
@@ -657,6 +679,7 @@ mod tests {
     fn state_changed_frame_round_trip_and_tagging() {
         let frame = ServerFrame::StateChanged {
             scope: StateChangeScope::Tasks,
+            task_state: None,
         };
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "state_changed");
@@ -664,6 +687,35 @@ mod tests {
 
         let back: ServerFrame = serde_json::from_value(json).unwrap();
         assert_eq!(frame, back);
+
+        let legacy: ServerFrame = serde_json::from_value(serde_json::json!({
+            "type": "state_changed",
+            "scope": "tasks"
+        }))
+        .unwrap();
+        assert_eq!(frame, legacy);
+
+        let scoped = ServerFrame::StateChanged {
+            scope: StateChangeScope::Tasks,
+            task_state: Some(TaskStateChange {
+                version: 1,
+                task_id: "task-1".into(),
+                activity: "unread".into(),
+                activity_revision: 7,
+                activity_changed_at: Some("2026-09-03T18:30:00Z".into()),
+                unread_at: Some("2026-09-03T18:30:00Z".into()),
+                runtime_state: Some("busy".into()),
+                read_state: "unread".into(),
+                last_output_preview: Some("running".into()),
+            }),
+        };
+        let scoped_json = serde_json::to_value(&scoped).unwrap();
+        assert_eq!(scoped_json["task_state"]["version"], 1);
+        assert_eq!(scoped_json["task_state"]["task_id"], "task-1");
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(scoped_json).unwrap(),
+            scoped
+        );
     }
 
     #[test]

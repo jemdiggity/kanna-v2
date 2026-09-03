@@ -477,17 +477,37 @@ describe("StreamClient", () => {
     client.close();
   });
 
-  it("notifies state-change listeners for coarse server invalidations", () => {
+  it("notifies state-change listeners for coarse and scoped server invalidations", () => {
     const { client, socket } = connectedClient();
-    const scopes: string[] = [];
-    const unsubscribe = client.onStateChanged((scope) => scopes.push(scope));
+    const changes: Array<{ scope: string; taskId: string | null }> = [];
+    const unsubscribe = client.onStateChanged((scope, taskState) => changes.push({
+      scope,
+      taskId: taskState?.task_id ?? null,
+    }));
 
     socket.receive({ type: "state_changed", scope: "tasks" });
-    socket.receive({ type: "state_changed", scope: "repos" });
+    socket.receive({
+      type: "state_changed",
+      scope: "tasks",
+      task_state: {
+        version: 1,
+        task_id: "task-1",
+        activity: "working",
+        activity_revision: 4,
+        activity_changed_at: "2026-09-03T18:30:00Z",
+        unread_at: null,
+        runtime_state: "busy",
+        read_state: "read",
+        last_output_preview: "running",
+      },
+    });
     unsubscribe();
     socket.receive({ type: "state_changed", scope: "settings" });
 
-    expect(scopes).toEqual(["tasks", "repos"]);
+    expect(changes).toEqual([
+      { scope: "tasks", taskId: null },
+      { scope: "tasks", taskId: "task-1" },
+    ]);
     client.close();
   });
 

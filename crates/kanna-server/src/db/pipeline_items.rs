@@ -1,6 +1,6 @@
 use super::{
     CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem, PipelineItemChild,
-    ReopenPipelineItemError, TaskEventKind, TaskStageSource,
+    ReopenPipelineItemError, TaskEventKind, TaskStageSource, TaskStateSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
@@ -51,6 +51,32 @@ pub(super) fn update_open_pipeline_item_activity(
 }
 
 impl Db {
+    pub fn get_task_state_summary(
+        &self,
+        id: &str,
+    ) -> Result<Option<TaskStateSummary>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT id, activity, activity_revision, activity_changed_at,
+                        unread_at, runtime_status, last_output_preview
+                   FROM pipeline_item
+                  WHERE id = ? AND closed_at IS NULL",
+                [id],
+                |row| {
+                    Ok(TaskStateSummary {
+                        task_id: row.get(0)?,
+                        activity: row.get(1)?,
+                        activity_revision: row.get(2)?,
+                        activity_changed_at: row.get(3)?,
+                        unread_at: row.get(4)?,
+                        runtime_state: row.get(5)?,
+                        last_output_preview: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
     pub fn list_task_completion_runs(
         &self,
     ) -> Result<Vec<(String, bool, Option<String>)>, rusqlite::Error> {

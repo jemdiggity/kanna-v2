@@ -287,6 +287,17 @@ pub struct SnapshotTaskBlocker {
     pub blocker_item_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskStateSummary {
+    pub task_id: String,
+    pub activity: String,
+    pub activity_revision: i64,
+    pub activity_changed_at: Option<String>,
+    pub unread_at: Option<String>,
+    pub runtime_state: Option<String>,
+    pub last_output_preview: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SnapshotBlockerTaskState {
     pub closed_at: Option<String>,

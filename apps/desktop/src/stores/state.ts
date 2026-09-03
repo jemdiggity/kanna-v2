@@ -28,6 +28,7 @@ import {
 import type { AdvanceStageResult, RequestRevisionOptions } from "./workflow";
 import type { ReloadSnapshotOptions } from "./queries";
 import type { TaskUiSlot } from "../types/taskUi";
+import type { TaskStateChange } from "@kanna/agent-protocol";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
 
@@ -172,6 +173,7 @@ export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
   reloadSnapshot?: (options?: ReloadSnapshotOptions) => Promise<void>;
+  applyTaskStateChange?: (change: TaskStateChange) => boolean;
   fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {
     key: string;
