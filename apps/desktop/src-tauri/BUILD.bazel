@@ -103,7 +103,7 @@ config = json.loads(source_path.read_text(encoding="utf-8"))
 config["productName"] = "Kanna Staging"
 config["identifier"] = "build.kanna.staging"
 config.setdefault("plugins", {}).setdefault("updater", {})["endpoints"] = [
-    "https://github.com/jemdiggity/kanna/releases/download/desktop-staging/latest-staging.json"
+    "https://github.com/tampopogk/kanna/releases/download/desktop-staging/latest-staging.json"
 ]
 pubkey = os.environ.get("KANNA_UPDATER_PUBKEY", "").strip()
 if pubkey:
