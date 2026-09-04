@@ -25,6 +25,10 @@ use kanna_daemon::protocol::{AgentProvider, AgentSpawnParams, NeutralAgentEvent,
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Eventual process/socket progress in these integration fixtures has no
+/// product latency contract. This deadline only contains a wedged child.
+const EVENTUAL_PROGRESS_GUARD: Duration = Duration::from_secs(30);
+
 // ---- Protocol types ----
 
 #[allow(dead_code)]
@@ -200,6 +204,36 @@ fn compute_socket_path(dir: &Path) -> PathBuf {
     kanna_runtime_defaults::socket_path(dir)
 }
 
+/// Wait for the exact daemon generation to publish a connectable socket.
+///
+/// The PID file is written immediately before the socket is bound, so seeing
+/// the new PID alone is not readiness. Production clients require both this
+/// PID and a connectable socket (and then authenticate the peer PID); the test
+/// harness must observe the same publication boundary.
+fn wait_for_published_socket(pid_path: &Path, socket_path: &Path, expected_pid: u32) -> UnixStream {
+    let deadline = Instant::now() + EVENTUAL_PROGRESS_GUARD;
+    let mut last_pid;
+    let mut last_connect_error = None;
+    loop {
+        last_pid = std::fs::read_to_string(pid_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok());
+        if last_pid == Some(expected_pid) {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => return stream,
+                Err(error) => last_connect_error = Some(error),
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon {expected_pid} never published a connectable socket at {} (published pid: \
+             {last_pid:?}, last connect error: {last_connect_error:?})",
+            socket_path.display(),
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 struct DaemonHandle {
     child: Child,
     socket_path: PathBuf,
@@ -241,17 +275,13 @@ impl DaemonHandle {
 
         let expected_pid = child.id();
 
-        // Wait for this specific daemon to be ready (PID file matches + socket works)
-        for _ in 0..100 {
-            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    if pid == expected_pid && UnixStream::connect(&socket_path).is_ok() {
-                        break;
-                    }
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        // This is an eventual readiness invariant, not a ten-second startup
+        // contract. The helper returns only after the socket is usable.
+        drop(wait_for_published_socket(
+            &pid_path,
+            &socket_path,
+            expected_pid,
+        ));
 
         // Verify our daemon is running
         let actual_pid = std::fs::read_to_string(&pid_path)
@@ -279,16 +309,11 @@ impl DaemonHandle {
         }
         let child = command.spawn().expect("failed to start daemon");
         let expected_pid = child.id();
-        for _ in 0..100 {
-            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-                if pid_str.trim().parse::<u32>().ok() == Some(expected_pid)
-                    && UnixStream::connect(&socket_path).is_ok()
-                {
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        drop(wait_for_published_socket(
+            &pid_path,
+            &socket_path,
+            expected_pid,
+        ));
         let actual_pid = std::fs::read_to_string(&pid_path)
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok())
@@ -1605,7 +1630,7 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     install_test_daemon_at(&previous, &stable_daemon);
     let old_adopter = DaemonHandle::start_binary_in(&stable_daemon, &dir);
     assert!(
-        wait_for_child_exit(&mut current.child, Duration::from_secs(10)).is_some(),
+        wait_for_child_exit(&mut current.child, EVENTUAL_PROGRESS_GUARD).is_some(),
         "current v3 sender should exit after the shipped v2 adopter ACKs"
     );
 
@@ -1812,7 +1837,9 @@ fn classification_waits_out_the_snapshot_and_must_be_replayed_on_the_successor()
         &dir,
         &[("KANNA_SERVER_EXECUTABLE", server_executable.as_str())],
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // The marker is an explicit snapshot-boundary event. The deadline only
+    // contains a child that never reaches it.
+    let deadline = Instant::now() + EVENTUAL_PROGRESS_GUARD;
     while !marker.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -1832,28 +1859,24 @@ fn classification_waits_out_the_snapshot_and_must_be_replayed_on_the_successor()
         "classification must not acknowledge after the handoff snapshot was captured"
     );
     std::fs::write(&release, b"release").unwrap();
-    let post_snapshot = connection.recv_with_timeout(Duration::from_secs(5));
+    let post_snapshot = connection.recv_with_timeout(EVENTUAL_PROGRESS_GUARD);
     assert!(
         !matches!(post_snapshot, Ok(Evt::Ok)),
         "the snapshotted predecessor must not acknowledge classification: {post_snapshot:?}"
     );
 
     assert!(
-        wait_for_child_exit(&mut old.child, Duration::from_secs(10)).is_some(),
+        wait_for_child_exit(&mut old.child, EVENTUAL_PROGRESS_GUARD).is_some(),
         "predecessor should commit handoff"
     );
     let successor_pid = successor.id();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while std::fs::read_to_string(dir.join("daemon.pid"))
-        .ok()
-        .is_none_or(|pid| pid.trim() != successor_pid.to_string())
-        && Instant::now() < deadline
-    {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let stream = UnixStream::connect(compute_socket_path(&dir)).unwrap();
+    let stream = wait_for_published_socket(
+        &dir.join("daemon.pid"),
+        &compute_socket_path(&dir),
+        successor_pid,
+    );
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(EVENTUAL_PROGRESS_GUARD))
         .unwrap();
     let mut adopted = ClientConn {
         reader: BufReader::new(stream.try_clone().unwrap()),

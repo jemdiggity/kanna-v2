@@ -92,6 +92,14 @@ impl Db {
         &self,
         busy_transfer_ids: &[String],
     ) -> Result<Option<TransferWorkItem>, rusqlite::Error> {
+        self.claim_next_transfer_work_at(busy_transfer_ids, "now")
+    }
+
+    fn claim_next_transfer_work_at(
+        &self,
+        busy_transfer_ids: &[String],
+        now: &str,
+    ) -> Result<Option<TransferWorkItem>, rusqlite::Error> {
         // Work with no transfer id — a push, before anything has reserved one —
         // has no sequence to preserve and is never excluded. Two pushes of one
         // task are not held apart here either: they are already held apart
@@ -103,17 +111,21 @@ impl Db {
             .query_row(
                 &format!(
                     "UPDATE transfer_work
-                     SET status = 'running', attempts = attempts + 1, updated_at = datetime('now')
+                     SET status = 'running', attempts = attempts + 1, updated_at = datetime(?)
                      WHERE id = (
                          SELECT id FROM transfer_work
-                         WHERE status = 'pending' AND run_after <= datetime('now'){}
+                         WHERE status = 'pending' AND run_after <= datetime(?){}
                          ORDER BY run_after, created_at, id
                          LIMIT 1
                      )
                      RETURNING id, kind, transfer_id, payload_json, attempts",
                     busy_transfer_exclusion(busy_transfer_ids),
                 ),
-                rusqlite::params_from_iter(busy_transfer_ids.iter()),
+                rusqlite::params_from_iter(
+                    [now, now]
+                        .into_iter()
+                        .chain(busy_transfer_ids.iter().map(String::as_str)),
+                ),
                 read_work_item,
             )
             .optional()?;
@@ -131,16 +143,26 @@ impl Db {
         &self,
         busy_transfer_ids: &[String],
     ) -> Result<Option<i64>, rusqlite::Error> {
+        self.next_transfer_work_delay_seconds_at(busy_transfer_ids, "now")
+    }
+
+    fn next_transfer_work_delay_seconds_at(
+        &self,
+        busy_transfer_ids: &[String],
+        now: &str,
+    ) -> Result<Option<i64>, rusqlite::Error> {
         self.conn
             .query_row(
                 &format!(
                     "SELECT MAX(0, CAST(strftime('%s', MIN(run_after)) AS INTEGER)
-                                   - CAST(strftime('%s', 'now') AS INTEGER))
+                                   - CAST(strftime('%s', ?) AS INTEGER))
                      FROM transfer_work
                      WHERE status = 'pending'{}",
                     busy_transfer_exclusion(busy_transfer_ids),
                 ),
-                rusqlite::params_from_iter(busy_transfer_ids.iter()),
+                rusqlite::params_from_iter(
+                    std::iter::once(now).chain(busy_transfer_ids.iter().map(String::as_str)),
+                ),
                 |row| row.get::<_, Option<i64>>(0),
             )
             .optional()
@@ -167,12 +189,22 @@ impl Db {
         attempts: i64,
         reason: &str,
     ) -> Result<bool, rusqlite::Error> {
+        self.fail_transfer_work_attempt_at(id, attempts, reason, "now")
+    }
+
+    fn fail_transfer_work_attempt_at(
+        &self,
+        id: &str,
+        attempts: i64,
+        reason: &str,
+        now: &str,
+    ) -> Result<bool, rusqlite::Error> {
         if attempts >= MAX_TRANSFER_WORK_ATTEMPTS {
             self.conn.execute(
                 "UPDATE transfer_work
-                 SET status = 'failed', error = ?, updated_at = datetime('now')
+                 SET status = 'failed', error = ?, updated_at = datetime(?)
                  WHERE id = ?",
-                (reason, id),
+                (reason, now, id),
             )?;
             return Ok(false);
         }
@@ -182,10 +214,10 @@ impl Db {
             "UPDATE transfer_work
              SET status = 'pending',
                  error = ?,
-                 updated_at = datetime('now'),
-                 run_after = datetime('now', ?)
+                 updated_at = datetime(?),
+                 run_after = datetime(?, ?)
              WHERE id = ?",
-            (reason, format!("+{backoff} seconds"), id),
+            (reason, now, now, format!("+{backoff} seconds"), id),
         )?;
         Ok(true)
     }
@@ -633,12 +665,18 @@ mod tests {
     #[test]
     fn a_failing_item_backs_off_and_is_eventually_parked() {
         let db = open("transfer-work-backoff");
+        let controlled_now = "2026-09-03 12:00:00";
         db.enqueue_transfer_work("push:t-1", "push", None, "{}")
             .expect("enqueue");
         for attempt in 1..MAX_TRANSFER_WORK_ATTEMPTS {
             assert!(
-                db.fail_transfer_work_attempt("push:t-1", attempt, "peer unreachable")
-                    .expect("retriable"),
+                db.fail_transfer_work_attempt_at(
+                    "push:t-1",
+                    attempt,
+                    "peer unreachable",
+                    controlled_now,
+                )
+                .expect("retriable"),
                 "attempt {attempt} should still be retriable",
             );
             assert_eq!(
@@ -647,17 +685,24 @@ mod tests {
             );
             // The backoff is what stops a broken item spinning; it also means
             // the item is not immediately claimable again.
-            assert!(db.claim_next_transfer_work(&[]).expect("claim").is_none());
             assert!(db
-                .next_transfer_work_delay_seconds(&[])
-                .expect("delay")
-                .is_some_and(|delay| delay > 0));
+                .claim_next_transfer_work_at(&[], controlled_now)
+                .expect("claim")
+                .is_none());
+            let expected_backoff =
+                RETRY_BACKOFF_SECONDS[(attempt as usize - 1).min(RETRY_BACKOFF_SECONDS.len() - 1)];
+            assert_eq!(
+                db.next_transfer_work_delay_seconds_at(&[], controlled_now)
+                    .expect("delay"),
+                Some(expected_backoff),
+            );
         }
         assert!(
-            !db.fail_transfer_work_attempt(
+            !db.fail_transfer_work_attempt_at(
                 "push:t-1",
                 MAX_TRANSFER_WORK_ATTEMPTS,
-                "peer unreachable"
+                "peer unreachable",
+                controlled_now,
             )
             .expect("exhausted"),
             "the attempt budget must run out rather than retry forever",
