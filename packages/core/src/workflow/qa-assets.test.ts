@@ -63,7 +63,7 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA workflow assets", () => {
-  it("keeps every built-in agent from matching processes by prompt substrings", () => {
+  it("keeps process termination guidance in repository conventions", () => {
     const builtInAgents = readdirSync(resolve(repoRoot, ".kanna/agents"), {
       withFileTypes: true,
     })
@@ -74,11 +74,8 @@ describe("QA workflow assets", () => {
 
     for (const name of builtInAgents) {
       const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
-      expect(agent, name).toContain("Never use `pkill -f` or `killall`");
-      expect(agent, name).toContain("Kanna task prompts are present in agent argv");
-      expect(agent, name).toContain("record `$!` and `kill <pid>`");
-      expect(agent, name).toContain("process group you created with `kill -- -<pgid>`");
-      expect(agent, name).toContain("unique token you put in that command line yourself");
+      expect(agent, name).not.toContain("pkill");
+      expect(agent, name).not.toContain("killall");
     }
 
     const conventions = readRepoPhrases("AGENTS.md");

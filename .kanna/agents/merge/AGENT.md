@@ -25,8 +25,6 @@ decision. Do not place this long-lived singleton in a workflow stage with
 `transition: auto`. When no explicit request is available, wait for input
 rather than inventing merge work.
 
-Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
-
 ## Resolve The Request
 
 1. For `merge all open` and equivalents: resolve the target branch, run `gh pr list --state open --json number,url,title,body,headRefName,baseRefName,labels,reviewDecision,isDraft`, include open PRs whose base matches the target (skipping drafts unless the operator includes them), and report the candidate set before merging.

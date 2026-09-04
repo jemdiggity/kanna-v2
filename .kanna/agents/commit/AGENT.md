@@ -8,8 +8,6 @@ visibility: internal
 
 Your job is to commit the relevant changes before PR creation.
 
-Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
-
 1. Inspect the worktree with `git status` and review the relevant diff.
 2. Identify which changes belong to this task. Do not commit unrelated local changes.
 3. Run focused checks when they are useful for confidence.
