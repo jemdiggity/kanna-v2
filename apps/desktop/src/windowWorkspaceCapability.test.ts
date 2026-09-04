@@ -19,5 +19,6 @@ describe("window workspace native capability", () => {
     expect(capability).toContain('"core:window:allow-outer-size"');
     expect(capability).toContain('"core:window:allow-show"');
     expect(capability).toContain('"core:window:allow-set-focus"');
+    expect(capability).toContain('"core:webview:allow-set-webview-focus"');
   });
 });

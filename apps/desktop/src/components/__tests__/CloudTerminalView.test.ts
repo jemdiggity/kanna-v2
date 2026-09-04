@@ -21,6 +21,7 @@ const testState = vi.hoisted(() => {
       this.keyHandler = handler;
     });
     dispose = vi.fn();
+    focus = vi.fn();
     getSelection = vi.fn(() => this.selection);
     loadAddon = vi.fn((addon: unknown) => {
       this.loadedAddons.push(addon);
@@ -220,6 +221,8 @@ function clickTerminalLink(uri: string) {
 
 describe("CloudTerminalView remote visual companion links", () => {
   const originalResizeObserver = globalThis.ResizeObserver;
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
 
   beforeEach(() => {
     testState.terminals.length = 0;
@@ -251,6 +254,75 @@ describe("CloudTerminalView remote visual companion links", () => {
       observe = vi.fn();
       disconnect = vi.fn();
     } as unknown as typeof ResizeObserver;
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    };
+    globalThis.cancelAnimationFrame = vi.fn();
+  });
+
+  it("focuses the remote terminal when it becomes active", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      attachTo: document.body,
+      props: {
+        active: false,
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    const terminal = testState.terminals[0];
+    expect(terminal?.focus).not.toHaveBeenCalled();
+
+    await wrapper.setProps({ active: true });
+    await flushAsync();
+    await flushAsync();
+
+    expect(terminal?.focus).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("focuses the remote terminal when first opened active", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      attachTo: document.body,
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    expect(testState.terminals[0]?.focus).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("does not focus the remote terminal through a modal overlay", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      attachTo: document.body,
+      props: {
+        active: false,
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    const modal = document.createElement("div");
+    modal.className = "modal-overlay";
+    document.body.appendChild(modal);
+    await wrapper.setProps({ active: true });
+    await flushAsync();
+
+    expect(testState.terminals[0]?.focus).not.toHaveBeenCalled();
+    modal.remove();
+    wrapper.unmount();
   });
 
   it("copies the selected remote terminal text with Command+C", async () => {
@@ -317,6 +389,8 @@ describe("CloudTerminalView remote visual companion links", () => {
 
   afterEach(() => {
     globalThis.ResizeObserver = originalResizeObserver;
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
   });
 
   it("adopts the relay transport and routes terminal web links through the companion manager", async () => {

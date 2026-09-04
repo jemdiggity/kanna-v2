@@ -22,6 +22,7 @@
     "core:window:allow-set-theme",
     "core:window:allow-set-title",
     "core:webview:allow-create-webview-window",
+    "core:webview:allow-set-webview-focus",
     "opener:default",
     "shell:allow-open",
     "shell:allow-execute",

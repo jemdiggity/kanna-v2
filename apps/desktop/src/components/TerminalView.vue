@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from "vue"
-import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { useTerminal, type SpawnOptions } from "../composables/useTerminal"
+import { useTerminalFocusWhenActive } from "../composables/useTerminalFocusWhenActive"
 import { useAltScreenHistory } from "../composables/terminalAltScreenHistory"
 import { shouldDelayConnectUntilAfterInitialLayout } from "../composables/terminalSessionRecovery"
 import { nextFrameOrTimeout } from "../utils/animationFrame"
 import { shouldStartTerminalSession } from "../composables/terminalVisibility"
 import { markTaskSwitchMounted, markTaskSwitchReady } from "../perf/taskSwitchPerf"
-import { isTauri } from "../tauri-mock"
 import type { TerminalFileMention } from "../composables/terminalFileLinks"
 import MentionedFilesOverlay from "./MentionedFilesOverlay.vue"
 import "@xterm/xterm/css/xterm.css"
@@ -136,7 +135,13 @@ watch(altScreenActive, (active) => {
 
 let resizeObserver: ResizeObserver | null = null
 let started = false
-let focusRafId = 0
+const {
+  cancelPendingFocus,
+  focusWhenActive,
+} = useTerminalFocusWhenActive({
+  isActive: () => props.active === true,
+  getTerminal: () => terminal.value,
+})
 
 async function startWhenActive() {
   if (!shouldStartTerminalSession(props.active) || started || !containerRef.value) return
@@ -148,30 +153,6 @@ async function startWhenActive() {
     await waitForStableLayout(containerRef.value)
   }
   await startListening()
-}
-
-async function focusWhenActive() {
-  if (!props.active || !terminal.value) return
-  await nextTick()
-  await restoreNativeWebviewFocus()
-  if (focusRafId) cancelAnimationFrame(focusRafId)
-  focusRafId = requestAnimationFrame(() => {
-    focusRafId = 0
-    if (!props.active || !terminal.value) return
-    // Let modals own focus while they are open; otherwise the active terminal
-    // should reclaim focus when it first mounts or becomes visible.
-    if (document.querySelector(".modal-overlay")) return
-    terminal.value.focus()
-  })
-}
-
-async function restoreNativeWebviewFocus() {
-  if (!isTauri) return
-  try {
-    await getCurrentWebview().setFocus()
-  } catch (error) {
-    console.warn("[terminal] failed to restore native webview focus:", error)
-  }
 }
 
 async function waitForStableLayout(el: HTMLElement) {
@@ -218,10 +199,7 @@ onActivated(async () => {
 })
 
 onDeactivated(() => {
-  if (focusRafId) {
-    cancelAnimationFrame(focusRafId)
-    focusRafId = 0
-  }
+  cancelPendingFocus()
   pause()
   started = false
   closeMentionedFiles()
@@ -242,7 +220,7 @@ watch(
 )
 
 onUnmounted(() => {
-  if (focusRafId) cancelAnimationFrame(focusRafId)
+  cancelPendingFocus()
   resizeObserver?.disconnect()
   disposeAltScreenHistory()
   dispose()

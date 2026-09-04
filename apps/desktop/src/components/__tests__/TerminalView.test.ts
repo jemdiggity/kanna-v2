@@ -50,6 +50,8 @@ async function flushLifecycle() {
   await nextTick();
   await Promise.resolve();
   await nextTick();
+  await Promise.resolve();
+  await nextTick();
 }
 
 vi.mock("../../composables/useTerminal", () => ({

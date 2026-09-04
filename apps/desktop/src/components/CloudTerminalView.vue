@@ -32,6 +32,7 @@ import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { useToast } from "../composables/useToast";
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 import { createTerminalInputProducerClassifier } from "../composables/terminalInputProducer";
+import { useTerminalFocusWhenActive } from "../composables/useTerminalFocusWhenActive";
 import { nextFrameOrTimeout } from "../utils/animationFrame";
 import {
   createTerminalDropBridge,
@@ -70,6 +71,13 @@ let currentOwnerDesktopId: string | null = null;
 let currentOwnerTaskId: string | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
+const {
+  cancelPendingFocus,
+  focusWhenActive,
+} = useTerminalFocusWhenActive({
+  isActive: () => props.active,
+  getTerminal: () => terminal,
+});
 const mentionedFilesOpen = ref(false);
 const mentionedFilesLoading = ref(false);
 const mentionedFilesError = ref<string | null>(null);
@@ -575,6 +583,7 @@ onMounted(() => {
     resizeObserver.observe(containerRef.value);
   }
   void start();
+  void focusWhenActive();
 });
 
 watch(
@@ -590,6 +599,7 @@ watch(
   async (active) => {
     if (!active) return;
     await fitAndResizeRemoteAfterLayout(lifecycleGeneration);
+    await focusWhenActive();
   },
 );
 
@@ -600,6 +610,7 @@ watch(effectiveCodeTheme, (theme) => {
 });
 
 onUnmounted(() => {
+  cancelPendingFocus();
   unmounted = true;
   lifecycleGeneration += 1;
   stopSubscription();
