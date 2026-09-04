@@ -48,7 +48,9 @@ import {
 } from "./state/sessionPersistence";
 import { readKannaExpoExtra } from "./mobileEnvironment";
 import {
+  isCustomRelayControlEnabled,
   normalizeCustomRelayUrl,
+  resolveActiveCustomRelayUrl,
   resolveRelayUrl,
   type ExpoRelayEnv
 } from "./relaySettings";
@@ -79,6 +81,9 @@ export interface AppModel {
   getAuthIdToken(forceRefresh?: boolean): Promise<string | null>;
   sessionStore: SessionStore;
   defaultRelayUrl: string | null;
+  // False in shipped builds: the custom relay endpoint control is hidden and
+  // any stored endpoint is ignored. See relaySettings.ts.
+  customRelayControlEnabled: boolean;
   setCustomRelayUrl(relayUrl: string | null): Promise<void>;
   setForceCloud(enabled: boolean): void;
   setForeground?(foreground: boolean): void;
@@ -87,6 +92,7 @@ export interface AppModel {
 
 interface AppModelOptions {
   forceCloud?: boolean;
+  customRelayControlEnabled?: boolean;
   relayUrl?: string | null;
   taskIndex?: CloudTaskIndex;
   bonjourBrowser?: BonjourBrowser;
@@ -158,6 +164,14 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     (request, init) => fetchImpl(request, init)
   );
   const extra = readKannaExpoExtra(readExpoConfig());
+  const customRelayControlEnabled = options.customRelayControlEnabled
+    ?? isCustomRelayControlEnabled(extra?.appEnv);
+  // A stored endpoint stays in AsyncStorage but does not route traffic while
+  // the control is hidden, so nobody is stuck on a relay they cannot see.
+  const activeCustomRelayUrl = () => resolveActiveCustomRelayUrl(
+    sessionStore.getState().customRelayUrl,
+    customRelayControlEnabled
+  );
   const defaultRelayUrl = options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
     dev: isDevRuntime(),
     extraRelayUrl: extra?.relayUrl
@@ -280,7 +294,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
         });
       },
       onTaskRoutesChanged: publishTaskRouteChange,
-      relayUrl: sessionStore.getState().customRelayUrl ?? defaultRelayUrl,
+      relayUrl: activeCustomRelayUrl() ?? defaultRelayUrl,
       taskIndex: options.taskIndex,
       desktopRepoWaitMs: options.desktopRepoWaitMs
     });
@@ -705,6 +719,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     },
     sessionStore,
     defaultRelayUrl,
+    customRelayControlEnabled,
     anonymousPushBindingCoordinator,
     async setCustomRelayUrl(relayUrl) {
       const normalized = relayUrl === null ? null : normalizeCustomRelayUrl(relayUrl);

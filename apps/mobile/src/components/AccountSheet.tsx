@@ -21,6 +21,9 @@ interface AccountSheetProps {
   machineCount: number;
   availableMachineCount: number;
   customRelayUrl: string | null;
+  // False in shipped builds: the whole relay-connection card is hidden and any
+  // stored endpoint is already ignored by resolution. See relaySettings.ts.
+  customRelayControlEnabled: boolean;
   defaultRelayUrl: string | null;
   quickRepliesReady: boolean;
   visible: boolean;
@@ -41,6 +44,7 @@ export function AccountSheet({
   machineCount,
   availableMachineCount,
   customRelayUrl,
+  customRelayControlEnabled,
   defaultRelayUrl,
   quickRepliesReady,
   visible,
@@ -66,10 +70,13 @@ export function AccountSheet({
   const [relayDraft, setRelayDraft] = useState<string | null>(null);
   const [relaySaveError, setRelaySaveError] = useState("");
   const [relaySavePending, setRelaySavePending] = useState(false);
+  // Belt and braces: even if a stored endpoint reaches this component, a build
+  // with the control hidden must never claim a custom relay is in use.
+  const activeCustomRelayUrl = customRelayControlEnabled ? customRelayUrl : null;
   const presentation = getAccountBadgePresentation(auth);
   const canSubmit = email.trim().length > 3 && password.length > 0;
   const canCreate = email.trim().length > 3 && password.length >= 6;
-  const displayedRelayDraft = relayDraft ?? customRelayUrl ?? "";
+  const displayedRelayDraft = relayDraft ?? activeCustomRelayUrl ?? "";
   const relayValidationError = displayedRelayDraft.trim()
     ? validateCustomRelayUrl(displayedRelayDraft)
     : null;
@@ -182,80 +189,82 @@ export function AccountSheet({
               <Text style={styles.disclosure}>›</Text>
             </Pressable>
 
-            <View style={styles.relayCard} testID={MOBILE_E2E_IDS.accountRelaySettings}>
-              <View style={styles.relayHeadingRow}>
-                <Text style={styles.machinesTitle}>Relay connection</Text>
-                <View style={customRelayUrl ? styles.customRelayBadge : styles.defaultRelayBadge}>
-                  <Text style={styles.relayBadgeLabel}>
-                    {customRelayUrl ? "Using custom relay" : "Using default relay"}
-                  </Text>
+            {customRelayControlEnabled ? (
+              <View style={styles.relayCard} testID={MOBILE_E2E_IDS.accountRelaySettings}>
+                <View style={styles.relayHeadingRow}>
+                  <Text style={styles.machinesTitle}>Relay connection</Text>
+                  <View style={activeCustomRelayUrl ? styles.customRelayBadge : styles.defaultRelayBadge}>
+                    <Text style={styles.relayBadgeLabel}>
+                      {activeCustomRelayUrl ? "Using custom relay" : "Using default relay"}
+                    </Text>
+                  </View>
                 </View>
-              </View>
-              <Text style={styles.accountStateCopy}>
-                {customRelayUrl ?? defaultRelayUrl ?? "Relay disabled for this build"}
-              </Text>
-              <TextInput
-                autoCapitalize="none"
-                autoCorrect={false}
-                editable={!relaySavePending}
-                keyboardType="url"
-                onChangeText={(value) => {
-                  setRelayDraft(value);
-                  setRelaySaveError("");
-                }}
-                placeholder="wss://relay.example.com"
-                placeholderTextColor="#6A7E9D"
-                style={styles.input}
-                testID={MOBILE_E2E_IDS.accountRelayInput}
-                value={displayedRelayDraft}
-              />
-              {relayValidationError || relaySaveError ? (
-                <Text style={styles.errorText} testID={MOBILE_E2E_IDS.accountRelayError}>
-                  {relayValidationError ?? relaySaveError}
+                <Text style={styles.accountStateCopy}>
+                  {activeCustomRelayUrl ?? defaultRelayUrl ?? "Relay disabled for this build"}
                 </Text>
-              ) : null}
-              <View style={styles.relayActions}>
-                <Pressable
-                  accessibilityLabel="Save custom relay"
-                  disabled={
-                    relaySavePending ||
-                    !displayedRelayDraft.trim() ||
-                    relayValidationError !== null ||
-                    displayedRelayDraft.trim() === customRelayUrl
-                  }
-                  style={[
-                    styles.primaryButton,
-                    relaySavePending ||
-                    !displayedRelayDraft.trim() ||
-                    relayValidationError !== null ||
-                    displayedRelayDraft.trim() === customRelayUrl
-                      ? styles.primaryButtonDisabled
-                      : null
-                  ]}
-                  testID={MOBILE_E2E_IDS.accountRelaySaveButton}
-                  onPress={() => void saveRelay(displayedRelayDraft.trim())}
-                >
-                  <Text style={styles.primaryLabel}>
-                    {relaySavePending ? "Saving…" : "Use custom relay"}
+                <TextInput
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  editable={!relaySavePending}
+                  keyboardType="url"
+                  onChangeText={(value) => {
+                    setRelayDraft(value);
+                    setRelaySaveError("");
+                  }}
+                  placeholder="wss://relay.example.com"
+                  placeholderTextColor="#6A7E9D"
+                  style={styles.input}
+                  testID={MOBILE_E2E_IDS.accountRelayInput}
+                  value={displayedRelayDraft}
+                />
+                {relayValidationError || relaySaveError ? (
+                  <Text style={styles.errorText} testID={MOBILE_E2E_IDS.accountRelayError}>
+                    {relayValidationError ?? relaySaveError}
                   </Text>
-                </Pressable>
-                {customRelayUrl ? (
-                  <Pressable
-                    accessibilityLabel="Reset to default relay"
-                    disabled={relaySavePending}
-                    style={styles.secondaryButton}
-                    testID={MOBILE_E2E_IDS.accountRelayResetButton}
-                    onPress={() => void saveRelay(null)}
-                  >
-                    <Text style={styles.secondaryLabel}>Reset to default</Text>
-                  </Pressable>
                 ) : null}
+                <View style={styles.relayActions}>
+                  <Pressable
+                    accessibilityLabel="Save custom relay"
+                    disabled={
+                      relaySavePending ||
+                      !displayedRelayDraft.trim() ||
+                      relayValidationError !== null ||
+                      displayedRelayDraft.trim() === activeCustomRelayUrl
+                    }
+                    style={[
+                      styles.primaryButton,
+                      relaySavePending ||
+                      !displayedRelayDraft.trim() ||
+                      relayValidationError !== null ||
+                      displayedRelayDraft.trim() === activeCustomRelayUrl
+                        ? styles.primaryButtonDisabled
+                        : null
+                    ]}
+                    testID={MOBILE_E2E_IDS.accountRelaySaveButton}
+                    onPress={() => void saveRelay(displayedRelayDraft.trim())}
+                  >
+                    <Text style={styles.primaryLabel}>
+                      {relaySavePending ? "Saving…" : "Use custom relay"}
+                    </Text>
+                  </Pressable>
+                  {activeCustomRelayUrl ? (
+                    <Pressable
+                      accessibilityLabel="Reset to default relay"
+                      disabled={relaySavePending}
+                      style={styles.secondaryButton}
+                      testID={MOBILE_E2E_IDS.accountRelayResetButton}
+                      onPress={() => void saveRelay(null)}
+                    >
+                      <Text style={styles.secondaryLabel}>Reset to default</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+                <Text style={styles.relayHelp}>
+                  Self-hosted relays still require a signed-in Kanna account. Use a valid TLS
+                  certificate; iOS requires a secure wss:// endpoint.
+                </Text>
               </View>
-              <Text style={styles.relayHelp}>
-                Self-hosted relays still require a signed-in Kanna account. Use a valid TLS
-                certificate; iOS requires a secure wss:// endpoint.
-              </Text>
-            </View>
+            ) : null}
 
             {auth.status === "signedIn" ? (
               <View style={styles.form}>
@@ -283,12 +292,12 @@ export function AccountSheet({
                     testID={MOBILE_E2E_IDS.accountSubscriptionState}
                   >
                     <Text style={styles.accountStateTitle}>
-                      {customRelayUrl
+                      {activeCustomRelayUrl
                         ? "Kanna Cloud subscription inactive"
                         : "Subscription required"}
                     </Text>
                     <Text style={styles.accountStateCopy}>
-                      {customRelayUrl
+                      {activeCustomRelayUrl
                         ? "Hosted Kanna Cloud features need a subscription. Your custom relay can still connect without one."
                         : "Kanna Cloud features need an active subscription. Subscribe on the Kanna account portal."}
                     </Text>
