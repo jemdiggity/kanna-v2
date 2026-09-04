@@ -2699,7 +2699,7 @@ describe("release status", () => {
         commit: PREVIOUS_RC_COMMIT
       });
       expect(result.lineage?.valid).toBe(true);
-      expect(result.freeze).toEqual({ active: false, branch: null, reason: null });
+      expect(result.freeze).toEqual({ active: false, branch: null, reason: null, waivedByReset: false });
       expect(result.promotion.mechanicallyPromotable).toBe(true);
       expect(result.promotion.base).toBe("main");
       expect(result.promotion.soak).toMatchObject({ requiredHours: 24, elapsedHours: 48, satisfied: true, overridden: false });
@@ -2888,7 +2888,8 @@ describe("release status", () => {
       expect(result.freeze).toEqual({
         active: true,
         branch: "release/1.3",
-        reason: expect.stringContaining("main staging publishes are frozen")
+        reason: expect.stringContaining("staging is frozen to that branch"),
+        waivedByReset: false
       });
       expect(result.staging?.commitsBehindMain).toBe(5);
       expect(result.releaseBranch).toEqual({
@@ -2900,6 +2901,39 @@ describe("release status", () => {
       });
       expect(result.promotion.base).toBe("release/1.3");
       expect(result.promotion.allowed).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a recorded reset as waiving the release-branch freeze for the next main publish", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const rcCommit = "cccccccccccccccccccccccccccccccccccccccc";
+      const runner = statusRunner({
+        activeVersion: "1.3.0-staging.2",
+        activeCommit: rcCommit,
+        activeSourceBranch: "release/1.3",
+        releaseBranchSha: rcCommit,
+        productionTag: "v1.2.3",
+        channelBody: [
+          "Pointer-only desktop staging updater channel.",
+          "",
+          "Lineage-Reset: 2026-09-04T00:00:00Z",
+          `Reset-From: 1.3.0-staging.2 (${rcCommit}) source release/1.3`,
+          "Reset-To: main",
+          "Reset-Reason: abandon the release candidate and resume trunk"
+        ].join("\n")
+      });
+
+      const result = await releaseStatus({ repoRoot: root, env: {}, runner, now: NOW });
+
+      expect(result.freeze).toEqual({
+        active: false,
+        branch: "release/1.3",
+        reason: expect.stringMatching(/recorded staging lineage reset.*freeze is waived/),
+        waivedByReset: true
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2920,7 +2954,7 @@ describe("release status", () => {
 
       const result = await releaseStatus({ repoRoot: root, env: {}, runner, now: NOW });
 
-      expect(result.freeze).toEqual({ active: false, branch: null, reason: null });
+      expect(result.freeze).toEqual({ active: false, branch: null, reason: null, waivedByReset: false });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3123,7 +3157,7 @@ describe("release status", () => {
       expect(result.staging).toBeNull();
       expect(result.releaseBranch).toBeNull();
       expect(result.lineage).toBeNull();
-      expect(result.freeze).toEqual({ active: false, branch: null, reason: null });
+      expect(result.freeze).toEqual({ active: false, branch: null, reason: null, waivedByReset: false });
       expect(result.promotion.allowed).toBe(false);
       expect(result.promotion.blockers).toEqual(["No staging release candidate is active on the channel."]);
       expect(result.promoteCommand).toBeNull();

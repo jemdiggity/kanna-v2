@@ -8,6 +8,7 @@ import {
   evaluateCandidateLineage,
   evaluatePromotionGate,
   evaluateSoak,
+  evaluateStagingFreeze,
   evaluateStagingPublishGate,
   isReleaseBranchName,
   normalizeStagingVersion,
@@ -2136,7 +2137,7 @@ export interface ReleaseStatusResult {
   commitsOnMainSinceProduction: number | null;
   policy: ReleasePolicy;
   lineage: ReleaseStatusLineage | null;
-  freeze: { active: boolean; branch: string | null; reason: string | null };
+  freeze: { active: boolean; branch: string | null; reason: string | null; waivedByReset: boolean };
   promotion: ReleaseStatusPromotion;
   promoteCommand: string | null;
 }
@@ -2392,7 +2393,12 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
   const commitsOnMainSinceProduction = production ? await countCommits(input, `${production.tag}..origin/main`) : null;
 
   let lineage: ReleaseStatusLineage | null = null;
-  let freeze: ReleaseStatusResult["freeze"] = { active: false, branch: null, reason: null };
+  let freeze: ReleaseStatusResult["freeze"] = {
+    active: false,
+    branch: null,
+    reason: null,
+    waivedByReset: false
+  };
   const promotion: ReleaseStatusPromotion = {
     mechanicallyPromotable: false,
     base: null,
@@ -2413,18 +2419,19 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
     const audit = await readLineageAudit(input, repoSlug);
     lineage = await resolveCandidateLineage(input, repoSlug, activeCandidate, audit.reset, audit.postPromotion);
 
-    if (isReleaseBranchName(staging.sourceBranch)) {
-      const promoted = await activeProductionTagExists(input, staging.version);
-      if (!promoted) {
-        freeze = {
-          active: true,
-          branch: staging.sourceBranch,
-          reason:
-            `${staging.tag} is an unpromoted ${staging.sourceBranch} release candidate; ` +
-            "main staging publishes are frozen until it is promoted or the soak is explicitly abandoned."
-        };
-      }
-    }
+    const promoted = await activeProductionTagExists(input, staging.version);
+    const freezeDecision = evaluateStagingFreeze({
+      proposedSourceBranch: "main",
+      active: activeCandidate,
+      activeProductionTagExists: promoted,
+      reset: audit.reset
+    });
+    freeze = {
+      active: freezeDecision.active,
+      branch: freezeDecision.branch,
+      reason: freezeDecision.reason,
+      waivedByReset: freezeDecision.waivedByReset
+    };
 
     const decision = decidePromotionBase({
       rcLabel: staging.tag,

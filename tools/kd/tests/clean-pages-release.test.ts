@@ -11,7 +11,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { bazelOutputBase, cleanWorkspace } from "../src/runtime/clean";
+import { cleanWorkspace } from "../src/runtime/clean";
+import type { CommandRunner } from "../src/runtime/process";
 import { buildConfigSchemaPages } from "../src/runtime/pages";
 import {
   bazelTargetForLabel,
@@ -25,25 +26,45 @@ import {
   updaterSignatureName
 } from "../src/runtime/release";
 
+function bazelRunner(outputBase: string): CommandRunner {
+  return {
+    async run(command, args) {
+      expect(command).toBe("bazel");
+      expect(args).toEqual(["info", "output_base"]);
+      return { exitCode: 0, stdout: `${outputBase}\n`, stderr: "" };
+    }
+  };
+}
+
 describe("clean runtime", () => {
-  it("removes workspace-local build artifacts without removing shared caches by default", async () => {
+  it("removes Bazel's configured output base and workspace artifacts without removing shared caches by default", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-clean-"));
     const home = join(root, "home");
     const repo = join(root, "repo");
+    const bazelOutputBase = join(root, "custom-bazel-output-root", "output-base");
     const sharedRust = join(home, "Library", "Caches", "kanna", "rust-build");
     for (const dir of [
       join(repo, ".build"),
       join(repo, "apps", "desktop", "src-tauri", "target"),
-      bazelOutputBase(repo, home, "tester"),
+      bazelOutputBase,
       sharedRust
     ]) {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "artifact.txt"), "x");
     }
 
-    const result = cleanWorkspace({ repoRoot: repo, homeDir: home, userName: "tester", all: false, dry: false, sharedRustBuild: false });
+    const result = await cleanWorkspace({
+      repoRoot: repo,
+      homeDir: home,
+      runner: bazelRunner(bazelOutputBase),
+      all: false,
+      dry: false,
+      sharedRustBuild: false
+    });
 
-    expect(result.removals.map((removal) => removal.path)).toContain(bazelOutputBase(repo, home, "tester"));
+    expect(result.bazelOutputBase).toBe(bazelOutputBase);
+    expect(result.removals.map((removal) => removal.path)).toContain(bazelOutputBase);
+    expect(existsSync(bazelOutputBase)).toBe(false);
     expect(existsSync(join(repo, ".build"))).toBe(false);
     expect(existsSync(sharedRust)).toBe(true);
     await rm(root, { recursive: true, force: true });
@@ -58,10 +79,10 @@ describe("clean runtime", () => {
     writeFileSync(join(externalBuild, "artifact.txt"), "x");
     symlinkSync(externalBuild, join(repo, ".build"));
 
-    const result = cleanWorkspace({
+    const result = await cleanWorkspace({
       repoRoot: repo,
       homeDir: join(root, "home"),
-      userName: "tester",
+      runner: bazelRunner(join(root, "bazel-output")),
       all: false,
       dry: false,
       sharedRustBuild: false
@@ -85,16 +106,16 @@ describe("clean runtime", () => {
     writeFileSync(join(siblingBuild, "artifact.txt"), "keep");
     symlinkSync(siblingBuild, join(repo, ".build"));
 
-    expect(() =>
+    await expect(
       cleanWorkspace({
         repoRoot: repo,
         homeDir: join(root, "home"),
-        userName: "tester",
+        runner: bazelRunner(join(root, "bazel-output")),
         all: true,
         dry: false,
         sharedRustBuild: false
       })
-    ).toThrow(/Refusing to clean external \.build target.*expected an exact workspace target/);
+    ).rejects.toThrow(/Refusing to clean external \.build target.*expected an exact workspace target/);
     expect(readFileSync(join(siblingBuild, "artifact.txt"), "utf8")).toBe("keep");
     expect(lstatSync(join(repo, ".build")).isSymbolicLink()).toBe(true);
     await rm(root, { recursive: true, force: true });
@@ -106,16 +127,16 @@ describe("clean runtime", () => {
     mkdirSync(repo, { recursive: true });
     symlinkSync(join(root, "external", "task-dangling"), join(repo, ".build"));
 
-    expect(() =>
+    await expect(
       cleanWorkspace({
         repoRoot: repo,
         homeDir: join(root, "home"),
-        userName: "tester",
+        runner: bazelRunner(join(root, "bazel-output")),
         all: false,
         dry: false,
         sharedRustBuild: false
       })
-    ).toThrow(/Cannot clean external \.build target.*recorded target is unavailable.*preserving/);
+    ).rejects.toThrow(/Cannot clean external \.build target.*recorded target is unavailable.*preserving/);
     expect(lstatSync(join(repo, ".build")).isSymbolicLink()).toBe(true);
     await rm(root, { recursive: true, force: true });
   });
@@ -125,16 +146,59 @@ describe("clean runtime", () => {
     const repo = join(root, "task-absent");
     mkdirSync(repo, { recursive: true });
 
-    const result = cleanWorkspace({
+    const bazelOutputBase = join(root, "bazel-output");
+    const result = await cleanWorkspace({
       repoRoot: repo,
       homeDir: join(root, "home"),
-      userName: "tester",
+      runner: bazelRunner(bazelOutputBase),
       all: false,
       dry: false,
       sharedRustBuild: false
     });
 
-    expect(result.removals).toEqual([]);
+    expect(result).toEqual({ bazelOutputBase, removals: [] });
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("fails before cleaning when Bazel is unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-clean-no-bazel-"));
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, ".build"), { recursive: true });
+    const runner: CommandRunner = {
+      async run() {
+        throw new Error("spawn bazel ENOENT");
+      }
+    };
+
+    await expect(
+      cleanWorkspace({ repoRoot: repo, runner, all: false, dry: false, sharedRustBuild: false })
+    ).rejects.toThrow(/Cannot resolve Bazel output base.*could not run.*ENOENT/);
+    expect(existsSync(join(repo, ".build"))).toBe(true);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("fails before cleaning when Bazel cannot report its output base", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-clean-bazel-failure-"));
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, ".build"), { recursive: true });
+    const failedRunner: CommandRunner = {
+      async run() {
+        return { exitCode: 37, stdout: "", stderr: "could not read bazelrc" };
+      }
+    };
+    const emptyRunner: CommandRunner = {
+      async run() {
+        return { exitCode: 0, stdout: "\n", stderr: "" };
+      }
+    };
+
+    await expect(
+      cleanWorkspace({ repoRoot: repo, runner: failedRunner, all: false, dry: false, sharedRustBuild: false })
+    ).rejects.toThrow(/Cannot resolve Bazel output base.*could not read bazelrc/);
+    await expect(
+      cleanWorkspace({ repoRoot: repo, runner: emptyRunner, all: false, dry: false, sharedRustBuild: false })
+    ).rejects.toThrow(/Cannot resolve Bazel output base.*returned no path/);
+    expect(existsSync(join(repo, ".build"))).toBe(true);
     await rm(root, { recursive: true, force: true });
   });
 });

@@ -1,7 +1,7 @@
 import { lstatSync, rmSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { isAbsolute, join, parse, resolve } from "node:path";
+import type { CommandResult, CommandRunner } from "./process";
 import {
   EXTERNAL_WORKSPACE_BUILD_RECORD,
   resolveExternalWorkspaceBuild,
@@ -11,7 +11,8 @@ import {
 export interface CleanInput {
   repoRoot: string;
   homeDir?: string;
-  userName?: string;
+  env?: NodeJS.ProcessEnv;
+  runner: CommandRunner;
   all: boolean;
   dry: boolean;
   sharedRustBuild: boolean;
@@ -25,11 +26,46 @@ export interface CleanRemoval {
 
 export interface CleanResult {
   removals: CleanRemoval[];
+  bazelOutputBase: string;
 }
 
-export function bazelOutputBase(repoRoot: string, homeDir = homedir(), userName = userInfo().username): string {
-  const hash = createHash("md5").update(repoRoot).digest("hex");
-  return join(homeDir, "Library", "Caches", "bazel", `_bazel_${userName}`, hash);
+export async function resolveBazelOutputBase(input: {
+  repoRoot: string;
+  env?: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}): Promise<string> {
+  let result: CommandResult;
+  try {
+    result = await input.runner.run("bazel", ["info", "output_base"], {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`[kd] Cannot resolve Bazel output base: \`bazel info output_base\` could not run (${detail}).`);
+  }
+
+  if (result.exitCode !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+    throw new Error(`[kd] Cannot resolve Bazel output base: \`bazel info output_base\` failed (${detail}).`);
+  }
+
+  const lines = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    throw new Error("[kd] Cannot resolve Bazel output base: `bazel info output_base` returned no path.");
+  }
+  if (lines.length !== 1 || !isAbsolute(lines[0] ?? "")) {
+    throw new Error("[kd] Cannot resolve Bazel output base: `bazel info output_base` did not return one absolute path.");
+  }
+
+  const outputBase = resolve(lines[0] ?? "");
+  if (outputBase === parse(outputBase).root || outputBase === resolve(input.repoRoot)) {
+    throw new Error(`[kd] Refusing to clean unsafe Bazel output base ${outputBase}.`);
+  }
+  return outputBase;
 }
 
 function removePath(path: string, dry: boolean, requirePresent = false): CleanRemoval | null {
@@ -48,15 +84,16 @@ function removePath(path: string, dry: boolean, requirePresent = false): CleanRe
   return { path, removed: !dry, dryRun: dry };
 }
 
-export function cleanWorkspace(input: CleanInput): CleanResult {
+export async function cleanWorkspace(input: CleanInput): Promise<CleanResult> {
   const homeDir = input.homeDir ?? homedir();
+  const bazelOutputBase = await resolveBazelOutputBase(input);
   const externalWorkspaceBuild = resolveExternalWorkspaceBuild(input.repoRoot);
   const candidates: Array<{ path: string; requirePresent?: boolean }> = [
     ...(externalWorkspaceBuild ? [{ path: externalWorkspaceBuild, requirePresent: true }] : []),
     { path: join(input.repoRoot, WORKSPACE_BUILD_DIRECTORY) },
     { path: join(input.repoRoot, EXTERNAL_WORKSPACE_BUILD_RECORD) },
     { path: join(input.repoRoot, "apps", "desktop", "src-tauri", "target") },
-    { path: bazelOutputBase(input.repoRoot, homeDir, input.userName ?? userInfo().username) }
+    { path: bazelOutputBase }
   ];
 
   if (input.sharedRustBuild) {
@@ -75,6 +112,7 @@ export function cleanWorkspace(input: CleanInput): CleanResult {
   }
 
   return {
+    bazelOutputBase,
     removals: candidates
       .map(({ path, requirePresent }) => removePath(path, input.dry, requirePresent))
       .filter((removal): removal is CleanRemoval => removal !== null)
