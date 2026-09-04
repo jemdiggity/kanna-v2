@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  CUSTOM_RELAY_CONTROL_APP_ENVS,
+  isCustomRelayControlEnabled,
   normalizePersistedCustomRelayUrl,
+  resolveActiveCustomRelayUrl,
   resolveRelayUrl,
   validateCustomRelayUrl
 } from "./relaySettings";
@@ -10,6 +13,7 @@ describe("relay settings", () => {
     expect(resolveRelayUrl(
       { EXPO_PUBLIC_KANNA_RELAY_URL: "wss://environment.example" },
       {
+        appEnv: "dev",
         customRelayUrl: " wss://self-hosted.example/relay ",
         extraRelayUrl: "wss://baked.example"
       }
@@ -41,6 +45,40 @@ describe("relay settings", () => {
   it("accepts secure relay URLs with ports, paths, and query strings", () => {
     expect(validateCustomRelayUrl("wss://relay.example:9443/socket?region=local"))
       .toBeNull();
+  });
+
+  it("hides the custom relay control outside the environments that list it", () => {
+    expect(CUSTOM_RELAY_CONTROL_APP_ENVS).toEqual(["dev"]);
+    expect(isCustomRelayControlEnabled("dev")).toBe(true);
+    expect(isCustomRelayControlEnabled("staging")).toBe(false);
+    expect(isCustomRelayControlEnabled("prod")).toBe(false);
+    expect(isCustomRelayControlEnabled(undefined)).toBe(false);
+    expect(isCustomRelayControlEnabled(null)).toBe(false);
+    expect(isCustomRelayControlEnabled("  ")).toBe(false);
+  });
+
+  it("ignores a stored endpoint where the control is hidden and honors it where it is shown", () => {
+    expect(resolveActiveCustomRelayUrl("wss://relay.home.example", false)).toBeNull();
+    expect(resolveActiveCustomRelayUrl(" wss://relay.home.example ", true))
+      .toBe("wss://relay.home.example");
+
+    // Shipped builds fall back to the environment default rather than routing
+    // through an endpoint their user has no way to see or reset.
+    expect(resolveRelayUrl({}, {
+      appEnv: "prod",
+      customRelayUrl: "wss://relay.home.example",
+      extraRelayUrl: "wss://relay.kanna.build"
+    })).toBe("wss://relay.kanna.build");
+    expect(resolveRelayUrl({}, {
+      appEnv: "staging",
+      customRelayUrl: "wss://relay.home.example",
+      extraRelayUrl: "wss://relay-staging.kanna.build"
+    })).toBe("wss://relay-staging.kanna.build");
+    expect(resolveRelayUrl({}, {
+      appEnv: "dev",
+      customRelayUrl: "wss://relay.home.example",
+      extraRelayUrl: "wss://relay-staging.kanna.build"
+    })).toBe("wss://relay.home.example");
   });
 
   it("drops invalid persisted overrides instead of preventing startup", () => {

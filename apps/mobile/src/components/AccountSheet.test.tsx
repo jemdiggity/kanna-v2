@@ -154,6 +154,7 @@ function renderSignedOutSheet(): ElementNode {
     onCreateAccount: vi.fn(),
     onRefreshAccount: vi.fn(),
     onSignOut: vi.fn(),
+    customRelayControlEnabled: true,
     subscriptionUrl: "https://portal.example.test/subscribe"
   }) as ElementNode;
 }
@@ -174,6 +175,7 @@ describe("AccountSheet", () => {
       machineCount: 0,
       availableMachineCount: 0,
       customRelayUrl: null,
+      customRelayControlEnabled: true,
       defaultRelayUrl: "wss://relay.default.example",
       quickRepliesReady: true,
       visible: true,
@@ -217,6 +219,54 @@ describe("AccountSheet", () => {
     findNodeByTestId(tree, MOBILE_E2E_IDS.accountRelayResetButton)?.props?.onPress?.();
     await Promise.resolve();
     expect(onSaveCustomRelayUrl).toHaveBeenLastCalledWith(null);
+  });
+
+  it("hides the relay card, and any custom-relay copy, where the control is hidden", () => {
+    if (!AccountSheet) throw new Error("AccountSheet was not loaded");
+    const props = {
+      auth: {
+        status: "signedIn" as const,
+        user: {
+          uid: "uid-1",
+          email: "person@example.test",
+          emailVerified: true,
+          cloudAccess: "inactive" as const
+        }
+      },
+      machineCount: 0,
+      availableMachineCount: 0,
+      // A device that saved an endpoint before the control was hidden.
+      customRelayUrl: "wss://relay.home.example/socket",
+      customRelayControlEnabled: false,
+      defaultRelayUrl: "wss://relay.default.example",
+      quickRepliesReady: true,
+      visible: true,
+      onClose: vi.fn(),
+      onOpenMachines: vi.fn(),
+      onOpenQuickReplies: vi.fn(),
+      onSignIn: vi.fn(),
+      onCreateAccount: vi.fn(),
+      onRefreshAccount: vi.fn(),
+      onSignOut: vi.fn(),
+      onSaveCustomRelayUrl: vi.fn().mockResolvedValue(undefined),
+      subscriptionUrl: "https://portal.example.test/subscribe"
+    };
+
+    reactState.index = 0;
+    const tree = AccountSheet(props) as ElementNode;
+
+    for (const testId of [
+      MOBILE_E2E_IDS.accountRelaySettings,
+      MOBILE_E2E_IDS.accountRelayInput,
+      MOBILE_E2E_IDS.accountRelaySaveButton,
+      MOBILE_E2E_IDS.accountRelayResetButton
+    ]) {
+      expect(findNodeByTestId(tree, testId)).toBeNull();
+    }
+    const rendered = textContent(tree);
+    expect(rendered).not.toContain("Relay connection");
+    expect(rendered).not.toContain("custom relay");
+    expect(rendered).toContain("Subscription required");
   });
 
   it("creates an account with the entered email and password", () => {
