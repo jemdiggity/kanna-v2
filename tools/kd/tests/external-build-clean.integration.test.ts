@@ -15,6 +15,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanWorkspace } from "../src/runtime/clean";
 import { migrateLegacyExternalWorkspaceBuild } from "../src/runtime/env-sync";
+import type { CommandRunner } from "../src/runtime/process";
+
+function bazelRunner(outputBase: string): CommandRunner {
+  return {
+    async run() {
+      return { exitCode: 0, stdout: `${outputBase}\n`, stderr: "" };
+    }
+  };
+}
 
 describe("external build workspace teardown", () => {
   const fixtures: string[] = [];
@@ -25,7 +34,7 @@ describe("external build workspace teardown", () => {
     }
   });
 
-  it("migrates an installed legacy hook before fallback, then cleans only the departed workspace", () => {
+  it("migrates an installed legacy hook before fallback, then cleans only the departed workspace", async () => {
     const fixture = mkdtempSync(join(tmpdir(), "kd-external-teardown-"));
     fixtures.push(fixture);
     const volume = join(fixture, "external-volume");
@@ -83,25 +92,25 @@ describe("external build workspace teardown", () => {
     execFileSync("/bin/sh", [legacyHook], { cwd: departed, stdio: "pipe" });
     expect(lstatSync(join(departed, ".build")).isDirectory()).toBe(true);
     expect(readFileSync(departedRecord, "utf8")).toBe(`${departedBuild}\n`);
-    expect(() =>
+    await expect(
       cleanWorkspace({
         repoRoot: departed,
         homeDir: join(fixture, "home"),
-        userName: "tester",
+        runner: bazelRunner(join(fixture, "bazel-output")),
         all: true,
         dry: false,
         sharedRustBuild: false
       })
-    ).toThrow(/Cannot clean external \.build target.*recorded target is unavailable.*preserving/);
+    ).rejects.toThrow(/Cannot clean external \.build target.*recorded target is unavailable.*preserving/);
     expect(existsSync(join(departed, ".build"))).toBe(true);
     expect(readFileSync(departedRecord, "utf8")).toBe(`${departedBuild}\n`);
 
     renameSync(unmountedVolume, volume);
 
-    cleanWorkspace({
+    await cleanWorkspace({
       repoRoot: departed,
       homeDir: join(fixture, "home"),
-      userName: "tester",
+      runner: bazelRunner(join(fixture, "bazel-output")),
       all: true,
       dry: false,
       sharedRustBuild: false

@@ -220,6 +220,69 @@ export interface StagingPublishGateDecision {
 
 const RESET_HINT = "kd release reset-staging --to <main|release/X.Y> --reason \"<why>\" --confirm-abandon <active-staging-version>";
 
+export interface StagingFreezeDecision {
+  active: boolean;
+  branch: string | null;
+  reason: string | null;
+  waivedByReset: boolean;
+  resetAuthorizesPublish: boolean;
+}
+
+export function evaluateStagingFreeze(
+  input: Pick<
+    StagingPublishGateInput,
+    "proposedSourceBranch" | "active" | "activeProductionTagExists" | "reset"
+  >
+): StagingFreezeDecision {
+  const active = input.active;
+  const resetAuthorizesPublish = active
+    ? resetAuthorizes(input.reset, {
+        fromVersion: active.version,
+        toBranch: input.proposedSourceBranch
+      })
+    : false;
+  const branch = active?.sourceBranch ?? null;
+  const wouldFreeze =
+    active !== null &&
+    isReleaseBranchName(branch) &&
+    !input.activeProductionTagExists &&
+    input.proposedSourceBranch === "main";
+
+  if (!wouldFreeze) {
+    return {
+      active: false,
+      branch: null,
+      reason: null,
+      waivedByReset: false,
+      resetAuthorizesPublish
+    };
+  }
+
+  if (resetAuthorizesPublish) {
+    return {
+      active: false,
+      branch,
+      reason:
+        `${active.tag} is an unpromoted ${branch} release candidate, but the recorded staging lineage reset ` +
+        "authorizes the next main staging publish, so the freeze is waived.",
+      waivedByReset: true,
+      resetAuthorizesPublish: true
+    };
+  }
+
+  return {
+    active: true,
+    branch,
+    reason:
+      `${active.tag} is an unpromoted ${branch} release candidate, so staging is frozen to that branch. ` +
+      `A main staging publish would repoint the single staging channel away from the RC mid-soak. ` +
+      `Promote it (kd release promote ${active.version}), ship the next RC from ${branch}, ` +
+      `or abandon the soak explicitly: ${RESET_HINT}.`,
+    waivedByReset: false,
+    resetAuthorizesPublish: false
+  };
+}
+
 export function evaluateStagingPublishGate(input: StagingPublishGateInput): StagingPublishGateDecision {
   const active = input.active;
 
@@ -244,29 +307,23 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
     return { allowed: true, reason: null, waivedByReset: false, authorizedByPromotion: false, frozenBy: null };
   }
 
-  const waived = resetAuthorizes(input.reset, {
-    fromVersion: active.version,
-    toBranch: input.proposedSourceBranch
+  const freeze = evaluateStagingFreeze({
+    proposedSourceBranch: input.proposedSourceBranch,
+    active,
+    activeProductionTagExists: input.activeProductionTagExists,
+    reset: input.reset
   });
-  if (waived) {
+  if (freeze.resetAuthorizesPublish) {
     return { allowed: true, reason: null, waivedByReset: true, authorizedByPromotion: false, frozenBy: null };
   }
 
-  if (
-    isReleaseBranchName(active.sourceBranch) &&
-    !input.activeProductionTagExists &&
-    input.proposedSourceBranch === "main"
-  ) {
+  if (freeze.active) {
     return {
       allowed: false,
       waivedByReset: false,
       authorizedByPromotion: false,
-      frozenBy: active.sourceBranch,
-      reason:
-        `${active.tag} is an unpromoted ${active.sourceBranch} release candidate, so staging is frozen to that branch. ` +
-        `A main staging publish would repoint the single staging channel away from the RC mid-soak. ` +
-        `Promote it (kd release promote ${active.version}), ship the next RC from ${active.sourceBranch}, ` +
-        `or abandon the soak explicitly: ${RESET_HINT}.`
+      frozenBy: freeze.branch,
+      reason: freeze.reason
     };
   }
 

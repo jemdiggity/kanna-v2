@@ -88,6 +88,24 @@ describe("staging publish gate", () => {
     expect(frozen.reason).toMatch(/staging is frozen to that branch/);
   });
 
+  it("waives that freeze when a recorded reset authorizes the next main publish", () => {
+    const resetToMain: LineageResetRecord = {
+      ...RESET,
+      fromSourceBranch: "release/0.1",
+      toBranch: "main"
+    };
+    const waived = gate({
+      active: { ...ACTIVE, sourceBranch: "release/0.1" },
+      reset: resetToMain
+    });
+    expect(waived).toMatchObject({
+      allowed: true,
+      waivedByReset: true,
+      frozenBy: null,
+      reason: null
+    });
+  });
+
   it("lifts the freeze once the candidate's production version is released", () => {
     const thawed = gate({
       active: { ...ACTIVE, sourceBranch: "release/0.1" },

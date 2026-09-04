@@ -2474,16 +2474,20 @@ export const taskDefinitions = [
       const inventoryCleanup = parsed.dry
         ? { cleaned: [], failed: [] }
         : await cleanupProcessInventory(processInventoryPath(context.repoRoot), nodeCommandRunner);
-      const result = cleanWorkspace({
+      const result = await cleanWorkspace({
         repoRoot: context.repoRoot,
         homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
         all: parsed.all,
         dry: parsed.dry,
         sharedRustBuild: parsed.sharedRustBuild
       });
       return {
         ok: true,
-        message: result.removals.length === 0 ? "nothing to clean" : formatJsonResult(result.removals),
+        message: result.removals.length === 0
+          ? `nothing to clean (Bazel output base: ${result.bazelOutputBase})`
+          : formatJsonResult(result.removals),
         data: { ...result, inventoryCleanup }
       };
     }
