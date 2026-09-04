@@ -28,6 +28,7 @@ vi.mock("@xterm/xterm", () => ({
     }
     loadAddon() {}
     open() {}
+    focus() {}
     refresh() {}
     reset() {}
     resize(cols: number, rows: number) {
