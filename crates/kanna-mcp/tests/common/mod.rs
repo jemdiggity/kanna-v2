@@ -25,7 +25,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Cross-process readiness is eventual. This deadline only contains a fixture
+/// process that has exited or can no longer make progress.
+pub const EVENTUAL_PROGRESS_GUARD: Duration = Duration::from_secs(30);
 
 /// Mirrors `ACTIVITY_CONFIRM_DELAY` in `crates/kanna-mcp/src/main.rs`. A read
 /// that engaged the confirmation cannot come back faster than this, which is
@@ -164,8 +168,8 @@ async fn launch_server(label: &str) -> RunningServer {
 async fn wait_for_server(server: &mut RunningServer) {
     let client = reqwest::Client::new();
     let status_url = format!("{}/v1/status", server.base_url);
-    let mut last_error = String::new();
-    for _ in 0..200 {
+    let deadline = Instant::now() + EVENTUAL_PROGRESS_GUARD;
+    loop {
         if let Some(status) = server.child.try_wait().expect("poll server process") {
             let mut stderr = String::new();
             if let Some(mut pipe) = server.child.stderr.take() {
@@ -173,14 +177,17 @@ async fn wait_for_server(server: &mut RunningServer) {
             }
             panic!("kanna-server exited with {status}: {stderr}");
         }
-        match client.get(&status_url).send().await {
+        let last_error = match client.get(&status_url).send().await {
             Ok(response) if response.status().is_success() => return,
-            Ok(response) => last_error = format!("HTTP {}", response.status()),
-            Err(error) => last_error = error.to_string(),
-        }
+            Ok(response) => format!("HTTP {}", response.status()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "kanna-server never became ready within the hang-containment guard: {last_error}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("kanna-server never became ready: {last_error}");
 }
 
 pub async fn execute_sql(server: &RunningServer, sql: &str, params: Value) {
@@ -286,32 +293,36 @@ pub async fn stored_runtime_state(server: &RunningServer, task_id: &str) -> Valu
 /// wants to act on a stored runtime state has to wait for it rather than
 /// assume the write already landed.
 pub async fn await_stored_runtime_state(server: &RunningServer, task_id: &str, expected: &str) {
-    for _ in 0..400 {
+    let deadline = Instant::now() + EVENTUAL_PROGRESS_GUARD;
+    loop {
         if stored_runtime_state(server, task_id).await == json!(expected) {
             return;
         }
+        assert!(
+            Instant::now() < deadline,
+            "runtimeState never became {expected}; it is {}",
+            stored_runtime_state(server, task_id).await
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!(
-        "runtimeState never became {expected}; it is {}",
-        stored_runtime_state(server, task_id).await
-    );
 }
 
 /// Daemon events are applied by the watcher on its own task, so a test that
 /// wants to act on a stored activity has to wait for it rather than assume the
 /// write already landed.
 pub async fn await_stored_activity(server: &RunningServer, task_id: &str, expected: &str) {
-    for _ in 0..400 {
+    let deadline = Instant::now() + EVENTUAL_PROGRESS_GUARD;
+    loop {
         if stored_activity(server, task_id).await == expected {
             return;
         }
+        assert!(
+            Instant::now() < deadline,
+            "activity never became {expected}; it is {}",
+            stored_activity(server, task_id).await
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!(
-        "activity never became {expected}; it is {}",
-        stored_activity(server, task_id).await
-    );
 }
 
 /// The daemon socket path for a daemon directory.
