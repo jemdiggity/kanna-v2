@@ -1,5 +1,6 @@
 import { invoke } from "../invoke";
 import { resolveCurrentKannaServerBaseUrl } from "./kannaServerBaseUrl";
+import { localControlAuthHeaders } from "./localControlCredential";
 
 const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
 const LOCAL_SERVER_ACTION_RETRY_DELAY_MS = 250;
@@ -49,12 +50,11 @@ export async function postDesktopTaskAction(
     try {
       return await fetch(url, {
         method: "POST",
-        ...(body == null
-          ? {}
-          : {
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            }),
+        headers: {
+          ...(await localControlAuthHeaders()),
+          ...(body == null ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body == null ? {} : { body: JSON.stringify(body) }),
       });
     } catch (error) {
       lastError = error;

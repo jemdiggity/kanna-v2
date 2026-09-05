@@ -216,9 +216,13 @@ async fn transfer_control_plane_rejects_unauthenticated_non_loopback_cors_reads_
             axum::http::HeaderValue::from_static("https://hostile.example"),
         );
         let response = app.clone().oneshot(request).await.unwrap();
+        // Refused at the browser/local-client boundary, before the route's own
+        // extractor runs: a request carrying an `Origin` is a browser's, and a
+        // browser must present the local control credential or a paired
+        // device secret. See `http_api::lan_trust`.
         assert_eq!(
             response.status(),
-            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
             "unauthenticated cross-origin direct-LAN request reached {path}",
         );
     }
@@ -4518,6 +4522,24 @@ impl TaskFileRouteFixture {
                 Request::get(format!(
                     "/v1/tasks/{task_id}/files/content?path={encoded_path}"
                 ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn get_from_a_browser(
+        &self,
+        task_id: &str,
+        encoded_path: &str,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/tasks/{task_id}/files/content?path={encoded_path}"
+                ))
                 .header("origin", "https://attacker.example")
                 .body(Body::empty())
                 .unwrap(),
@@ -4617,7 +4639,6 @@ impl TaskFileRouteFixture {
             .oneshot(
                 Request::post(format!("/v1/tasks/{task_id}/files/resolve-mentions"))
                     .header("content-type", "application/json")
-                    .header("origin", "https://attacker.example")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -4944,6 +4965,16 @@ async fn task_file_route_denies_ordinary_http_requests_before_reading_the_path()
     assert!(task_file_response_text(response)
         .await
         .contains("authenticated relay"));
+
+    // A browser never reaches that check: the browser/local-client boundary
+    // refuses it first, so a page cannot even probe for path behaviour.
+    let from_browser = fixture
+        .get_from_a_browser("task-file", "docs%2Fspec.md")
+        .await;
+    assert_eq!(from_browser.status(), StatusCode::FORBIDDEN);
+    assert!(task_file_response_text(from_browser)
+        .await
+        .contains("local control credential"));
 }
 
 #[tokio::test]
@@ -5274,15 +5305,28 @@ impl TaskDiffRouteFixture {
     }
 
     async fn get(&self, task_id: &str, authenticated: bool) -> axum::response::Response {
-        let mut request = Request::get(format!("/v1/tasks/{task_id}/diff"));
-        if !authenticated {
-            request = request.header("origin", "https://attacker.example");
-        }
-        let mut request = request.body(Body::empty()).unwrap();
+        let mut request = Request::get(format!("/v1/tasks/{task_id}/diff"))
+            .body(Body::empty())
+            .unwrap();
         if authenticated {
             request.extensions_mut().insert(AuthenticatedTaskFileAccess);
         }
         self.app.clone().oneshot(request).await.unwrap()
+    }
+
+    /// An unauthenticated request in a browser's shape, which the
+    /// browser/local-client boundary refuses before the route is reached.
+    async fn get_from_a_browser(&self, task_id: &str) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/tasks/{task_id}/diff"))
+                    .header("origin", "https://attacker.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     async fn get_through_authenticated_relay(
@@ -5396,12 +5440,21 @@ async fn task_diff_route_returns_branch_patch_with_uncommitted_changes() {
 async fn task_diff_route_denies_ordinary_http_requests() {
     let fixture = TaskDiffRouteFixture::new();
 
+    // A non-browser request that proved nothing still fails the route's own
+    // authenticated-relay check.
     let response = fixture.get("task-diff", false).await;
-
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(task_file_response_text(response)
         .await
         .contains("authenticated relay"));
+
+    // The same request from a browser never reaches the route: the
+    // browser/local-client boundary refuses it first.
+    let from_browser = fixture.get_from_a_browser("task-diff").await;
+    assert_eq!(from_browser.status(), StatusCode::FORBIDDEN);
+    assert!(task_file_response_text(from_browser)
+        .await
+        .contains("local control credential"));
 }
 
 #[tokio::test]
@@ -5468,15 +5521,17 @@ async fn task_diff_route_rejects_wrong_or_unpaired_device_secrets() {
     let fixture = TaskDiffRouteFixture::new();
     fixture.pair_device("phone-1", "lan-secret");
 
+    // These carry an `Origin`, so an unverified secret leaves them in the
+    // browser class the boundary refuses outright.
     let wrong_secret = fixture
         .get_with_device_headers("task-diff", "phone-1", "not-the-secret")
         .await;
-    assert_eq!(wrong_secret.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_secret.status(), StatusCode::FORBIDDEN);
 
     let unknown_device = fixture
         .get_with_device_headers("task-diff", "phone-2", "lan-secret")
         .await;
-    assert_eq!(unknown_device.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unknown_device.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

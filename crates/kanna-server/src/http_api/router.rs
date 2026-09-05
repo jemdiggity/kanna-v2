@@ -8,7 +8,9 @@ use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::{ksp_stream, legacy_ksp_stream};
-use super::lan_trust::{attach_trusted_lan_device, require_http_access};
+use super::lan_trust::{
+    attach_trusted_lan_device, require_http_access, require_local_client_authority,
+};
 use super::mobile_notifications::{mobile_push_registration, notify_mobile};
 use super::operator_events::post_operator_events;
 use super::pairing::{
@@ -73,7 +75,7 @@ use axum::Router;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceExt;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 pub fn router(state: Arc<AppState>) -> Router {
     let router = Router::new()
@@ -399,14 +401,50 @@ pub fn router(state: Arc<AppState>) -> Router {
         ));
 
     router
-        .layer(CorsLayer::permissive())
+        // Innermost, deliberately. `tower_http` short-circuits *every* OPTIONS
+        // request as a preflight, so a CORS layer mounted outside the
+        // authorization middlewares would answer OPTIONS on every route
+        // without authorization — and deny-by-default for every method,
+        // preflight included, is the contract
+        // `every_registered_http_route_denies_unpaired_lan_by_default` pins.
+        // The cost is that a refusal carries no CORS headers, so the webview
+        // sees a network error rather than the 403 text; the server logs the
+        // reason, and the client logs a credential it could not read.
+        .layer(cors_layer())
         .layer(axum::middleware::from_fn(log_error_responses))
         .layer(axum::middleware::from_fn(require_http_access))
+        // Outside the authorization middlewares so a browser is classified
+        // before any route logic runs, and inside `attach_trusted_lan_device`
+        // so a paired device is already recognised.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_local_client_authority,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             attach_trusted_lan_device,
         ))
         .with_state(state)
+}
+
+/// CORS for the desktop webview, which is cross-origin to this loopback
+/// listener and needs to read its own responses.
+///
+/// These headers are **not** an authorization mechanism and never were: they
+/// tell a compliant browser what it may read, and say nothing to a WebSocket
+/// upgrade, a `no-cors` request, or a rebound same-origin one. Authority comes
+/// from `require_local_client_authority` and the extractors behind it. The
+/// origin is mirrored rather than allowlisted so the webview's own origin —
+/// `tauri://localhost` in a packaged build, the Vite dev origin under
+/// `kd dev up`, and whatever a future WebKit serializes it to — keeps working
+/// without an allowlist that only ever adds a way to break the app; a mirrored
+/// origin grants nothing a rejected request could use.
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::mirror_request())
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request())
+        .max_age(std::time::Duration::from_secs(600))
 }
 
 /// Log every error response with its body. Clients see the body too, but a

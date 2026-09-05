@@ -179,6 +179,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   append_log: () => ({}),
   read_clipboard_image_png: () => null,
   ensure_mobile_server: () => ({}),
+  local_control_credential: () => "mock-local-control-credential",
   mobile_server_status: () => ({
     state: "running",
     desktopId: "desktop-mock-current",

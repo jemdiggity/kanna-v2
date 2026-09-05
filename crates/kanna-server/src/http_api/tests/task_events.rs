@@ -2392,7 +2392,7 @@ async fn unpaired_non_loopback_lan_wait_never_uses_the_account_relay_feed() {
 }
 
 #[tokio::test]
-async fn unauthenticated_loopback_waits_get_only_the_local_feed_for_all_browser_metadata() {
+async fn unauthenticated_loopback_waits_get_the_local_feed_and_browsers_get_nothing() {
     const REMOTE_HASH: &str = "sha256:browser-origin-repo";
     let source = test_state_with_seed("desktop-browser-source", "Browser Source", |db| {
         db.insert_test_repo("repo-browser-source", "Browser Source Repo")
@@ -2445,40 +2445,53 @@ async fn unauthenticated_loopback_waits_get_only_the_local_feed_for_all_browser_
     });
     let relay = connect_test_relay_peer(&source, peer, Arc::new(AtomicBool::new(true)));
     let app = router(source);
+
+    let local_wait = |headers: Vec<(&'static str, &'static str)>| {
+        let app = app.clone();
+        async move {
+            let mut builder =
+                Request::get("/v1/task-events?repoId=repo-browser-source&timeoutSecs=0");
+            for (name, value) in headers {
+                builder = builder.header(name, value);
+            }
+            let mut request = builder.body(Body::empty()).expect("request");
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                std::net::SocketAddr::from(([127, 0, 0, 1], 49152)),
+            ));
+            app.oneshot(request).await.expect("response")
+        }
+    };
+
+    // A local process client without the account-wide credential keeps the
+    // native local-only feed — it is not refused, only not fanned out.
+    let response = local_wait(Vec::new()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body"),
+    )
+    .expect("json body");
+    assert_eq!(
+        event_pairs(&body),
+        vec![("browser-local-child".into(), "run.started".into())]
+    );
+    assert!(!cursor_of(&body).starts_with("ks1."));
+    assert_eq!(body["events"][0]["machineId"], "desktop-browser-source");
+
+    // A browser gets no feed at all. Downgrading it to local-only was the
+    // earlier answer; the boundary now refuses the request, because the local
+    // feed is this desktop's task activity and a page the user opened has no
+    // business reading it either. See `http_api::lan_trust`.
     for headers in [
-        Vec::new(),
         vec![
             ("sec-fetch-site", "same-origin"),
             ("sec-fetch-mode", "same-origin"),
         ],
         vec![("origin", "https://attacker.example")],
     ] {
-        let mut builder = Request::get("/v1/task-events?repoId=repo-browser-source&timeoutSecs=0");
-        for (name, value) in headers {
-            builder = builder.header(name, value);
-        }
-        let mut request = builder.body(Body::empty()).expect("request");
-        request
-            .extensions_mut()
-            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                [127, 0, 0, 1],
-                49152,
-            ))));
-
-        let response = app.clone().oneshot(request).await.expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: Value = from_slice(
-            &axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("body"),
-        )
-        .expect("json body");
-        assert_eq!(
-            event_pairs(&body),
-            vec![("browser-local-child".into(), "run.started".into())]
-        );
-        assert!(!cursor_of(&body).starts_with("ks1."));
-        assert_eq!(body["events"][0]["machineId"], "desktop-browser-source");
+        let response = local_wait(headers).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     relay.abort();
@@ -2509,6 +2522,30 @@ async fn unauthorized_resume_rejects_an_account_wide_cursor_without_losing_peer_
         "/v1/task-events?taskIds=downgrade-child&timeoutSecs=0",
     )
     .await;
+    // A local process client that never proved the account-wide credential
+    // cannot resume an account-wide cursor.
+    let mut request = Request::get(format!(
+        "/v1/task-events?taskIds=downgrade-child&cursor={}&timeoutSecs=0",
+        cursor_of(&first)
+    ))
+    .body(Body::empty())
+    .expect("request");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49153,
+        ))));
+
+    let response = app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert!(String::from_utf8_lossy(&body).contains("not authorized to resume"));
+
+    // A browser presenting the same cursor is refused one layer earlier, so it
+    // learns nothing about the cursor's validity.
     let mut request = Request::get(format!(
         "/v1/task-events?taskIds=downgrade-child&cursor={}&timeoutSecs=0",
         cursor_of(&first)
@@ -2528,7 +2565,7 @@ async fn unauthorized_resume_rejects_an_account_wide_cursor_without_losing_peer_
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
-    assert!(String::from_utf8_lossy(&body).contains("not authorized to resume"));
+    assert!(String::from_utf8_lossy(&body).contains("local control credential"));
 
     relay.abort();
 }

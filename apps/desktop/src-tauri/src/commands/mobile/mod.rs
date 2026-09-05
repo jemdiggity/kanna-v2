@@ -552,6 +552,51 @@ pub async fn desktop_cloud_credential(
     })
 }
 
+/// Hand the webview this desktop's local control credential.
+///
+/// The webview is a browser: it reaches `kanna-server` over the same loopback
+/// port any web page can, so `kanna-server` no longer grants authority to a
+/// loopback address alone (see `http_api::lan_trust`). This is the credential
+/// that distinguishes the app's own window from a page the user happened to
+/// open — it is readable only by a process running as the user, which a
+/// cross-origin page is not.
+///
+/// The server writes the file (mode 0600) while it starts, so this waits for
+/// the server rather than failing a caller that raced it.
+#[tauri::command]
+pub async fn local_control_credential(app: tauri::AppHandle) -> Result<String, String> {
+    let manager = app.state::<MobileServerManager>();
+    manager.start().await?;
+    let config_path = {
+        let state = manager.inner.lock().await;
+        state.config_path.clone()
+    };
+    let token_path = local_control_credential_path(&config_path)?;
+    let mut last_error = String::new();
+    for _ in 0..100 {
+        match std::fs::read_to_string(&token_path) {
+            Ok(token) if !token.trim().is_empty() => return Ok(token.trim().to_string()),
+            Ok(_) => last_error = "credential file is empty".to_string(),
+            Err(error) => last_error = error.to_string(),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "failed to read local control credential {}: {last_error}",
+        token_path.display()
+    ))
+}
+
+/// Mirrors `kanna_server::config::Config::task_events_token_path`: the
+/// credential sits beside the pairing store, which sits beside the server
+/// config. Keep the two in step.
+fn local_control_credential_path(config_path: &Path) -> Result<PathBuf, String> {
+    Ok(config_path
+        .parent()
+        .ok_or_else(|| "server config path missing parent directory".to_string())?
+        .join("task-events.token"))
+}
+
 fn native_control_daemon_dir() -> PathBuf {
     std::env::var("KANNA_DAEMON_DIR")
         .map(PathBuf::from)

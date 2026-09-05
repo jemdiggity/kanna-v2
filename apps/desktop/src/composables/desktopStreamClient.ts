@@ -2,6 +2,7 @@ import { StreamClient } from "@kanna/stream-client";
 import { invoke } from "../invoke";
 import { resolveCurrentKannaServerBaseUrl, streamUrlFromServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { createDesktopStreamFrameDecoder } from "../services/desktopStreamFrameDecoder";
+import { localControlCredential } from "../services/localControlCredential";
 
 type ConnectionListener = (connected: boolean) => void;
 
@@ -39,6 +40,11 @@ export async function getSharedStreamClient(): Promise<StreamClient> {
     const serverBaseUrl = await resolveCurrentKannaServerBaseUrl("creating shared stream client");
     const client = new StreamClient({
       url: streamUrlFromServerBaseUrl(serverBaseUrl),
+      // A browser cannot put a header on a WebSocket handshake, so this
+      // window proves it is the app — and not a page the user opened on the
+      // same loopback port — with the local control credential in the first
+      // `auth` frame. See `crates/kanna-server/src/http_api/ksp.rs`.
+      credentialProvider: (forceRefresh) => localControlCredential(forceRefresh),
       onConnectionChange: notifyConnectionListeners,
       frameDecoder: createDesktopStreamFrameDecoder(),
     });

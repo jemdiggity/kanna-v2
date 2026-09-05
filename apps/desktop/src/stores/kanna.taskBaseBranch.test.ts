@@ -650,6 +650,13 @@ import {
   updateDesktopServerClientHandlersForTests,
 } from "../services/desktopServerClient";
 
+/**
+ * The webview is a browser, so `kanna-server` refuses its task actions unless
+ * they carry this desktop's local control credential; the Tauri mock hands out
+ * this one. See `services/localControlCredential.ts`.
+ */
+const LOCAL_CREDENTIAL_HEADERS = { Authorization: "Bearer mock-local-control-credential" };
+
 let activeStore: ReturnType<typeof useKannaStore> | null = null;
 
 function createDb(): DbHandle {
@@ -2346,7 +2353,7 @@ describe("kanna store task base branch integration", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-existing/actions/rerun-stage",
-      { method: "POST" },
+      { method: "POST", headers: LOCAL_CREDENTIAL_HEADERS },
     );
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
   });
@@ -2605,7 +2612,7 @@ describe("kanna store task base branch integration", () => {
       "http://127.0.0.1:48120/v1/tasks/item-existing/actions/advance-stage",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...LOCAL_CREDENTIAL_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ source: "operator" }),
       },
     );
@@ -2724,7 +2731,7 @@ describe("kanna store task base branch integration", () => {
       "http://127.0.0.1:48120/v1/tasks/item-source/actions/advance-stage",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...LOCAL_CREDENTIAL_HEADERS, "Content-Type": "application/json" },
         body: JSON.stringify({ source: "operator" }),
       },
     );
@@ -2994,7 +3001,7 @@ describe("kanna store task base branch integration", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-source/actions/rerun-stage",
-      { method: "POST" },
+      { method: "POST", headers: LOCAL_CREDENTIAL_HEADERS },
     );
     expect(buildStagePrompt).not.toHaveBeenCalled();
   });

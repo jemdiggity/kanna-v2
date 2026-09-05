@@ -13,9 +13,10 @@ async function e2eSqlRequest<T>(
 
   const { resolveCurrentKannaServerBaseUrl } = await import("../services/kannaServerBaseUrl");
   const baseUrl = await resolveCurrentKannaServerBaseUrl("running E2E SQL");
+  const { localControlAuthHeaders } = await import("../services/localControlCredential");
   const response = await fetch(`${baseUrl}/v1/e2e/sql`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(await localControlAuthHeaders()) },
     body: JSON.stringify({ sql, params, query }),
   });
   if (!response.ok) {

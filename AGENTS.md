@@ -322,6 +322,27 @@ the separate positive question-detection signal. See
 `docs/kanna-server-boundary.md` and
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
 
+**A loopback address is not authority.** `kanna-server` listens on a port any
+web page the user opens can reach, so "the peer is `127.0.0.1`" describes the
+desktop app, the CLI, an MCP server and a sidecar — and equally a hostile page,
+a task's own dev server, and the preview proxy. Every request on the real
+listener is therefore classified in `http_api/lan_trust.rs`: a
+**browser-originated** one (it carries an `Origin` or any `Sec-Fetch-*` header,
+none of which page script can forge or suppress) must present this desktop's
+local control credential — the `0600` token beside the pairing store, whose
+path agents get as `KANNA_TASK_EVENTS_TOKEN_PATH` — or a verified paired device
+secret; a **local process** one (neither header) keeps the loopback authority it
+always had, because a process running as the user already holds it. A loopback
+caller must also address the server by an IP literal or `localhost`, which is
+what stops DNS rebinding — the one browser attack that arrives with no `Origin`
+to inspect. The KSP WebSocket upgrades are admitted past the header check and
+prove the same credential in their first `auth` frame, because a browser cannot
+put a header on a handshake. **CORS response headers are not authorization** and
+never were: they say nothing to a WebSocket upgrade, a `no-cors` request, or a
+rebound same-origin one. The desktop webview is the one legitimate browser here
+and carries the credential on every `fetch` and on its stream. See
+`docs/kanna-server-boundary.md`.
+
 **Delivered task inputs are durable.** `POST /v1/tasks/{task_id}/input`
 (`kanna_send_task_input`) writes
 to a PTY, and terminal bytes are not a record: a later stage forks a fresh
