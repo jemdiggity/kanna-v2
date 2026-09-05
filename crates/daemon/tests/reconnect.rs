@@ -357,18 +357,94 @@ fn queued_logical_inputs_release_as_separate_real_pty_submissions() {
     }
 }
 
-/// The owner-reported regression: a reply sent from the phone landed as text
-/// at the agent's prompt and sat there unsubmitted until someone pressed
-/// Enter at that terminal.
+/// The owner report of 2026-09-05, over the real wire: "I got queued input
+/// banner on mobile app, when there was clearly no draft input in the
+/// terminal."
 ///
 /// The desktop producer declares every non-Enter keydown a draft, and nothing
-/// could un-declare one, so a single navigation key held every later logical
-/// delivery — while the delivery itself was answered `Ok` the moment it was
-/// queued. This pins both halves: the daemon no longer calls a parked message
-/// submitted, and the parked message still goes out untouched at the
-/// producer's own boundary rather than being appended to an unsent line.
+/// can un-declare one, so opening a task's terminal and pressing an arrow, an
+/// Escape, a PageUp or clicking in it armed the ledger and parked every later
+/// phone or manager delivery behind a line nobody had typed. None of these
+/// bytes can put text at a composer, so none of them declares a draft and the
+/// following message is written straight away.
 #[test]
-fn a_navigation_key_draft_holds_a_logical_message_and_the_daemon_says_so() {
+fn keystrokes_that_cannot_type_do_not_hold_a_logical_message() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "not-held-by-navigation";
+    // The reader matches on the line's tail rather than echoing it: the
+    // keystrokes under test are escape sequences, and a shell that printed
+    // them back would only re-render them as cursor movement.
+    spawn_shell_session(
+        &mut conn,
+        session_id,
+        "stty -echo; while IFS= read -r line; do \
+         case \"$line\" in *'owner reply') printf 'GOT_REPLY\\n';; esac; done",
+    );
+
+    for keystroke in [
+        b"\x1b[C".as_slice(), // cursor right
+        b"\x1b[5~",           // page up
+        b"\x1b",              // escape
+        b"\x1b[<64;24;5M",    // wheel-up mouse report
+        b"\x1b[I",            // focus in
+        b"\x7f",              // backspace
+    ] {
+        conn.send(&Cmd::Input {
+            session_id: session_id.to_string(),
+            data: keystroke.to_vec(),
+        });
+        expect_ok(&mut conn);
+    }
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"owner reply".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Ok => {}
+        Evt::Error { code, message } => {
+            panic!("nothing was typed, so nothing could be corrupted: {code:?} {message:?}")
+        }
+        other => panic!("expected Ok, got: {other:?}"),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let snapshot = recv_snapshot_for(&mut conn, session_id);
+        if snapshot.vt.contains("GOT_REPLY") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the message never reached the PTY: {:?}",
+            snapshot.vt
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => {
+            let session = sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .expect("the session is listed");
+            assert_eq!(session["composer_attestation"], "not-typed");
+        }
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+}
+
+/// The other half, and the reason this is a classification rather than a list
+/// of "navigation keys": cursor up recalls a previous line *into* the
+/// composer, so it is typing by another name and still holds.
+///
+/// This also pins the original owner regression it was written for — a reply
+/// sent from the phone must never be appended to an unsent line, and a parked
+/// message still goes out untouched at the producer's own boundary.
+#[test]
+fn a_history_recall_key_holds_a_logical_message_and_the_daemon_says_so() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "held-by-draft";
@@ -378,8 +454,8 @@ fn a_navigation_key_draft_holds_a_logical_message_and_the_daemon_says_so() {
         "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
     );
 
-    // Cursor-up: a keydown the desktop declares a draft, which leaves nothing
-    // unsent at the prompt.
+    // Cursor-up: a keydown the desktop declares a draft, and one that pulls a
+    // previous line back to the prompt.
     conn.send(&Cmd::Input {
         session_id: session_id.to_string(),
         data: b"\x1b[A".to_vec(),

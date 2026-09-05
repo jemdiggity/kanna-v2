@@ -448,15 +448,57 @@ that composer empty again, so the hold became permanent and answered
 when nobody had typed a byte. `None` is *not* zero: it is a draft inherited
 without its ledger, and it holds exactly like a counted one.
 
+**The ledger counts only the bytes that can put text at the composer.** A
+producer declares that bytes belong to a human's own line; their content decides
+whether one can exist. The desktop declares every non-Enter keydown a draft, so
+opening a task's terminal and pressing an arrow, an Escape or a PageUp — or
+clicking, or scrolling — used to arm the ledger and park every later phone or
+manager delivery behind a line nobody had typed, which is the owner report of
+2026-09-05: a queued-input banner on the phone with a visibly empty composer on
+the desktop. So `crates/daemon/src/draft_bytes.rs` classifies each declared
+write before it reaches the ledger, and a write that can create nothing declares
+nothing — it is routed exactly like an `InputControl`, leaving the draft flag,
+the write interlock and the count untouched.
+
+- **Content**, counted: printable and UTF-8 bytes, `TAB`, `CR` and `LF` (a
+  multiline composer's own newline), everything between bracketed-paste markers,
+  every C0 control not named below — and **cursor up/down** (`ESC [ A`,
+  `ESC [ B`, `ESC O A`, `ESC O B`). Those two look like navigation and are not:
+  in Claude Code and in every readline shell they recall a previous line *into*
+  the composer, which is exactly the unsent line a delivery must never be
+  appended to. A recall with nothing to recall leaves the composer rendering
+  empty, so attestation clears that case on the next frame.
+- **Inert**, not counted: every other well-formed CSI (`ESC [ … final`) and SS3
+  (`ESC O x`) sequence — left/right, Home/End, PageUp/PageDown, Delete, F-keys,
+  SGR mouse reports, focus in/out — a bare `ESC`, an `ESC`+byte Alt chord, and
+  the C0 controls that only move, delete, redraw or abandon (`NUL`,
+  `Ctrl-A/B/C/D/E/F`, `BEL`, `BS`, `Ctrl-K`, `Ctrl-L`, `Ctrl-U`, `Ctrl-W`,
+  `Ctrl-Z`, `FS`–`US`) and `DEL`.
+- Anything unrecognized — an unassigned control, a truncated sequence — counts
+  as content. The safe direction is to hold.
+
+This is not the inference this daemon refuses to make about *submission*.
+Submission stays a producer declaration because a `\r` inside a paste and a
+pressed Enter are the same byte; insertion is not like that, because a terminal
+line editor discards an escape sequence it does not recognise.
+
+**Escape, Ctrl-C and Ctrl-U are inert, not clearing.** Counting them as inert is
+what fixes the report above, and it asserts nothing the daemon cannot prove.
+Letting them *zero* a ledger that had already counted real typed content would
+be an assertion: nothing here knows that a given CLI's Escape empties its
+composer rather than dismissing a dialog or opening a transcript view, and being
+wrong writes a delivered message into a human's half-typed line — the exact harm
+this whole mechanism exists to prevent. Emptiness stays a claim about a rendered
+frame, and after a genuine clear the frame does read empty, so attestation
+releases the hold on the next status tick.
+
 The ledger is also what labels the composer for everything outside the daemon.
-The verdict is `typed` (bytes counted since the last boundary), `not-typed`
-(an attested session with none, so any rendered `❯`-line text is provably the
-provider's own chrome or suggestion), or `unknown` (draft state inherited from
-before attestation). Bytes are counted, never interpreted: the daemon does not
-decide from byte values whether a keystroke "really" left text, for the same
-reason it refuses to infer submission from them. A session typed into and then
-cleared by its human therefore stays `typed` until a boundary or an
-empty-composer frame resolves it — the conservative side of the trade.
+The verdict is `typed` (content bytes counted since the last boundary),
+`not-typed` (an attested session with none, so any rendered `❯`-line text is
+provably the provider's own chrome or suggestion), or `unknown` (draft state
+inherited from before attestation). A session typed into and then cleared by its
+human stays `typed` until a boundary or an empty-composer frame resolves it —
+the conservative side of the trade.
 
 A session that stays unknown refuses `SubmitInput` with
 `inherited_draft_state_unknown`, and that refusal is visible before anything

@@ -2,6 +2,7 @@ extern crate self as kanna_daemon;
 
 pub mod agent;
 pub mod bench;
+pub mod draft_bytes;
 pub mod fd;
 pub mod headless_terminal;
 pub mod proc_info;
