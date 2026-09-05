@@ -1,3 +1,4 @@
+use super::lan_trust::TrustedLanDeviceAccess;
 use super::state::{AppState, TunneledHttpInvoke};
 use crate::db::Db;
 use crate::task_files::{
@@ -25,23 +26,14 @@ pub(super) struct AuthenticatedTaskFileAccess;
 
 pub(super) async fn get_task_file(
     State(state): State<Arc<AppState>>,
-    access: Option<Extension<AuthenticatedTaskFileAccess>>,
+    relay: Option<Extension<AuthenticatedTaskFileAccess>>,
+    lan: Option<Extension<TrustedLanDeviceAccess>>,
     tunneled: Option<Extension<TunneledHttpInvoke>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(task_id): Path<String>,
     Query(query): Query<TaskFileQuery>,
 ) -> Result<Json<TaskFileContent>, (StatusCode, String)> {
-    // Desktop-local processes (the app and its transfer sidecar) reach the
-    // server over the real loopback listener and carry no tunnel marker;
-    // relay/KSP dispatches synthesize a loopback peer but are marked tunneled.
-    let desktop_local = tunneled.is_none()
-        && peer.is_some_and(|Extension(ConnectInfo(addr))| addr.ip().is_loopback());
-    if access.is_none() && !desktop_local {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "task file preview requires an authenticated relay or the local desktop".to_string(),
-        ));
-    }
+    require_task_file_access(relay, lan, tunneled, peer)?;
 
     let db = open_db(&state)?;
 
@@ -52,11 +44,14 @@ pub(super) async fn get_task_file(
 
 pub(super) async fn resolve_task_file_mentions(
     State(state): State<Arc<AppState>>,
-    access: Option<Extension<AuthenticatedTaskFileAccess>>,
+    relay: Option<Extension<AuthenticatedTaskFileAccess>>,
+    lan: Option<Extension<TrustedLanDeviceAccess>>,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(task_id): Path<String>,
     Json(request): Json<ResolveTaskFileMentionsRequest>,
 ) -> Result<Json<TaskFileMentionResolution>, (StatusCode, String)> {
-    require_authenticated_task_file_access(access)?;
+    require_task_file_access(relay, lan, tunneled, peer)?;
 
     super::blocking::run_handler_blocking("task file mention resolution", move || {
         resolve_task_file_mentions_sync(&state, &task_id, request.mentions)
@@ -80,15 +75,21 @@ fn resolve_task_file_mentions_sync(
         .map_err(map_task_file_error)
 }
 
-fn require_authenticated_task_file_access(
-    access: Option<Extension<AuthenticatedTaskFileAccess>>,
+fn require_task_file_access(
+    relay: Option<Extension<AuthenticatedTaskFileAccess>>,
+    lan: Option<Extension<TrustedLanDeviceAccess>>,
+    tunneled: Option<Extension<TunneledHttpInvoke>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Result<(), (StatusCode, String)> {
-    if access.is_some() {
+    let desktop_local = tunneled.is_none()
+        && peer.is_some_and(|Extension(ConnectInfo(addr))| addr.ip().is_loopback());
+    if relay.is_some() || lan.is_some() || desktop_local {
         return Ok(());
     }
     Err((
         StatusCode::UNAUTHORIZED,
-        "task file preview requires an authenticated relay".to_string(),
+        "task file preview requires an authenticated relay, a paired device, or the local desktop"
+            .to_string(),
     ))
 }
 

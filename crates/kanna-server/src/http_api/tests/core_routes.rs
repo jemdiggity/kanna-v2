@@ -4871,7 +4871,7 @@ async fn task_file_resolver_route_stays_responsive_during_blocking_resolution() 
 }
 
 #[tokio::test]
-async fn task_file_resolver_route_requires_authenticated_relay_access() {
+async fn task_file_resolver_route_requires_task_file_access() {
     let fixture = TaskFileRouteFixture::new();
     fixture.write("src/Unique.ts", b"unique");
     let body = serde_json::json!({ "mentions": [{ "path": "Unique.ts" }] });
@@ -6110,6 +6110,32 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
         .expect("test host must expose a non-loopback IPv4 address");
     let base_url = format!("http://{lan_ip}:{port}");
     let client = reqwest::Client::new();
+    let missing_credentials = client
+        .get(format!(
+            "{base_url}/v1/tasks/task-file/files/content?path=src%2Fmain.rs"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        missing_credentials.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let invalid_credentials = client
+        .get(format!(
+            "{base_url}/v1/tasks/task-file/files/content?path=src%2Fmain.rs"
+        ))
+        .header("x-kanna-device-id", "phone-browser")
+        .header("x-kanna-device-secret", "wrong-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        invalid_credentials.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
     let directory = client
         .get(format!(
             "{base_url}/v1/tasks/task-file/browse?path=src&limit=1"
@@ -6135,6 +6161,43 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
     assert_eq!(range.status(), reqwest::StatusCode::OK);
     let content: serde_json::Value = range.json().await.unwrap();
     assert_eq!(content["lines"], serde_json::json!(["fn two() {}"]));
+
+    let file = client
+        .get(format!(
+            "{base_url}/v1/tasks/task-file/files/content?path=src%2Fmain.rs"
+        ))
+        .header("x-kanna-device-id", "phone-browser")
+        .header("x-kanna-device-secret", "browser-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(file.status(), reqwest::StatusCode::OK);
+    let file_body: serde_json::Value = file.json().await.unwrap();
+    assert_eq!(file_body["path"], "src/main.rs");
+    assert_eq!(
+        file_body["content"],
+        "fn one() {}\nfn two() {}\nfn three() {}\n"
+    );
+
+    let mentions = client
+        .post(format!(
+            "{base_url}/v1/tasks/task-file/files/resolve-mentions"
+        ))
+        .header("content-type", "application/json")
+        .header("x-kanna-device-id", "phone-browser")
+        .header("x-kanna-device-secret", "browser-secret")
+        .json(&serde_json::json!({
+            "mentions": [{ "path": "main.rs", "line": 2 }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mentions.status(), reqwest::StatusCode::OK);
+    let mentions_body: serde_json::Value = mentions.json().await.unwrap();
+    assert_eq!(
+        mentions_body["mentions"][0]["matches"][0]["path"],
+        "src/main.rs"
+    );
 
     let huge_line = "z".repeat(crate::repo_browser::FILE_RANGE_BYTES * 3 + 17_000);
     fixture.write("src/huge.txt", huge_line.as_bytes());

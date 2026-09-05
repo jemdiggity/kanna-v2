@@ -1571,12 +1571,7 @@ export function createCloudLanClient(
         throw new Error(route.message);
       }
       if (route.source === "lan") {
-        if (route.cloudFallbackTaskId) {
-          return cloud.readTaskFile(route.cloudFallbackTaskId, path);
-        }
-        throw new Error(
-          `Task file preview for LAN-only task "${taskId}" requires an authenticated relay connection.`
-        );
+        return route.client.readTaskFile(route.taskId, path);
       }
       return route.client.readTaskFile(route.taskId, path);
     },
@@ -1593,15 +1588,7 @@ export function createCloudLanClient(
         throw new Error(route.message);
       }
       if (route.source === "lan") {
-        if (route.cloudFallbackTaskId) {
-          return cloud.resolveTaskFileMentions(
-            route.cloudFallbackTaskId,
-            mentions
-          );
-        }
-        throw new Error(
-          `Task file resolution for LAN-only task "${taskId}" requires an authenticated relay connection.`
-        );
+        return route.client.resolveTaskFileMentions(route.taskId, mentions);
       }
       return route.client.resolveTaskFileMentions(route.taskId, mentions);
     },
