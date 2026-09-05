@@ -21,6 +21,15 @@ use tokio::task::{JoinHandle, JoinSet};
 
 static PROCESS_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// This fixture starts a real `kanna-server`, clones real repositories and
+/// waits for a real daemon socket. Every wait below is for an event that must
+/// eventually happen — none of them is a latency contract, and each is proved
+/// by the state the loop observes, not by how quickly it appeared. A dev box
+/// runs several Rust lanes plus their compilers at once, so a budget tight
+/// enough to notice a slow machine fails a correct server; this deadline
+/// exists only to contain a wedged fixture.
+const EVENTUAL_PROGRESS_GUARD: Duration = Duration::from_secs(30);
+
 fn unique_test_root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -296,7 +305,7 @@ async fn start_server(
     drop(transfer_port_reservation);
     let mut child = command.spawn().expect("kanna-server should spawn");
     let status_url = format!("http://127.0.0.1:{port}/v1/status");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + EVENTUAL_PROGRESS_GUARD;
 
     while tokio::time::Instant::now() < deadline {
         if let Some(status) = child
@@ -444,9 +453,9 @@ async fn fake_daemon_persistent(
 async fn next_daemon_command(
     commands: &mut mpsc::UnboundedReceiver<DaemonCommand>,
 ) -> DaemonCommand {
-    tokio::time::timeout(Duration::from_secs(10), commands.recv())
+    tokio::time::timeout(EVENTUAL_PROGRESS_GUARD, commands.recv())
         .await
-        .expect("daemon command should arrive before timeout")
+        .expect("daemon command should arrive before the hang-containment guard")
         .expect("fake daemon command channel should remain open")
 }
 
@@ -512,7 +521,7 @@ fn assert_claude_agent_spawn(command: DaemonCommand, expected_session_id: &str) 
 }
 
 async fn wait_for_task_stage(client: &Client, port: u16, task_id: &str, stage: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + EVENTUAL_PROGRESS_GUARD;
     while tokio::time::Instant::now() < deadline {
         let response = client
             .get(format!("http://127.0.0.1:{port}/v1/tasks/{task_id}"))
@@ -1210,7 +1219,7 @@ async fn checkout_then_create_task_succeeds_through_running_server() {
         .await
         .expect("checkout response should be JSON");
     let operation_id = started["id"].as_str().expect("checkout id");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + EVENTUAL_PROGRESS_GUARD;
     let checkout = loop {
         let operation = client
             .get(format!(
@@ -1252,7 +1261,7 @@ async fn checkout_then_create_task_succeeds_through_running_server() {
         .await
         .expect("task response should be JSON");
     assert!(created["taskId"].as_str().is_some());
-    let spawned = tokio::time::timeout(Duration::from_secs(5), commands.recv())
+    let spawned = tokio::time::timeout(EVENTUAL_PROGRESS_GUARD, commands.recv())
         .await
         .expect("daemon spawn should arrive")
         .expect("daemon command channel should remain open");

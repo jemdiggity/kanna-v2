@@ -30,6 +30,11 @@ use tokio::sync::{mpsc, oneshot};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Hang containment for an event a correct runtime must eventually produce.
+/// Nothing asserts against this value; it only stops a wedged exchange from
+/// blocking the suite forever.
+const EVENTUAL_PROGRESS_GUARD: Duration = Duration::from_secs(30);
+
 fn peer_artifact_root(registry_root: &Path, peer_id: &str) -> std::path::PathBuf {
     registry_root
         .join("artifacts")
@@ -3421,17 +3426,25 @@ async fn pending_unauthenticated_pairing_admission_is_bounded() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saturated_pairing_event_enqueue_does_not_retain_pending_admission() {
     let temp = tempfile::tempdir().unwrap();
+    // No runtime here narrows the ordinary peer-request budget. The invariant
+    // is that a pairing whose event cannot be enqueued releases its admission
+    // slot *immediately*, so the retry below succeeds; a 250ms budget bounded
+    // the fixture's own successful pairing and task-pull instead, which is
+    // what failed under suite load. It would also weaken the assertion, since
+    // the guard the retry waits on is longer than that budget: a slot that
+    // leaked and then expired would read as a pass.
     let target = TransferRuntime::spawn(
         RuntimeConfig::for_tests("peer-target", "Target", temp.path(), 0)
-            .with_peer_request_timeout(Duration::from_millis(250))
             .with_runtime_admission_limits(1, 8, 2),
     )
     .await
     .unwrap();
-    let seed = TransferRuntime::spawn(
-        RuntimeConfig::for_tests("peer-seed", "Seed", temp.path(), 0)
-            .with_peer_request_timeout(Duration::from_millis(250)),
-    )
+    let seed = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-seed",
+        "Seed",
+        temp.path(),
+        0,
+    ))
     .await
     .unwrap();
     pair_peers(&seed, &target, "peer-target").await;
@@ -3440,10 +3453,12 @@ async fn saturated_pairing_event_enqueue_does_not_retain_pending_admission() {
         .await
         .expect("fill target lifecycle channel");
 
-    let saturated = TransferRuntime::spawn(
-        RuntimeConfig::for_tests("peer-saturated", "Saturated", temp.path(), 0)
-            .with_peer_request_timeout(Duration::from_millis(250)),
-    )
+    let saturated = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-saturated",
+        "Saturated",
+        temp.path(),
+        0,
+    ))
     .await
     .unwrap();
     let saturated_error = saturated
@@ -3461,14 +3476,16 @@ async fn saturated_pairing_event_enqueue_does_not_retain_pending_admission() {
         RuntimeEvent::TaskPullRequested(_)
     ));
 
-    let retry = TransferRuntime::spawn(
-        RuntimeConfig::for_tests("peer-retry", "Retry", temp.path(), 0)
-            .with_peer_request_timeout(Duration::from_millis(250)),
-    )
+    let retry = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-retry",
+        "Retry",
+        temp.path(),
+        0,
+    ))
     .await
     .unwrap();
     let retry_pairing = tokio::spawn(async move { retry.start_pairing("peer-target").await });
-    let request = tokio::time::timeout(Duration::from_secs(10), target.next_event())
+    let request = tokio::time::timeout(EVENTUAL_PROGRESS_GUARD, target.next_event())
         .await
         .expect("cleaned pairing admission should allow retry")
         .unwrap();

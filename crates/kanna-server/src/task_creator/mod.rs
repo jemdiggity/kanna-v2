@@ -1233,7 +1233,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         session,
         deferred_setup,
         #[cfg(test)]
-        setup_hard_timeout: None,
+        setup_timeout_signal: None,
     })
 }
 
@@ -1255,12 +1255,12 @@ pub(crate) fn finish_deferred_stage_setup(
         return Ok(());
     };
     #[cfg(test)]
-    let setup_result = match prepared.setup_hard_timeout {
-        Some(timeout) => environment::run_workspace_setup_commands_with_timeout(
+    let setup_result = match prepared.setup_timeout_signal.as_deref() {
+        Some(signal) => environment::run_workspace_setup_commands_with_armed_timeout(
             &deferred.commands,
             &prepared.cwd,
             &prepared.env,
-            timeout,
+            signal,
         ),
         None => run_workspace_setup_commands(&deferred.commands, &prepared.cwd, &prepared.env),
     };

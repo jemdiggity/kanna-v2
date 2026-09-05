@@ -20,6 +20,12 @@ impl Db {
     pub fn open_for_tests(path: &str) -> Result<Self, rusqlite::Error> {
         let path_buf = PathBuf::from(path);
         let _ = std::fs::remove_file(&path_buf);
+        // Removing only the database leaves a previous run's WAL and shared
+        // memory beside a brand new, empty database file, which SQLite then
+        // has to reconcile. Callers ask for a fresh database; give them one.
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(super::sqlite_sidecar_path(&path_buf, suffix));
+        }
         let conn = Connection::open_with_flags(&path_buf, database_create_flags())?;
         configure_shared_database_connection(&conn)?;
         let db = Self { conn };

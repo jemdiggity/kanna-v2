@@ -5,6 +5,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const BACKGROUND_REAP_GIVE_UP_AFTER: Duration = Duration::from_secs(60);
 const BACKGROUND_REAP_MAX_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Hang containment for a test that arms the hard timeout explicitly. Nothing
+/// asserts against it; it only stops a wedged fixture from running forever.
+#[cfg(test)]
+const TEST_ARMED_TIMEOUT_GUARD: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 struct WorkspaceCommandPolicy {
@@ -115,9 +120,10 @@ impl WorkspaceCommandSupervisor {
         shell_command: &str,
         cwd: &Path,
         env: &HashMap<String, String>,
+        armed_timeout: Option<&AtomicBool>,
     ) -> Result<(), String> {
         let _active = self.acquire(label)?;
-        run_process(label, shell_command, cwd, env, self.policy)
+        run_process(label, shell_command, cwd, env, self.policy, armed_timeout)
     }
 
     fn snapshot(&self) -> WritePathHealth {
@@ -170,30 +176,39 @@ pub(crate) fn run_workspace_command(
     cwd: &Path,
     env: &HashMap<String, String>,
 ) -> Result<(), String> {
-    global_supervisor().run(label, command, cwd, env)
+    global_supervisor().run(label, command, cwd, env, None)
 }
 
 pub(crate) fn write_path_health() -> WritePathHealth {
     global_supervisor().snapshot()
 }
 
+/// Fire the hard timeout on an explicit signal instead of the wall clock.
+///
+/// A test that proves timeout handling must first get the supervised process
+/// into the state under test — output produced, descendants spawned. A fixed
+/// budget cannot express that ordering: on a loaded machine it can expire
+/// while `/bin/zsh --login` is still sourcing profiles, so the test asserts
+/// against machine speed rather than against the timeout path. The caller
+/// therefore observes that state itself and arms this flag; the accompanying
+/// duration is only hang containment for a fixture that never arms it.
 #[cfg(test)]
-pub(crate) fn run_workspace_command_with_hard_timeout_for_test(
+pub(crate) fn run_workspace_command_with_armed_timeout_for_test(
     label: &str,
     command: &str,
     cwd: &Path,
     env: &HashMap<String, String>,
-    hard_timeout: Duration,
+    armed_timeout: &AtomicBool,
 ) -> Result<(), String> {
     let supervisor = Arc::new(WorkspaceCommandSupervisor::new(WorkspaceCommandPolicy {
-        soft_timeout: hard_timeout / 2,
-        hard_timeout,
-        final_drain_timeout: Duration::from_millis(100),
+        soft_timeout: TEST_ARMED_TIMEOUT_GUARD,
+        hard_timeout: TEST_ARMED_TIMEOUT_GUARD,
+        final_drain_timeout: FINAL_DRAIN_TIMEOUT,
         poll_interval: Duration::from_millis(10),
         max_concurrent: MAX_WORKSPACE_COMMANDS,
         max_output_bytes: MAX_OUTPUT_BYTES,
     }));
-    supervisor.run(label, command, cwd, env)
+    supervisor.run(label, command, cwd, env, Some(armed_timeout))
 }
 
 struct SupervisedChild {
@@ -435,6 +450,7 @@ fn run_process(
     cwd: &Path,
     env: &HashMap<String, String>,
     policy: WorkspaceCommandPolicy,
+    armed_timeout: Option<&AtomicBool>,
 ) -> Result<(), String> {
     let mut child = spawn_workspace_process(label, shell_command, cwd, env)?;
     let process_group = child.process_group;
@@ -470,7 +486,9 @@ fn run_process(
                 policy.soft_timeout.as_secs()
             );
         }
-        if elapsed >= policy.hard_timeout {
+        if elapsed >= policy.hard_timeout
+            || armed_timeout.is_some_and(|armed| armed.load(Ordering::Acquire))
+        {
             timed_out = true;
             child.terminate_and_reap(
                 label,
@@ -672,7 +690,13 @@ mod tests {
         )));
 
         let error = supervisor
-            .run("workspace setup", &command, root.path(), &HashMap::new())
+            .run(
+                "workspace setup",
+                &command,
+                root.path(),
+                &HashMap::new(),
+                None,
+            )
             .unwrap_err();
 
         assert!(error.contains("timed out"), "{error}");
@@ -733,6 +757,7 @@ mod tests {
                 "/bin/sh -c 'sleep 30 &'",
                 root.path(),
                 &HashMap::new(),
+                None,
             )
             .unwrap();
 
@@ -772,7 +797,8 @@ mod tests {
                 let results_tx = results_tx.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let result = supervisor.run("workspace setup", &command, &cwd, &HashMap::new());
+                    let result =
+                        supervisor.run("workspace setup", &command, &cwd, &HashMap::new(), None);
                     results_tx.send(result.clone()).unwrap();
                     result
                 })

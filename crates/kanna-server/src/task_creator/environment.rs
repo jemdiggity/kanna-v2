@@ -300,11 +300,11 @@ pub(super) fn run_workspace_setup_commands(
 }
 
 #[cfg(test)]
-pub(super) fn run_workspace_setup_commands_with_timeout(
+pub(super) fn run_workspace_setup_commands_with_armed_timeout(
     setup_cmds: &[String],
     worktree_path: &str,
     env: &HashMap<String, String>,
-    hard_timeout: std::time::Duration,
+    armed_timeout: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     let command = build_task_shell_command(
         "true",
@@ -314,12 +314,12 @@ pub(super) fn run_workspace_setup_commands_with_timeout(
         env.get("KANNA_CLI_PATH").map(String::as_str),
         env.get("PATH").map(String::as_str),
     );
-    crate::workspace_commands::run_workspace_command_with_hard_timeout_for_test(
+    crate::workspace_commands::run_workspace_command_with_armed_timeout_for_test(
         "workspace setup",
         &command,
         Path::new(worktree_path),
         env,
-        hard_timeout,
+        armed_timeout,
     )
 }
 

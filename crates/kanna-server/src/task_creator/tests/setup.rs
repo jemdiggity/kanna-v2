@@ -4,6 +4,20 @@ use std::io::Read;
 const INSTALL_CODEX: &str = "mkdir -p .kanna/setup-bin && printf '#!/bin/sh\\ntouch .kanna/setup-bin/codex-ran\\nexit 0\\n' > .kanna/setup-bin/codex && chmod +x .kanna/setup-bin/codex";
 const INSTALL_STREAMING_CODEX: &str = "printf 'SETUP_OUTPUT_SENTINEL\\n' && mkdir -p .kanna/setup-bin && printf '#!/bin/sh\\nprintf \\\"PROVIDER_OUTPUT_SENTINEL\\\\n\\\"\\ntouch .kanna/setup-bin/codex-ran\\nexit 0\\n' > .kanna/setup-bin/codex && chmod +x .kanna/setup-bin/codex";
 
+/// Reaping a killed process group is an eventual event with no latency
+/// contract; this deadline only contains a wedged fixture.
+const EVENTUAL_PROGRESS_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The pid a setup fixture recorded, once that process is actually running.
+///
+/// A partially written file, or a pid whose process has not been created yet,
+/// is not readiness — the caller must not arm anything until the grandchild it
+/// is about to assert on exists.
+fn read_live_pid(path: &std::path::Path) -> Option<i32> {
+    let pid: i32 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+    (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
+}
+
 struct ProviderLookupPathGuard;
 
 impl ProviderLookupPathGuard {
@@ -268,7 +282,11 @@ async fn initial_pty_task_streams_setup_before_starting_setup_created_provider()
     let mut output_reader = std::fs::File::from(process.try_clone_io_fd().unwrap());
     let mut output = Vec::new();
     let provider_ran = expected.parent().unwrap().join("codex-ran");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    // The assertions below are about the *order* of the bootstrap's output, and
+    // the loop exits on the two events that prove it completed. How long a
+    // login shell plus setup plus provider takes is a property of the machine,
+    // so this deadline only contains a wedged PTY.
+    let deadline = tokio::time::Instant::now() + EVENTUAL_PROGRESS_GUARD;
     loop {
         let mut buffer = [0_u8; 4096];
         loop {
@@ -714,17 +732,39 @@ async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork
         PreparedStageTransition::Run(run) => run,
         _ => panic!("expected stage run"),
     };
-    // The setup command loops forever, so any finite budget proves the timeout
-    // fires. It is generous because the assertions below need the shell to have
-    // reached its `printf` first — a 150ms budget lost that race on a loaded
-    // box, where starting a shell can take longer than the whole budget.
-    run.set_setup_hard_timeout(std::time::Duration::from_secs(5));
+    // What this test proves is what the timeout path *does*, not how long the
+    // budget is. The assertions below all depend on setup having reached its
+    // `printf` and having spawned the signal-proof grandchild first, and a
+    // fixed budget cannot express that ordering: the setup shell is
+    // `/bin/zsh --login`, so under load the profile it sources can outlast any
+    // budget short enough to keep the test quick. The timeout is therefore
+    // armed by an observer that has seen the grandchild running.
+    let timeout_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    run.set_setup_timeout_signal(std::sync::Arc::clone(&timeout_signal));
     assert!(
         fork_path.exists(),
         "preparation should leave the fork for detached setup"
     );
     let fake_daemon = spawn_fake_daemon_read_then_stall(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    // A plain OS thread, not a task: `finish_deferred_stage_setup` supervises
+    // the setup process with blocking calls, so nothing else on this runtime
+    // would get to run while it is in flight.
+    let armer_pid_file = grandchild_pid_file.clone();
+    let armer = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + EVENTUAL_PROGRESS_GUARD;
+        loop {
+            if let Some(pid) = read_live_pid(&armer_pid_file) {
+                timeout_signal.store(true, std::sync::atomic::Ordering::Release);
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setup never spawned its grandchild"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
     let error = spawn_prepared_stage_run_for_api(
         &config.db_path,
         &mut daemon,
@@ -734,6 +774,7 @@ async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork
     .await
     .unwrap_err();
     fake_daemon.abort();
+    let grandchild = armer.join().expect("timeout armer should not panic");
 
     assert!(
         error.contains("workspace setup timed out"),
@@ -762,12 +803,7 @@ async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork
             .as_deref(),
         Some("in progress")
     );
-    let grandchild: i32 = std::fs::read_to_string(&grandchild_pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + EVENTUAL_PROGRESS_GUARD;
     loop {
         let alive = unsafe { libc::kill(grandchild, 0) == 0 };
         if !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {

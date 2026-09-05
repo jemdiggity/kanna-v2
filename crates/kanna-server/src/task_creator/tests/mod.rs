@@ -148,7 +148,21 @@ async fn spawn_fake_daemon_read_then_stall(daemon_dir: String) -> tokio::task::J
     })
 }
 
+/// Fixture paths must be unique per *process*, not merely per test.
+///
+/// A dev box runs several Rust lanes side by side, so more than one
+/// `kanna-server` test binary is routinely alive at once. Every path this
+/// config derives is otherwise shared between them: `Db::open_for_tests`
+/// deletes and recreates `db_path`, which pulls the SQLite file out from
+/// under a peer's open WAL connection (observed as `disk I/O error` and
+/// `table repo already exists`), and `daemon_dir` hashes to the fake daemon's
+/// `/tmp/kanna-{hash}.sock`, so two processes bind and unlink the same socket.
+fn test_fixture_label(label: &str) -> String {
+    format!("{label}-{}", std::process::id())
+}
+
 fn test_config(label: &str) -> Config {
+    let label = &test_fixture_label(label);
     Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
