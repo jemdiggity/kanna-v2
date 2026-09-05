@@ -77,7 +77,9 @@ export interface TerminalEventCollector {
 }
 
 export interface TerminalSnapshotExpectation {
+  maxEncodedChars?: number;
   minEncodedChars: number;
+  minRetainedScrollbackLines?: number;
   sentinel: string;
 }
 
@@ -85,6 +87,7 @@ export interface ObservedTerminalSnapshot {
   cols: number;
   dataB64: string;
   rows: number;
+  scrollbackLines: number;
 }
 
 export async function connectRawRelayClient(harness: RemoteHarness): Promise<RawRelayClient> {
@@ -574,6 +577,7 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
           cols: event.cols,
           dataB64: event.dataB64,
           rows: event.rows,
+          scrollbackLines: event.window?.scrollbackLines ?? 0,
         };
         this.resolveOutputWaiters();
         for (const waiter of [...this.snapshotWaiters]) {
@@ -633,6 +637,10 @@ function snapshotMatches(
 ): boolean {
   return (
     snapshot.dataB64.length > expectation.minEncodedChars &&
+    (expectation.maxEncodedChars === undefined ||
+      snapshot.dataB64.length < expectation.maxEncodedChars) &&
+    snapshot.scrollbackLines >=
+      (expectation.minRetainedScrollbackLines ?? 0) &&
     Buffer.from(snapshot.dataB64, "base64")
       .toString("utf8")
       .includes(expectation.sentinel)

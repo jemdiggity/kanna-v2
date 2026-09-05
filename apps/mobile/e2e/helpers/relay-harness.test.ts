@@ -5,19 +5,33 @@ import { join } from "node:path";
 import * as relayHarness from "./relay-harness";
 
 describe("mobile relay harness helpers", () => {
-  it("defines a deterministic PTY snapshot beyond the retention boundary", () => {
+  it("defines deterministic retained history behind a bounded PTY window", () => {
     const fixture = (
       relayHarness as typeof relayHarness & {
-        MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE?: {
+        MOBILE_RELAY_PTY_HISTORY_FIXTURE?: {
+          maxEncodedChars: number;
           minEncodedChars: number;
+          minRetainedScrollbackLines: number;
           sentinel: string;
         };
       }
-    ).MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE;
+    ).MOBILE_RELAY_PTY_HISTORY_FIXTURE;
 
     expect(fixture).toBeDefined();
-    expect(fixture?.minEncodedChars).toBeGreaterThan(1_000_000);
+    expect(fixture?.maxEncodedChars).toBeLessThan(1_000_000);
+    expect(fixture?.minRetainedScrollbackLines).toBeGreaterThan(8_000);
     expect(fixture?.sentinel).toMatch(/MOBILE.*SNAPSHOT/);
+  });
+
+  it("uses the publisher's stable cloud task identity instead of the legacy fallback", () => {
+    expect(relayHarness.publishedCloudTaskId(
+      { cloudTaskId: { stringValue: " stable-task-id " } },
+      "cloud:desktop:repo:local",
+    )).toBe("stable-task-id");
+    expect(relayHarness.publishedCloudTaskId(
+      undefined,
+      "cloud:desktop:repo:local",
+    )).toBe("cloud:desktop:repo:local");
   });
 
   it("describes unique, ambiguous, and Markdown mentions used by Appium", () => {

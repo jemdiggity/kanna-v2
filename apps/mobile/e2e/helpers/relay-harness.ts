@@ -35,8 +35,10 @@ const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
 
-export const MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE = {
-  minEncodedChars: 1_000_001,
+export const MOBILE_RELAY_PTY_HISTORY_FIXTURE = {
+  maxEncodedChars: 100_000,
+  minEncodedChars: 1_000,
+  minRetainedScrollbackLines: 9_000,
   sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL"
 } as const;
 
@@ -147,7 +149,9 @@ interface TerminalEventCollector {
   outputText(): string;
   waitForSnapshot(
     expectation: {
+      maxEncodedChars?: number;
       minEncodedChars: number;
+      minRetainedScrollbackLines?: number;
       sentinel: string;
     },
     timeoutMs?: number,
@@ -155,6 +159,7 @@ interface TerminalEventCollector {
     cols: number;
     dataB64: string;
     rows: number;
+    scrollbackLines: number;
   }>;
   waitForNewSnapshot(
     expectation: {
@@ -396,7 +401,7 @@ export async function startMobileRelayHarness(
             prompt: RELAY_ORIGINAL_PROMPT,
             repoName: RELAY_REPO_LABEL,
             snapshotHistory: {
-              sentinel: MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel,
+              sentinel: MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
             },
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
@@ -413,14 +418,14 @@ export async function startMobileRelayHarness(
       harness,
       mode === "hybrid" ? [localTask, lanOnlyTask] : [localTask]
     );
-    const cloudTaskId = cloudTaskIdFor(harness, localTask);
+    let cloudTaskId = cloudTaskIdFor(harness, localTask);
     const cloudOnlyTaskId =
       `cloud:${HYBRID_CLOUD_ONLY_DESKTOP_ID}:` +
       `${HYBRID_CLOUD_ONLY_REPO_ID}:${HYBRID_CLOUD_ONLY_LOCAL_TASK_ID}`;
     if (mode === "relay") {
       await setLocalTaskRuntimeStatus(harness, localTask.taskId, "busy");
       await waitForLocalTaskActivity(harness, localTask, "working");
-      await waitForCloudTaskActivity({
+      cloudTaskId = await waitForCloudTaskActivity({
         activity: "working",
         auth,
         harness,
@@ -435,14 +440,15 @@ export async function startMobileRelayHarness(
     await remote.terminal.waitForTerminalOutput(
       terminalEvents,
       mode === "relay"
-        ? MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel
+        ? MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel
         : RELAY_TASK_SENTINEL,
       30_000,
     );
-    let oversizedSnapshot: {
+    let historySnapshot: {
       cols: number;
       dataB64: string;
       rows: number;
+      scrollbackLines: number;
     } | null = null;
     if (mode === "relay") {
       terminalEvents.close();
@@ -450,30 +456,31 @@ export async function startMobileRelayHarness(
         harness,
         localTask.taskId,
       );
-      oversizedSnapshot = await terminalEvents.waitForSnapshot(
-        MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE,
+      historySnapshot = await terminalEvents.waitForSnapshot(
+        MOBILE_RELAY_PTY_HISTORY_FIXTURE,
         30_000,
       );
       process.stdout.write(
-        `[mobile-e2e] authoritative PTY snapshot encodedChars=` +
-          `${oversizedSnapshot.dataB64.length} decodedBytes=` +
-          `${Buffer.from(oversizedSnapshot.dataB64, "base64").length} ` +
-          `dimensions=${oversizedSnapshot.cols}x${oversizedSnapshot.rows}\n`,
+        `[mobile-e2e] authoritative PTY window encodedChars=` +
+          `${historySnapshot.dataB64.length} decodedBytes=` +
+          `${Buffer.from(historySnapshot.dataB64, "base64").length} ` +
+          `retainedScrollbackLines=${historySnapshot.scrollbackLines} ` +
+          `dimensions=${historySnapshot.cols}x${historySnapshot.rows}\n`,
       );
     }
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
     const terminalFixture: PtyTerminalFixture = {
       taskId: cloudTaskId,
       sentinel:
-        oversizedSnapshot === null
+        historySnapshot === null
           ? RELAY_TASK_SENTINEL
-          : MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel,
+          : MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
       expectedCols: DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
       expectedRows: DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows,
       minDecodedBytes:
-        oversizedSnapshot === null
+        historySnapshot === null
           ? RELAY_TASK_SENTINEL.length
-          : Buffer.from(oversizedSnapshot.dataB64, "base64").length,
+          : Buffer.from(historySnapshot.dataB64, "base64").length,
     };
     const hybridFixture: MobileHybridFixture = {
       cloudOnly: {
@@ -863,6 +870,13 @@ function cloudTaskIdFor(
   return `cloud:${harness.desktopId}:${localTask.repoId}:${localTask.taskId}`;
 }
 
+export function publishedCloudTaskId(
+  fields: Pick<FirestoreFields, "cloudTaskId"> | undefined,
+  fallbackId: string,
+): string {
+  return fields?.cloudTaskId?.stringValue?.trim() || fallbackId;
+}
+
 async function seedHybridCloudSnapshots(input: {
   auth: AuthSession;
   harness: RemoteHarness;
@@ -1038,7 +1052,7 @@ async function waitForCloudTaskActivity(input: {
   auth: AuthSession;
   harness: RemoteHarness;
   task: ScriptedTask;
-}, timeoutMs = CLOUD_PUBLICATION_TIMEOUT_MS, stableForMs = 0): Promise<void> {
+}, timeoutMs = CLOUD_PUBLICATION_TIMEOUT_MS, stableForMs = 0): Promise<string> {
   const path = [
     "users",
     input.auth.uid,
@@ -1052,6 +1066,7 @@ async function waitForCloudTaskActivity(input: {
   const deadline = Date.now() + timeoutMs;
   let lastObserved: unknown = null;
   let matchingSince: number | null = null;
+  let publishedTaskId: string | null = null;
 
   while (Date.now() < deadline) {
     const response = await fetch(url, {
@@ -1067,10 +1082,15 @@ async function waitForCloudTaskActivity(input: {
       );
       lastObserved = taskDocument?.fields?.activity?.stringValue ?? null;
       if (lastObserved === input.activity) {
+        publishedTaskId = publishedCloudTaskId(
+          taskDocument?.fields,
+          cloudTaskIdFor(input.harness, input.task),
+        );
         matchingSince ??= Date.now();
-        if (Date.now() - matchingSince >= stableForMs) return;
+        if (Date.now() - matchingSince >= stableForMs) return publishedTaskId;
       } else {
         matchingSince = null;
+        publishedTaskId = null;
       }
     } else {
       lastObserved = `${response.status} ${JSON.stringify(body)}`;
@@ -1081,7 +1101,7 @@ async function waitForCloudTaskActivity(input: {
 
   throw new Error(
     `Expected published task ${input.task.taskId} activity ${input.activity}; ` +
-      `last observed ${String(lastObserved)}`
+      `last observed ${String(lastObserved)} with task id ${String(publishedTaskId)}`
   );
 }
 
