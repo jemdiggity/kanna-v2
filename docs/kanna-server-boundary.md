@@ -1410,8 +1410,18 @@ adoption. Peer eligibility is checked before reading a request, and the initial
 request frame has a fixed deadline so idle or unauthorized local connections
 cannot retain server tasks and descriptors indefinitely.
 
-Stage completion is bound to the run id fixed in the spawned agent's protected
-environment and an immutable run-scoped completion-context file. A successor
+Stage completion resolves an omitted `runId` to the task's sole running run,
+including a post injected into an existing agent session. This applies to
+spawned and legacy runs alike. Multiple running runs require an explicit id;
+the 409 response lists the candidate ids. An explicit id must match the
+resolved run; a stale-id error names both the supplied and current ids.
+With no running run, the latest run retains late-verdict recovery and replay
+behavior. Request-revision uses the same resolution and still requires an
+agent's resolved live run to be a main run; merge handoff is task-scoped and
+has no run-id binding.
+
+Adapters prefer the run identity in the spawned agent's protected environment
+and its server-owned completion-context file, reread on each call. A successor
 gets a distinct file, so preparing it never publishes an identity to the live
 predecessor. Continued posts rebind only the inherited process's file, under a
 cross-process lock, while retaining a bounded mapping from verdict attempt keys
@@ -1419,14 +1429,14 @@ to their original runs. MCP and CLI adapters consult that mapping. At startup,
 the server compiles the prior run-scoped format from its immutable filename and
 the original run's durable exact result; request handling repeats that
 server-owned check so a surviving old unlocked adapter cannot overwrite the
-protection. A timed-out original verdict therefore retries its original run
+protection. A timed-out run-bound verdict therefore retries its original run
 and can neither complete the post nor restore stale context. Failed preparation,
 replacement, close, and startup prune stale or orphaned context artifacts. The
 server rejects a mismatched current run but treats an identical retry of an
-already-finished run as idempotent even after a post or replacement starts. For
-rolling upgrades, `runId` may be omitted only for a pre-upgrade run whose
-durable `completion_bound` bit is false, and new clients tolerate old task-detail
-responses that lack `latestRun.id`.
+already-finished run as idempotent even after a post or replacement starts. New
+clients also tolerate old task-detail responses that lack `latestRun.id`.
+The `completion_bound` bit still records spawn provenance; it no longer makes
+an omitted run id an error when durable running state is unambiguous.
 
 ## Mobile Task Worktree Browser
 

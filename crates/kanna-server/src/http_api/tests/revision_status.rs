@@ -1170,6 +1170,8 @@ async fn review_run_binding_refuses_cross_task_pair_and_allows_concurrent_verdic
         .success());
     {
         let db = Db::open(&fixture.config.db_path).unwrap();
+        // Replace the fixture's original run, as the real spawn lifecycle does.
+        db.cancel_running_stage_runs("budget-1").unwrap();
         seed_bound_review_run(&db, "budget-1", "review-run-1");
         db.insert_test_pipeline_item(
             "budget-2",
@@ -1193,7 +1195,7 @@ async fn review_run_binding_refuses_cross_task_pair_and_allows_concurrent_verdic
 
     let daemon = spawn_fixture_daemon(fixture.socket_path.clone(), None, None);
     let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let request = |task_id: &'static str, run_id: &'static str, finding: &'static str| {
+    let request = |task_id: &'static str, run_id: Option<&'static str>, finding: &'static str| {
         Request::post(format!("/v1/tasks/{task_id}/actions/request-revision"))
             .header("content-type", "application/json")
             .body(Body::from(
@@ -1210,7 +1212,7 @@ async fn review_run_binding_refuses_cross_task_pair_and_allows_concurrent_verdic
 
     let crossed = app
         .clone()
-        .oneshot(request("budget-1", "review-run-2", "crossed finding"))
+        .oneshot(request("budget-1", Some("review-run-2"), "crossed finding"))
         .await
         .unwrap();
     let crossed_status = crossed.status();
@@ -1242,9 +1244,9 @@ async fn review_run_binding_refuses_cross_task_pair_and_allows_concurrent_verdic
 
     let (first, second) = tokio::join!(
         app.clone()
-            .oneshot(request("budget-1", "review-run-1", "first finding")),
+            .oneshot(request("budget-1", None, "first finding")),
         app.clone()
-            .oneshot(request("budget-2", "review-run-2", "second finding"))
+            .oneshot(request("budget-2", Some("review-run-2"), "second finding"))
     );
     assert_eq!(first.unwrap().status(), StatusCode::OK);
     assert_eq!(second.unwrap().status(), StatusCode::OK);

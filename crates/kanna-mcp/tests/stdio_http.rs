@@ -774,7 +774,7 @@ fn completion_retry_after_a_lost_response_keeps_the_spawned_run_identity() {
     let server_context_path = context_path.clone();
     let server = thread::spawn(move || {
         let mut observed = Vec::new();
-        for attempt in 0..2 {
+        for attempt in 0..3 {
             let (mut stream, _) = listener.accept().expect("accept completion request");
             observed.push(read_http_request(&mut stream));
             if attempt == 0 {
@@ -819,21 +819,36 @@ fn completion_retry_after_a_lost_response_keeps_the_spawned_run_identity() {
             }
         }
     });
+    let mut post_call = call.clone();
+    post_call["id"] = json!(4);
+    post_call["params"]["arguments"]["summary"] = json!("post committed");
     let responses = run_kanna_mcp_with_env(
         &base_url,
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
             call.clone(),
             json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": call["params"].clone() }),
+            post_call,
         ],
-        &[(
-            kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV,
-            &context_path_string,
-        )],
+        &[
+            (
+                kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV,
+                &context_path_string,
+            ),
+            (kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV, "run-original"),
+        ],
     );
 
     let observed = server.join().expect("fixture server");
-    assert_eq!(observed.len(), 2);
+    assert_eq!(observed.len(), 3);
+    // This is the same adapter process, launched before the server injected
+    // the post. Its immutable environment still names the main run.
+    assert_eq!(observed[2].path, "/v1/tasks/task-1/actions/complete-stage");
+    assert_eq!(
+        observed[2].body.as_ref().unwrap()["runId"],
+        json!("run-post")
+    );
+    assert_eq!(tool_text(&responses[3]), json!({ "taskId": "task-1" }));
     assert_eq!(observed[0].method, "POST");
     assert_eq!(observed[1].method, "POST");
     assert_eq!(observed[0].body, observed[1].body);
@@ -841,7 +856,7 @@ fn completion_retry_after_a_lost_response_keeps_the_spawned_run_identity() {
         observed[0].body.as_ref().and_then(|body| body.get("runId")),
         Some(&json!("run-original"))
     );
-    assert_eq!(responses.len(), 3);
+    assert_eq!(responses.len(), 4);
     assert_eq!(responses[1]["result"]["isError"], json!(true));
     assert_eq!(tool_text(&responses[2]), json!({ "taskId": "task-1" }));
     let context =

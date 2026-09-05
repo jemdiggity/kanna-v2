@@ -166,6 +166,21 @@ impl Db {
         rows.collect()
     }
 
+    pub fn running_stage_runs_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<StageRun>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
+                    session_id, provider_session_id, cwd, resumed_from_run_id,
+                    resume_fallback_reason, completion_transition,
+                    COALESCE(trigger, 'unspecified'), started_at, finished_at
+             FROM stage_run WHERE task_id = ? AND status = 'running' ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map([task_id], stage_run_from_row)?;
+        rows.collect()
+    }
+
     /// Every distinct worktree a task's runs have been recorded in, most
     /// recently used first. A task's work does not stay on one branch —
     /// each stage transition forks a new workspace — so this is how

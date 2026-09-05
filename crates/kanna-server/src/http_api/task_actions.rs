@@ -1480,36 +1480,14 @@ pub(super) async fn complete_stage(
             } else {
                 "failed"
             };
-            let current_run = db
-                .latest_stage_run(&task_id)
-                .map_err(|e| db_write_error("db error", e))?
+            let current_run = resolve_action_run(&db, &task_id, payload_run_id.as_deref())?
                 .ok_or_else(|| {
                     (
                         axum::http::StatusCode::CONFLICT,
                         format!("task has no stage run to complete: {task_id}"),
                     )
                 })?;
-            let mut payload_run_id = match payload_run_id {
-                Some(run_id) if !run_id.trim().is_empty() => run_id,
-                Some(_) => {
-                    return Err((
-                        axum::http::StatusCode::BAD_REQUEST,
-                        "runId must be non-empty when provided".into(),
-                    ))
-                }
-                None => {
-                    if db
-                        .stage_run_completion_bound(&current_run.id)
-                        .map_err(|e| db_write_error("db error", e))?
-                    {
-                        return Err((
-                            axum::http::StatusCode::CONFLICT,
-                            "runId is required for this spawned run; restart the completion adapter if it predates the run".into(),
-                        ));
-                    }
-                    current_run.id.clone()
-                }
-            };
+            let mut payload_run_id = payload_run_id.unwrap_or_else(|| current_run.id.clone());
             if let Some(attempt_key) = completion_attempt_key_for_record.as_deref() {
                 if let Some(original_run_id) =
                     crate::task_creator::resolve_legacy_completion_retry_run(
@@ -1870,7 +1848,13 @@ pub(super) async fn request_revision(
                     format!("db error: {}", e),
                 )
             })?;
-            validate_revision_run_binding(&db, &source_task_id, payload.run_id.as_deref(), origin)?;
+            let mut payload = payload;
+            payload.run_id = validate_revision_run_binding(
+                &db,
+                &source_task_id,
+                payload.run_id.as_deref(),
+                origin,
+            )?;
             let budget = match crate::task_creator::resolve_revision_budget(&db, &source_task_id) {
                 Ok(budget) => budget,
                 Err(error) => return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error)),
@@ -1921,12 +1905,14 @@ pub(super) async fn request_revision(
                     db.reset_task_revision_rounds(&source_task_id)?;
                     0
                 };
-                let _ = db.finish_latest_running_stage_run(
-                    &source_task_id,
-                    "failed",
-                    Some(&stage_result),
-                    Some(&payload.summary),
-                )?;
+                if let Some(run_id) = payload.run_id.as_deref() {
+                    db.finish_stage_run(
+                        run_id,
+                        "failed",
+                        Some(&stage_result),
+                        Some(&payload.summary),
+                    )?;
+                }
                 db.append_task_event(
                     &source_task_id,
                     crate::db::TaskEventKind::RevisionRequested,
@@ -2059,19 +2045,15 @@ fn park_exhausted_revision(
     let parked_result = revision_stage_result(&parked_summary, &payload.metadata)?;
     // The requested changes stay on the run as feedback so nothing the
     // reviewer found is lost when the loop stops.
-    let _ = db
-        .finish_latest_running_stage_run(
-            &source_task_id,
+    if let Some(run_id) = payload.run_id.as_deref() {
+        db.finish_stage_run(
+            run_id,
             "failed",
             Some(&parked_result),
             Some(&payload.prompt),
         )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
+        .map_err(|error| db_write_error("db error", error))?;
+    }
     db.update_pipeline_item_activity(&source_task_id, "unread")
         .map_err(|e| {
             (
@@ -2144,34 +2126,75 @@ fn revision_stage_result(
     })
 }
 
-/// Fence an agent verdict to the review run that authored it.
-///
-/// The task id remains the routing key, but it is not sufficient proof of
-/// ownership: a stale environment or copied id can name another live task.
-/// Newly spawned runs are completion-bound, so their adapters must supply the
-/// immutable run id from the spawn context. Legacy runs keep the same
-/// compatibility exception as complete-stage. Human revisions deliberately
-/// remain usable after a review run has parked or exited.
+/// Resolve an omitted identity from durable running state, never from the
+/// adapter's lifetime. Explicit identities disambiguate multiple running runs;
+/// callers retain their own mismatch and identical-retry checks. With no live
+/// run, preserve the latest-run recovery/replay behavior.
+fn resolve_action_run(
+    db: &Db,
+    task_id: &str,
+    requested_run_id: Option<&str>,
+) -> Result<Option<crate::db::StageRun>, (axum::http::StatusCode, String)> {
+    if requested_run_id.is_some_and(|id| id.trim().is_empty()) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "runId must be non-empty when provided".into(),
+        ));
+    }
+    let mut running = db
+        .running_stage_runs_for_task(task_id)
+        .map_err(|error| db_write_error("db error", error))?;
+    match running.len() {
+        0 => db
+            .latest_stage_run(task_id)
+            .map_err(|error| db_write_error("db error", error)),
+        1 => Ok(running.pop()),
+        _ => {
+            if let Some(index) = running
+                .iter()
+                .position(|run| Some(run.id.as_str()) == requested_run_id)
+            {
+                return Ok(Some(running.remove(index)));
+            }
+            let ids = running
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err((axum::http::StatusCode::CONFLICT, format!(
+                "ambiguous stage action for task {task_id}: running runs are {ids}; supply runId matching one of them (received {requested_run_id:?})"
+            )))
+        }
+    }
+}
+
+/// Apply the same run resolution to revision verdicts, retaining the main-run
+/// and running-status requirements for agents. Humans may revise parked runs.
 fn validate_revision_run_binding(
     db: &Db,
     task_id: &str,
     requested_run_id: Option<&str>,
     origin: crate::mobile_api::RevisionOrigin,
-) -> Result<(), (axum::http::StatusCode, String)> {
-    let current_run = db
-        .latest_stage_run(task_id)
-        .map_err(|error| db_write_error("db error", error))?;
-    let requested_run_id = match requested_run_id {
-        Some(run_id) if !run_id.trim().is_empty() => Some(run_id),
-        Some(_) => {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "runId must be non-empty when provided".to_string(),
-            ))
+) -> Result<Option<String>, (axum::http::StatusCode, String)> {
+    let current_run = resolve_action_run(db, task_id, requested_run_id)?;
+    if origin.is_agent() && requested_run_id.is_none() {
+        if let Some(run) = current_run.as_ref().filter(|run| run.status != "running") {
+            if db
+                .stage_run_completion_bound(&run.id)
+                .map_err(|error| db_write_error("db error", error))?
+            {
+                return Err((axum::http::StatusCode::CONFLICT, format!(
+                    "no running review run for task {task_id}; current run {} is {}. No revision was started and no revision round was spent.",
+                    run.id, run.status
+                )));
+            }
         }
-        None => None,
-    };
-
+    }
+    let inferred_run_id = current_run
+        .as_ref()
+        .filter(|run| run.status == "running")
+        .map(|run| run.id.clone());
+    let requested_run_id = requested_run_id.or(inferred_run_id.as_deref());
     if let Some(requested_run_id) = requested_run_id {
         let Some(current_run) = current_run else {
             return Err((
@@ -2207,24 +2230,8 @@ fn validate_revision_run_binding(
                 ),
             ));
         }
-        return Ok(());
+        return Ok(inferred_run_id);
     }
 
-    if origin.is_agent() {
-        if let Some(current_run) = current_run {
-            if db
-                .stage_run_completion_bound(&current_run.id)
-                .map_err(|error| db_write_error("db error", error))?
-            {
-                return Err((
-                    axum::http::StatusCode::CONFLICT,
-                    "runId is required for this spawned review run; restart the \
-                     request-revision adapter if it predates the run. No revision was started \
-                     and no revision round was spent."
-                        .to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
+    Ok(None)
 }

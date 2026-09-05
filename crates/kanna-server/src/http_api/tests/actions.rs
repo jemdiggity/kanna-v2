@@ -5993,7 +5993,7 @@ async fn distinct_current_run_with_identical_verdict_is_not_rewritten_to_history
 }
 
 #[tokio::test]
-async fn missing_run_id_is_legacy_only_and_cannot_complete_a_new_bound_run() {
+async fn missing_run_id_resolves_both_legacy_and_spawned_runs() {
     let seed = |db: &Db, task_id: &'static str, run_id: &'static str, bound: bool| {
         db.insert_test_pipeline_item(
             task_id,
@@ -6057,8 +6057,122 @@ async fn missing_run_id_is_legacy_only_and_cannot_complete_a_new_bound_run() {
     );
     assert_eq!(
         app.oneshot(request("task-bound")).await.unwrap().status(),
-        StatusCode::CONFLICT,
-        "newly spawned runs must require their fixed identity"
+        StatusCode::OK,
+        "a sole spawned run is resolved server-side"
+    );
+}
+
+#[tokio::test]
+async fn run_actions_reject_stale_and_ambiguous_ids_without_mutation() {
+    let state = super::test_state_with_seed("desktop-run-resolution", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for task_id in ["task-post", "task-ambiguous"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-1",
+                "Resolution",
+                Some("Resolution"),
+                "review",
+                "2026-09-05 00:00:00",
+            )
+            .unwrap();
+            for kind in ["main", "post"] {
+                let id = format!("{task_id}-{kind}");
+                db.insert_stage_run_with_completion_binding(
+                    crate::db::NewStageRun {
+                        id: &id,
+                        task_id,
+                        stage: "review",
+                        kind,
+                        agent: None,
+                        agent_provider: Some("codex"),
+                        model: None,
+                        effort: None,
+                        status: "running",
+                        result: None,
+                        feedback: None,
+                        session_id: Some(task_id),
+                        provider_session_id: None,
+                        cwd: None,
+                        resumed_from_run_id: None,
+                    },
+                    None,
+                    true,
+                )
+                .unwrap();
+            }
+        }
+        db.finish_stage_run("task-post-main", "succeeded", None, None)
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+    for action in ["complete-stage", "request-revision"] {
+        for (task_id, run_id) in [
+            ("task-post", Some("task-post-main")),
+            ("task-ambiguous", None),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(format!("/v1/tasks/{task_id}/actions/{action}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runId": run_id, "status": "success", "summary": "new verdict",
+                                "targetStage": "in progress", "prompt": "Fix the finding."
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let message = String::from_utf8_lossy(&bytes);
+            assert!(message.contains(&format!("{task_id}-main")), "{message}");
+            assert!(message.contains(&format!("{task_id}-post")), "{message}");
+        }
+    }
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.stage_run("task-post-post").unwrap().unwrap().status,
+        "running"
+    );
+    assert_eq!(
+        db.running_stage_runs_for_task("task-ambiguous")
+            .unwrap()
+            .len(),
+        2
+    );
+    // An explicit id disambiguates, even when it is not the latest inserted run.
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-ambiguous/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "task-ambiguous-main",
+                        "status": "failure",
+                        "summary": "selected run"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        db.stage_run("task-ambiguous-main").unwrap().unwrap().status,
+        "failed"
+    );
+    assert_eq!(
+        db.stage_run("task-ambiguous-post").unwrap().unwrap().status,
+        "running"
     );
 }
 
@@ -6136,6 +6250,15 @@ async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
 
 #[tokio::test]
 async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions() {
+    complete_post_and_transition(true).await;
+}
+
+#[tokio::test]
+async fn complete_stage_without_run_id_finishes_spawned_post_and_transitions() {
+    complete_post_and_transition(false).await;
+}
+
+async fn complete_post_and_transition(refinish: bool) {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncWriteExt, BufReader};
@@ -6287,33 +6410,37 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     .unwrap();
     db.finish_stage_run("run-main", "succeeded", None, None)
         .unwrap();
-    // The post ran and honestly reported failure; the task is parked with no
-    // running run.
-    db.insert_stage_run(crate::db::NewStageRun {
-        id: "run-post",
-        task_id: "task-1",
-        stage: "commit",
-        kind: "post",
-        agent: None,
-        agent_provider: Some("claude"),
-        model: None,
-        effort: None,
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some("task-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
+    // Model either a newly injected bound post or recovery after its failure.
+    db.insert_stage_run_with_completion_binding(
+        crate::db::NewStageRun {
+            id: "run-post",
+            task_id: "task-1",
+            stage: "commit",
+            kind: "post",
+            agent: None,
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        },
+        None,
+        true,
+    )
     .unwrap();
-    db.finish_stage_run("run-post", "failed", None, Some("dirty worktree"))
-        .unwrap();
+    if refinish {
+        db.finish_stage_run("run-post", "failed", None, Some("dirty worktree"))
+            .unwrap();
+    }
     drop(db);
 
-    // The agent recovers (cleans up, commits) and sends a late success
-    // verdict: it must re-finish the SAME post run and perform the post's
-    // deferred transition to `review`.
+    // Both an unbound post verdict and an explicitly bound late recovery
+    // verdict must finish this post and execute its deferred transition.
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
     let response = app
         .oneshot(
@@ -6321,7 +6448,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "runId": "run-post",
+                        "runId": if refinish { Some("run-post") } else { None },
                         "status": "success",
                         "summary": "cleaned up and committed"
                     })
