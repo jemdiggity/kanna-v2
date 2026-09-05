@@ -1,6 +1,7 @@
 import { chmod, writeFile } from "node:fs/promises";
 
 export interface ScriptedAgentOptions {
+  inputTraceFile?: string;
   redactInput?: boolean;
   terminalPasteSemantics?: boolean;
   tracePartialInput?: boolean;
@@ -74,9 +75,13 @@ done
 }
 
 export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string {
+  const inputTrace = options.inputTraceFile
+    ? `printf '%s\\000' "$line" >> ${shellSingleQuote(options.inputTraceFile)}`
+    : ":";
   const inputReport = options.redactInput
     ? "printf 'SCRIPT_REDACTED_INPUT\\n'"
-    : "printf 'SCRIPT_INPUT:%s\\n' \"$line\"";
+    : `${inputTrace}
+    printf 'SCRIPT_INPUT:%s\\n' "$line"`;
   const snapshotHistorySentinel =
     options.snapshotHistory?.sentinel ?? SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL;
   const snapshotHistoryTrigger = options.snapshotHistory
@@ -196,6 +201,7 @@ read_char() {
 while :; do
   read_char
   ${bracketedPasteHandling}
+
   ${submissionCondition}
     if [ "$menu_choice" = "1" ]; then
       printf 'SCRIPT_MENU_SELECTED:1\\n'

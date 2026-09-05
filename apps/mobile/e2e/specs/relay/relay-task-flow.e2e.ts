@@ -54,7 +54,7 @@ interface RelayTaskFlowOptions {
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
-  waitForMobileTerminalGeometry(): Promise<void>;
+  beginMobileTerminalGeometryObservation(): Promise<void>;
   waitForQuickReplyInput(): Promise<void>;
 }
 
@@ -109,6 +109,7 @@ export interface RelayTaskRowExpectation {
   originalPromptSnippet: string;
   repoLabel: string;
   stage: string;
+  taskId: string;
   title: string;
   waitingPromptSnippet: string;
 }
@@ -120,6 +121,10 @@ interface RelayElement {
   getSize(): Promise<{ height: number; width: number }>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
+  scrollIntoView(options: {
+    direction: "down" | "up";
+    maxScrolls: number;
+  }): Promise<unknown>;
   setValue(value: string): Promise<unknown>;
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
@@ -572,32 +577,46 @@ export async function verifyRelayComposerResetJourney(
   await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await send.click();
 
-  await ui.waitUntil(
-    async () => {
-      const value = await input.getAttribute("value").catch(() => null);
-      const label = value === null
-        ? await input.getAttribute("label").catch(() => null)
-        : null;
-      const resetHeight = (await input.getSize()).height;
-      const cleared =
-        value === "" ||
-        value === TASK_COMPOSER_PLACEHOLDER ||
-        label === TASK_COMPOSER_PLACEHOLDER;
+  let lastValue: string | null = null;
+  let lastLabel: string | null = null;
+  let lastResetHeight = expandedHeight;
+  let lastKeyboardShown = true;
+  try {
+    await ui.waitUntil(
+      async () => {
+        lastValue = await input.getAttribute("value").catch(() => null);
+        lastLabel = lastValue === null
+          ? await input.getAttribute("label").catch(() => null)
+          : null;
+        lastResetHeight = (await input.getSize()).height;
+        lastKeyboardShown = await ui.isKeyboardShown();
+        const cleared =
+          lastValue === "" ||
+          lastValue === TASK_COMPOSER_PLACEHOLDER ||
+          lastLabel === TASK_COMPOSER_PLACEHOLDER;
 
-      return (
-        cleared &&
-        resetHeight <= initialHeight &&
-        resetHeight < expandedHeight &&
-        !(await ui.isKeyboardShown())
-      );
-    },
-    {
-      interval: POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg:
-        "Expected Send to clear, return to one-line height, and hide the keyboard",
-    },
-  );
+        return (
+          cleared &&
+          lastResetHeight <= initialHeight &&
+          lastResetHeight < expandedHeight &&
+          !lastKeyboardShown
+        );
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg:
+          "Expected Send to clear, return to one-line height, and hide the keyboard",
+      },
+    );
+  } catch {
+    throw new Error(
+      "Expected Send to clear, return to one-line height, and hide the keyboard; " +
+        `value=${JSON.stringify(lastValue)}, label=${JSON.stringify(lastLabel)}, ` +
+        `height=${lastResetHeight} (initial=${initialHeight}, expanded=${expandedHeight}), ` +
+        `keyboardShown=${lastKeyboardShown}`,
+    );
+  }
 }
 
 export async function verifyRelayQuickReplyJourney(
@@ -1233,6 +1252,7 @@ export async function assertRelayTaskRowPresentation(
   const label = nativeLabel?.trim() || (await row.getText()).trim();
   const expectedLabel = [
     expected.title,
+    `Task ID ${expected.taskId}`,
     expected.stage,
     expected.waitingPromptSnippet === expected.title
       ? null
@@ -1260,6 +1280,7 @@ export async function assertRecentTaskRowShowsRepoLabel(
   const label = nativeLabel?.trim() || (await row.getText()).trim();
   const expectedLabel = [
     expected.title,
+    `Task ID ${expected.taskId}`,
     expected.repoLabel,
     expected.stage,
     expected.waitingPromptSnippet === expected.title
@@ -1282,6 +1303,7 @@ export async function verifyRecentTabShowsRepoLabel(
   const recentTab = await ui.getRecentTab();
   await recentTab.click();
   const row = await ui.getTaskRowById(taskId);
+  await row.scrollIntoView({ direction: "down", maxScrolls: 5 });
   await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await assertRecentTaskRowShowsRepoLabel(row, expected);
   const tasksTab = await ui.getTasksTab();
@@ -1295,12 +1317,14 @@ export async function openRelayFixtureTask(
 ): Promise<void> {
   if (expected) {
     const task = await ui.getTaskRowById(taskId);
+    await task.scrollIntoView({ direction: "down", maxScrolls: 5 });
     await task.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await assertRelayTaskRowPresentation(task, expected);
     await task.click();
     return;
   }
   const task = await ui.getTaskRowById(taskId);
+  await task.scrollIntoView({ direction: "down", maxScrolls: 5 });
   await task.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await task.click();
 }
@@ -1511,14 +1535,28 @@ export async function runRelayTaskFlow(
   await ensureTaskListVisible(ui);
   await verifyTasksTabNewestFirst(ui, options.taskOrdering);
   const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
-  await exactTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await exactTaskRow.scrollIntoView({ direction: "down", maxScrolls: 5 });
+  try {
+    await exactTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  } catch {
+    const renderedTaskIds = await renderedTaskRowIds(ui);
+    throw new Error(
+      `Expected relay task row ${options.fixture.taskId}; rendered task row ids were ` +
+        `${JSON.stringify(renderedTaskIds)}`,
+    );
+  }
   await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);
+  await options.setTaskActivity("unread");
+  await waitForTaskActivity(ui, options.fixture.taskId, "unread");
   await verifyRecentTabShowsRepoLabel(ui, options.fixture.taskId, options.taskRow);
+  await options.setTaskActivity("working");
+  await waitForTaskActivity(ui, options.fixture.taskId, "working");
   await verifyRelayTaskActivityTransitions(
     ui,
     options.fixture.taskId,
     options.setTaskActivity,
   );
+  let mobileGeometryAfterDetailMount: Promise<void> | null = null;
   await runRelayTaskJourneys({
     verifyQuickReplyPersistence: () =>
       verifyRelayQuickReplyPersistenceJourney(
@@ -1532,12 +1570,20 @@ export async function runRelayTaskFlow(
     verifyMarkedRead: () => verifyRelayTaskMarkedRead(ui, options.fixture.taskId, {
       prepareUnread: options.prepareTaskUnreadForMarkRead,
       async openTask() {
+        // Arm the raw KSP observer before the first mobile detail mount. A
+        // later attachment snapshot cannot satisfy this promise, so it proves
+        // the mounted product path resized the creation-time 80x24 PTY.
+        mobileGeometryAfterDetailMount =
+          options.beginMobileTerminalGeometryObservation();
         await openRelayFixtureTask(ui, options.fixture.taskId);
         const backButton = await ui.getBackButton();
         await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
       },
       waitForOwnerIdle: () => options.waitForLocalTaskActivity("idle"),
-      waitForSelectedDetailIdle: () => waitForSelectedTaskDetailActivity(ui, "idle"),
+      async waitForSelectedDetailIdle() {
+        await waitForSelectedTaskDetailActivity(ui, "idle");
+        await mobileGeometryAfterDetailMount;
+      },
       closeTask: () => returnToTaskListShell(ui),
     }),
     verifyPtySnapshotRevisit: () => verifyRelayPtySnapshotRevisit({
@@ -1545,7 +1591,6 @@ export async function runRelayTaskFlow(
       async waitForRenderedTerminal() {
         await waitForTaskTerminalLive(ui);
         await waitForRenderedPtyTerminal(ui, options.fixture);
-        await options.waitForMobileTerminalGeometry();
       },
       closeTask: () => returnToTaskListShell(ui),
     }),

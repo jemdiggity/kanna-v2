@@ -64,6 +64,12 @@ export interface TerminalEventCollector {
   sendInput(dataB64: string, submissionBoundary?: boolean, controlInput?: boolean): void;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
+  /** Wait for a snapshot produced after this call, never one retained from
+   * fixture setup or this observer's own attach. */
+  waitForNewSnapshot(
+    expectation: TerminalSnapshotExpectation,
+    timeoutMs?: number,
+  ): Promise<ObservedTerminalSnapshot>;
   waitForSnapshot(
     expectation: TerminalSnapshotExpectation,
     timeoutMs?: number,
@@ -71,7 +77,11 @@ export interface TerminalEventCollector {
 }
 
 export interface TerminalSnapshotExpectation {
+  cols?: number;
+  maxEncodedChars?: number;
   minEncodedChars: number;
+  minRetainedScrollbackLines?: number;
+  rows?: number;
   sentinel: string;
 }
 
@@ -79,6 +89,7 @@ export interface ObservedTerminalSnapshot {
   cols: number;
   dataB64: string;
   rows: number;
+  scrollbackLines: number;
 }
 
 export async function connectRawRelayClient(harness: RemoteHarness): Promise<RawRelayClient> {
@@ -95,12 +106,15 @@ export async function createScriptedTask(
   harness: RemoteHarness,
   options: {
     displayName: string;
+    inputTraceFile?: string;
     prompt?: string;
     repoName?: string;
     redactInput?: boolean;
     setupCommands?: string[];
     snapshotHistory?: ScriptedAgentOptions["snapshotHistory"];
     terminalPasteSemantics?: boolean;
+    terminalCols?: number;
+    terminalRows?: number;
     tracePartialInput?: boolean;
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
@@ -111,6 +125,7 @@ export async function createScriptedTask(
     `scripted-repo-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
   await writeScriptedRepo(repoPath, {
+    inputTraceFile: options.inputTraceFile,
     redactInput: options.redactInput,
     setupCommands: options.setupCommands,
     snapshotHistory: options.snapshotHistory,
@@ -142,7 +157,13 @@ export async function createScriptedTask(
       prompt: taskPrompt,
       displayName: options.displayName,
       agentProvider: options.agentProvider ?? "codex",
-      agentType: "pty"
+      agentType: "pty",
+      ...(options.terminalCols === undefined
+        ? {}
+        : { terminalCols: options.terminalCols }),
+      ...(options.terminalRows === undefined
+        ? {}
+        : { terminalRows: options.terminalRows })
     }
   }));
 
@@ -400,8 +421,10 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
   }> = [];
   private readonly snapshotWaiters: Array<{
     expectation: TerminalSnapshotExpectation;
+    minimumSequence: number;
     resolve(snapshot: ObservedTerminalSnapshot): void;
   }> = [];
+  private snapshotSequence = 0;
   private readonly exitWaiters: Array<{
     expectedCode: number;
     resolve(): void;
@@ -469,21 +492,55 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
       return this.lastSnapshot;
     }
     return await new Promise<ObservedTerminalSnapshot>((resolve, reject) => {
-      const waiter = { expectation, resolve };
+      const waiter = { expectation, minimumSequence: 0, resolve };
       const timeout = setTimeout(() => {
         const index = this.snapshotWaiters.indexOf(waiter);
         if (index >= 0) {
           this.snapshotWaiters.splice(index, 1);
         }
         const lastEncodedChars = this.lastSnapshot?.dataB64.length ?? 0;
+        const lastDimensions = this.lastSnapshot
+          ? `${this.lastSnapshot.cols}x${this.lastSnapshot.rows}`
+          : "none";
         reject(new Error(
           `timed out waiting for terminal snapshot from ${this.taskId}; ` +
-            `last encoded length=${lastEncodedChars}, expected >` +
-            `${expectation.minEncodedChars} with ${expectation.sentinel}`,
+            `last encoded length=${lastEncodedChars}, dimensions=${lastDimensions}; ` +
+            `expected >${expectation.minEncodedChars} chars` +
+            `${expectation.cols === undefined || expectation.rows === undefined
+              ? ""
+              : ` at ${expectation.cols}x${expectation.rows}`} with ` +
+            expectation.sentinel,
         ));
       }, timeoutMs);
       this.snapshotWaiters.push({
         expectation,
+        minimumSequence: 0,
+        resolve: (snapshot) => {
+          clearTimeout(timeout);
+          resolve(snapshot);
+        },
+      });
+    });
+  }
+
+  async waitForNewSnapshot(
+    expectation: TerminalSnapshotExpectation,
+    timeoutMs = 10_000,
+  ): Promise<ObservedTerminalSnapshot> {
+    const minimumSequence = this.snapshotSequence + 1;
+    return await new Promise<ObservedTerminalSnapshot>((resolve, reject) => {
+      const waiter = { expectation, minimumSequence, resolve };
+      const timeout = setTimeout(() => {
+        const index = this.snapshotWaiters.indexOf(waiter);
+        if (index >= 0) this.snapshotWaiters.splice(index, 1);
+        reject(new Error(
+          `timed out waiting for a new terminal snapshot from ${this.taskId}; ` +
+            `last snapshot sequence=${this.snapshotSequence}`,
+        ));
+      }, timeoutMs);
+      this.snapshotWaiters.push({
+        expectation,
+        minimumSequence,
         resolve: (snapshot) => {
           clearTimeout(timeout);
           resolve(snapshot);
@@ -532,16 +589,21 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
     }
     switch (event.type) {
       case "snapshot": {
+        this.snapshotSequence += 1;
         const decoded = Buffer.from(event.dataB64, "base64").toString("utf8");
         this.chunks = [decoded];
         this.lastSnapshot = {
           cols: event.cols,
           dataB64: event.dataB64,
           rows: event.rows,
+          scrollbackLines: event.window?.scrollbackLines ?? 0,
         };
         this.resolveOutputWaiters();
         for (const waiter of [...this.snapshotWaiters]) {
-          if (snapshotMatches(this.lastSnapshot, waiter.expectation)) {
+          if (
+            this.snapshotSequence >= waiter.minimumSequence &&
+            snapshotMatches(this.lastSnapshot, waiter.expectation)
+          ) {
             this.snapshotWaiters.splice(this.snapshotWaiters.indexOf(waiter), 1);
             waiter.resolve(this.lastSnapshot);
           }
@@ -593,7 +655,13 @@ function snapshotMatches(
   expectation: TerminalSnapshotExpectation,
 ): boolean {
   return (
+    (expectation.cols === undefined || snapshot.cols === expectation.cols) &&
+    (expectation.rows === undefined || snapshot.rows === expectation.rows) &&
     snapshot.dataB64.length > expectation.minEncodedChars &&
+    (expectation.maxEncodedChars === undefined ||
+      snapshot.dataB64.length < expectation.maxEncodedChars) &&
+    snapshot.scrollbackLines >=
+      (expectation.minRetainedScrollbackLines ?? 0) &&
     Buffer.from(snapshot.dataB64, "base64")
       .toString("utf8")
       .includes(expectation.sentinel)

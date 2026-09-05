@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
@@ -34,9 +35,12 @@ const RELAY_QUICK_REPLY_EXPECTED_INPUT =
 const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
+const INPUT_TRACE_FILE = ".kanna-e2e-inputs";
 
-export const MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE = {
-  minEncodedChars: 1_000_001,
+export const MOBILE_RELAY_PTY_HISTORY_FIXTURE = {
+  maxEncodedChars: 100_000,
+  minEncodedChars: 1_000,
+  minRetainedScrollbackLines: 9_000,
   sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL"
 } as const;
 
@@ -147,6 +151,22 @@ interface TerminalEventCollector {
   outputText(): string;
   waitForSnapshot(
     expectation: {
+      cols?: number;
+      maxEncodedChars?: number;
+      minEncodedChars: number;
+      minRetainedScrollbackLines?: number;
+      rows?: number;
+      sentinel: string;
+    },
+    timeoutMs?: number,
+  ): Promise<{
+    cols: number;
+    dataB64: string;
+    rows: number;
+    scrollbackLines: number;
+  }>;
+  waitForNewSnapshot(
+    expectation: {
       minEncodedChars: number;
       sentinel: string;
     },
@@ -171,11 +191,14 @@ interface TerminalFlowModule {
     harness: RemoteHarness,
     options: {
       displayName: string;
+      inputTraceFile?: string;
       prompt?: string;
       repoName?: string;
       snapshotHistory?: {
         sentinel: string;
       };
+      terminalCols?: number;
+      terminalRows?: number;
       waitingPromptSnippet?: string;
     }
   ): Promise<ScriptedTask>;
@@ -238,6 +261,7 @@ export interface MobileRelayHarness {
     originalPromptSnippet: string;
     repoLabel: string;
     stage: string;
+    taskId: string;
     title: string;
     waitingPromptSnippet: string;
   };
@@ -251,7 +275,7 @@ export interface MobileRelayHarness {
     timeoutMs?: number,
   ): Promise<string>;
   waitForLocalTaskActivity(activity: TaskActivity, timeoutMs?: number): Promise<void>;
-  waitForMobileTerminalGeometry(timeoutMs?: number): Promise<void>;
+  beginMobileTerminalGeometryObservation(timeoutMs?: number): Promise<void>;
 }
 
 export interface RelayTaskOrderingFixture {
@@ -384,9 +408,14 @@ export async function startMobileRelayHarness(
         ? {
             prompt: RELAY_ORIGINAL_PROMPT,
             repoName: RELAY_REPO_LABEL,
+            inputTraceFile: INPUT_TRACE_FILE,
             snapshotHistory: {
-              sentinel: MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel,
+              sentinel: MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
             },
+            // Start at the daemon default so the mobile detail's resize is
+            // observable, rather than inherited from fixture seeding.
+            terminalCols: 80,
+            terminalRows: 24,
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
         : {}),
@@ -402,14 +431,14 @@ export async function startMobileRelayHarness(
       harness,
       mode === "hybrid" ? [localTask, lanOnlyTask] : [localTask]
     );
-    const cloudTaskId = cloudTaskIdFor(harness, localTask);
+    let cloudTaskId = cloudTaskIdFor(harness, localTask);
     const cloudOnlyTaskId =
       `cloud:${HYBRID_CLOUD_ONLY_DESKTOP_ID}:` +
       `${HYBRID_CLOUD_ONLY_REPO_ID}:${HYBRID_CLOUD_ONLY_LOCAL_TASK_ID}`;
     if (mode === "relay") {
       await setLocalTaskRuntimeStatus(harness, localTask.taskId, "busy");
       await waitForLocalTaskActivity(harness, localTask, "working");
-      await waitForCloudTaskActivity({
+      cloudTaskId = await waitForCloudTaskActivity({
         activity: "working",
         auth,
         harness,
@@ -424,14 +453,15 @@ export async function startMobileRelayHarness(
     await remote.terminal.waitForTerminalOutput(
       terminalEvents,
       mode === "relay"
-        ? MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel
+        ? MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel
         : RELAY_TASK_SENTINEL,
       30_000,
     );
-    let oversizedSnapshot: {
+    let historySnapshot: {
       cols: number;
       dataB64: string;
       rows: number;
+      scrollbackLines: number;
     } | null = null;
     if (mode === "relay") {
       terminalEvents.close();
@@ -439,30 +469,31 @@ export async function startMobileRelayHarness(
         harness,
         localTask.taskId,
       );
-      oversizedSnapshot = await terminalEvents.waitForSnapshot(
-        MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE,
+      historySnapshot = await terminalEvents.waitForSnapshot(
+        MOBILE_RELAY_PTY_HISTORY_FIXTURE,
         30_000,
       );
       process.stdout.write(
-        `[mobile-e2e] authoritative PTY snapshot encodedChars=` +
-          `${oversizedSnapshot.dataB64.length} decodedBytes=` +
-          `${Buffer.from(oversizedSnapshot.dataB64, "base64").length} ` +
-          `dimensions=${oversizedSnapshot.cols}x${oversizedSnapshot.rows}\n`,
+        `[mobile-e2e] authoritative PTY window encodedChars=` +
+          `${historySnapshot.dataB64.length} decodedBytes=` +
+          `${Buffer.from(historySnapshot.dataB64, "base64").length} ` +
+          `retainedScrollbackLines=${historySnapshot.scrollbackLines} ` +
+          `dimensions=${historySnapshot.cols}x${historySnapshot.rows}\n`,
       );
     }
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
     const terminalFixture: PtyTerminalFixture = {
       taskId: cloudTaskId,
       sentinel:
-        oversizedSnapshot === null
+        historySnapshot === null
           ? RELAY_TASK_SENTINEL
-          : MOBILE_RELAY_PTY_SNAPSHOT_FIXTURE.sentinel,
+          : MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
       expectedCols: DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
       expectedRows: DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows,
       minDecodedBytes:
-        oversizedSnapshot === null
+        historySnapshot === null
           ? RELAY_TASK_SENTINEL.length
-          : Buffer.from(oversizedSnapshot.dataB64, "base64").length,
+          : Buffer.from(historySnapshot.dataB64, "base64").length,
     };
     const hybridFixture: MobileHybridFixture = {
       cloudOnly: {
@@ -495,6 +526,9 @@ export async function startMobileRelayHarness(
       unresolvedTaskId: HYBRID_UNRESOLVED_TASK_ID
     };
     const taskOrdering = relayTaskOrderingFixture(localTask.repoId);
+    const inputTracePath = localTask.worktreePath === null
+      ? null
+      : join(localTask.worktreePath, INPUT_TRACE_FILE);
 
     return {
       credentials: {
@@ -555,11 +589,11 @@ export async function startMobileRelayHarness(
           // Emit after the simulator has attached so the paths cannot age out
           // of the bounded xterm scan while Metro and WebDriverAgent start.
           // The space also mirrors agent prose and creates a path boundary.
-          await postScriptedTaskInput(harness, localTask.taskId, ` ${link}`);
-          await remote.terminal.waitForTerminalOutput(
-            terminalEvents!,
-            `SCRIPT_INPUT: ${link}`
-          );
+          const input = ` ${link}`;
+          const expectedCount =
+            scriptedInputTraceCount(inputTracePath, input) + 1;
+          await postScriptedTaskInput(harness, localTask.taskId, input);
+          await waitForScriptedInput(inputTracePath, input, expectedCount);
         }
       },
       expirePairingSession: () => updateHarnessMobileMachineControls(
@@ -586,6 +620,7 @@ export async function startMobileRelayHarness(
         originalPromptSnippet: RELAY_ORIGINAL_PROMPT,
         repoLabel: RELAY_REPO_LABEL,
         stage: RELAY_TASK_STAGE,
+        taskId: localTask.taskId,
         title: RELAY_TASK_TITLE,
         waitingPromptSnippet: RELAY_WAITING_PROMPT,
       },
@@ -602,49 +637,44 @@ export async function startMobileRelayHarness(
         await harness.stop();
       },
       async waitForQuickReplyInput(expectedInput, timeoutMs = 10_000) {
-        const output = await remote.terminal.waitForTerminalOutput(
-          terminalEvents!,
-          `SCRIPT_INPUT:${expectedInput.split("\n", 1)[0]}`,
-          timeoutMs
+        await waitForScriptedInput(inputTracePath, expectedInput, 1, timeoutMs);
+        const response = await harness.client.invokeDesktop({
+          desktopId: harness.desktopId,
+          method: "GET",
+          path: `/v1/tasks/${localTask.taskId}/inputs`,
+        }) as { inputs: Array<{ message: string }> };
+        const matchingInputs = response.inputs.filter(
+          (candidate) => candidate.message === expectedInput,
         );
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
-        const settledOutput = terminalEvents!.outputText();
-        assertSingleSubmittedTaskInput(
-          settledOutput,
-          expectedInput,
-        );
-        return settledOutput || output;
+        if (matchingInputs.length !== 1) {
+          throw new Error(
+            `Expected exactly one durable matching task input, observed ` +
+              `${matchingInputs.length}`,
+          );
+        }
+        return expectedInput;
       },
       waitForLocalTaskActivity(activity, timeoutMs) {
         return waitForLocalTaskActivity(harness, localTask, activity, timeoutMs);
       },
-      async waitForMobileTerminalGeometry(timeoutMs = 10_000) {
-        const observer = remote.terminal.collectTerminalEvents(
-          harness,
-          localTask.taskId
+      async beginMobileTerminalGeometryObservation(timeoutMs = 10_000) {
+        const snapshot = await terminalEvents!.waitForNewSnapshot(
+          {
+            minEncodedChars: terminalFixture.minDecodedBytes,
+            sentinel: terminalFixture.sentinel
+          },
+          timeoutMs
         );
-        try {
-          const snapshot = await observer.waitForSnapshot(
-            {
-              minEncodedChars: terminalFixture.minDecodedBytes,
-              sentinel: terminalFixture.sentinel
-            },
-            timeoutMs
+        if (
+          snapshot.cols !== terminalFixture.expectedCols ||
+          snapshot.rows !== terminalFixture.expectedRows
+        ) {
+          throw new Error(
+            `Expected a post-mount daemon PTY resize to ${terminalFixture.expectedCols}x` +
+              `${terminalFixture.expectedRows}, received ${snapshot.cols}x${snapshot.rows}`
           );
-          if (
-            snapshot.cols !== terminalFixture.expectedCols ||
-            snapshot.rows !== terminalFixture.expectedRows
-          ) {
-            throw new Error(
-              `Expected daemon PTY dimensions ${terminalFixture.expectedCols}x` +
-                `${terminalFixture.expectedRows} after mobile mount, received ` +
-                `${snapshot.cols}x${snapshot.rows}`
-            );
-          }
-        } finally {
-          observer.close();
         }
-      }
+      },
     };
   } catch (error) {
     terminalEvents?.close();
@@ -861,6 +891,40 @@ function cloudTaskIdFor(
   return `cloud:${harness.desktopId}:${localTask.repoId}:${localTask.taskId}`;
 }
 
+export function publishedCloudTaskId(
+  fields: Partial<Pick<FirestoreFields, "cloudTaskId">> | undefined,
+  fallbackId: string,
+): string {
+  return fields?.cloudTaskId?.stringValue?.trim() || fallbackId;
+}
+
+export function scriptedInputTraceCount(
+  path: string | null,
+  input: string,
+): number {
+  if (path === null || !existsSync(path)) return 0;
+  return readFileSync(path)
+    .toString("utf8")
+    .split("\0")
+    .filter((candidate) => candidate === input).length;
+}
+
+async function waitForScriptedInput(
+  path: string | null,
+  input: string,
+  count = 1,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (scriptedInputTraceCount(path, input) >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Expected desktop PTY to receive input occurrence ${count}: ${input}`,
+  );
+}
+
 async function seedHybridCloudSnapshots(input: {
   auth: AuthSession;
   harness: RemoteHarness;
@@ -1036,7 +1100,7 @@ async function waitForCloudTaskActivity(input: {
   auth: AuthSession;
   harness: RemoteHarness;
   task: ScriptedTask;
-}, timeoutMs = CLOUD_PUBLICATION_TIMEOUT_MS, stableForMs = 0): Promise<void> {
+}, timeoutMs = CLOUD_PUBLICATION_TIMEOUT_MS, stableForMs = 0): Promise<string> {
   const path = [
     "users",
     input.auth.uid,
@@ -1050,6 +1114,7 @@ async function waitForCloudTaskActivity(input: {
   const deadline = Date.now() + timeoutMs;
   let lastObserved: unknown = null;
   let matchingSince: number | null = null;
+  let publishedTaskId: string | null = null;
 
   while (Date.now() < deadline) {
     const response = await fetch(url, {
@@ -1065,10 +1130,15 @@ async function waitForCloudTaskActivity(input: {
       );
       lastObserved = taskDocument?.fields?.activity?.stringValue ?? null;
       if (lastObserved === input.activity) {
+        publishedTaskId = publishedCloudTaskId(
+          taskDocument?.fields,
+          cloudTaskIdFor(input.harness, input.task),
+        );
         matchingSince ??= Date.now();
-        if (Date.now() - matchingSince >= stableForMs) return;
+        if (Date.now() - matchingSince >= stableForMs) return publishedTaskId;
       } else {
         matchingSince = null;
+        publishedTaskId = null;
       }
     } else {
       lastObserved = `${response.status} ${JSON.stringify(body)}`;
@@ -1079,7 +1149,7 @@ async function waitForCloudTaskActivity(input: {
 
   throw new Error(
     `Expected published task ${input.task.taskId} activity ${input.activity}; ` +
-      `last observed ${String(lastObserved)}`
+      `last observed ${String(lastObserved)} with task id ${String(publishedTaskId)}`
   );
 }
 

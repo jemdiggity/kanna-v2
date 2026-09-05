@@ -186,6 +186,12 @@ export default function RootNavigator({
     );
   }, [navigationRef]);
   const pushTask = useCallback((taskId: string) => {
+    // Starting the stream is synchronous, whereas the detail screen's layout
+    // effect runs only after navigation commits. Seed the viewport before the
+    // stream can attach so the relay cannot leave a fresh daemon PTY at its
+    // creation-time 80x24 geometry while waiting for that effect.
+    const geometry = resolveMobileTerminalGeometry(taskDetailViewportRef.current);
+    controller.resizeTaskTerminal(taskId, geometry.cols, geometry.rows);
     controller.openTask(taskId);
     pushPreparedTask(taskId);
   }, [controller, pushPreparedTask]);

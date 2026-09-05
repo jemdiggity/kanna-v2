@@ -360,8 +360,8 @@ async function main(): Promise<void> {
         taskRow: relayHarness.taskRow,
         taskOrdering: relayHarness.taskOrdering,
         waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity,
-        waitForMobileTerminalGeometry:
-          relayHarness.waitForMobileTerminalGeometry,
+        beginMobileTerminalGeometryObservation:
+          relayHarness.beginMobileTerminalGeometryObservation,
         async waitForQuickReplyInput() {
           await relayHarness!.waitForQuickReplyInput(
             relayHarness!.quickReply.expectedInput
