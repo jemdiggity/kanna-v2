@@ -197,70 +197,6 @@ pub(super) fn fetch_start_point(
     ))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::fetch_start_point;
-    use std::path::Path;
-    use std::process::Command;
-
-    fn run_git(repo_path: Option<&Path>, args: &[&str]) {
-        let mut command = Command::new("git");
-        if let Some(repo_path) = repo_path {
-            command.arg("-C").arg(repo_path);
-        }
-        let output = command.args(args).output().expect("git should launch");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn fetch_start_point_treats_option_shaped_branches_as_revisions() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let local = temp.path().join("local");
-        let remote_path = remote.to_string_lossy();
-
-        run_git(None, &["init", "--bare", &remote_path]);
-        run_git(None, &["init", seed.to_string_lossy().as_ref()]);
-        run_git(
-            Some(&seed),
-            &[
-                "-c",
-                "user.name=Kanna Test",
-                "-c",
-                "user.email=kanna-test@example.invalid",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "seed",
-            ],
-        );
-
-        let remote_branch = "--upload-pack=kanna-missing-upload-pack";
-        let remote_refspec = format!("HEAD:refs/heads/{remote_branch}");
-        run_git(Some(&seed), &["push", "--", &remote_path, &remote_refspec]);
-
-        run_git(None, &["init", local.to_string_lossy().as_ref()]);
-        run_git(Some(&local), &["remote", "add", "origin", &remote_path]);
-        assert_eq!(
-            fetch_start_point(local.to_string_lossy().as_ref(), Some(remote_branch)),
-            Ok(format!("origin/{remote_branch}"))
-        );
-
-        let local_branch = "--local-option-shaped-branch";
-        let local_ref = format!("refs/heads/{local_branch}");
-        run_git(Some(&local), &["update-ref", &local_ref, "FETCH_HEAD"]);
-        assert_eq!(
-            fetch_start_point(local.to_string_lossy().as_ref(), Some(local_branch)),
-            Ok(local_branch.to_string())
-        );
-    }
-}
-
 pub(super) fn create_worktree(
     repo_path: &str,
     branch: &str,
@@ -366,4 +302,68 @@ pub(super) fn merge_branches_into_worktree(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_start_point;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn run_git(repo_path: Option<&Path>, args: &[&str]) {
+        let mut command = Command::new("git");
+        if let Some(repo_path) = repo_path {
+            command.arg("-C").arg(repo_path);
+        }
+        let output = command.args(args).output().expect("git should launch");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn fetch_start_point_treats_option_shaped_branches_as_revisions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let local = temp.path().join("local");
+        let remote_path = remote.to_string_lossy();
+
+        run_git(None, &["init", "--bare", &remote_path]);
+        run_git(None, &["init", seed.to_string_lossy().as_ref()]);
+        run_git(
+            Some(&seed),
+            &[
+                "-c",
+                "user.name=Kanna Test",
+                "-c",
+                "user.email=kanna-test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "seed",
+            ],
+        );
+
+        let remote_branch = "--upload-pack=kanna-missing-upload-pack";
+        let remote_refspec = format!("HEAD:refs/heads/{remote_branch}");
+        run_git(Some(&seed), &["push", "--", &remote_path, &remote_refspec]);
+
+        run_git(None, &["init", local.to_string_lossy().as_ref()]);
+        run_git(Some(&local), &["remote", "add", "origin", &remote_path]);
+        assert_eq!(
+            fetch_start_point(local.to_string_lossy().as_ref(), Some(remote_branch)),
+            Ok(format!("origin/{remote_branch}"))
+        );
+
+        let local_branch = "--local-option-shaped-branch";
+        let local_ref = format!("refs/heads/{local_branch}");
+        run_git(Some(&local), &["update-ref", &local_ref, "FETCH_HEAD"]);
+        assert_eq!(
+            fetch_start_point(local.to_string_lossy().as_ref(), Some(local_branch)),
+            Ok(local_branch.to_string())
+        );
+    }
 }

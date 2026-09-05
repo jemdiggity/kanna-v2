@@ -43,13 +43,17 @@ use std::sync::Arc;
 /// executable. Those paths are process-wide, so every creator must hold this
 /// guard until it has finished using and cleaning up the fixture.
 #[cfg(test)]
-static TEST_SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TEST_SIDECAR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
-pub(crate) fn test_sidecar_guard() -> std::sync::MutexGuard<'static, ()> {
-    TEST_SIDECAR_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+pub(crate) async fn test_sidecar_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    TEST_SIDECAR_LOCK.lock().await
+}
+
+/// Synchronous fixtures share the same lock, outside any Tokio runtime.
+#[cfg(test)]
+pub(crate) fn test_sidecar_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    TEST_SIDECAR_LOCK.blocking_lock()
 }
 
 #[tokio::main]

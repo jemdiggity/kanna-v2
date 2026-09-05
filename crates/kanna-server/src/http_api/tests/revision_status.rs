@@ -556,8 +556,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), sync_rx.recv())
             .await
-            .expect("revision daemon synchronization timed out")
-            .as_deref(),
+            .expect("revision daemon synchronization timed out"),
         Some("revision spawned")
     );
 
@@ -596,8 +595,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), sync_rx.recv())
             .await
-            .expect("commit post synchronization timed out")
-            .as_deref(),
+            .expect("commit post synchronization timed out"),
         Some("commit dispatched")
     );
     daemon_server.await.unwrap();

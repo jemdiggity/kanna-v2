@@ -1942,6 +1942,7 @@ fn event_lock_wait_is_bounded() {
     let events_path = fixture.session_path("123-456").join("state/events");
     let locked = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(events_path)

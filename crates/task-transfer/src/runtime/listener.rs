@@ -9,14 +9,13 @@ use super::daemon::{
     read_owner_task_diff, read_owner_task_directory, read_owner_task_file, resize_daemon_session,
     send_daemon_input, stream_daemon_session,
 };
-use super::discovery::PeerDiscovery;
 use super::events::{
     IncomingTransferEvent, OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent,
     PairingRequestedEvent, RuntimeError, RuntimeEvent, TaskPullRequestedEvent,
 };
 use super::external_peers::{
     ensure_peer_is_trusted, ensure_peer_is_trusted_for_transport, external_key_is_trusted,
-    find_peer, ExternalPeerRegistry, TransferTransport,
+    find_peer, TransferTransport,
 };
 use super::pull::{prune_task_pull_requests, validate_source_task_id};
 use super::replay_store::unix_ms;
@@ -48,15 +47,13 @@ use chrono::Utc;
 use rand_core::{OsRng, RngCore};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug)]
 pub(super) struct LegacyArtifactMaterialization {
@@ -603,14 +600,9 @@ async fn handle_connection(
             sealed_payload,
         }) => {
             match build_incoming_event(
-                &context.self_peer_id,
-                &context.registry_root,
-                &context.discovery,
-                &context.external_peers,
+                &context,
                 &transfer_id,
                 sealed_payload,
-                &context.incoming_reservations,
-                &context.replay_store,
             )
             .await
             {
@@ -1402,11 +1394,13 @@ async fn handle_connection(
                             &context,
                             stream,
                             &requester_peer_id,
-                            task_id.clone(),
-                            request_id.clone(),
-                            generation.clone(),
-                            stream_nonce.clone(),
-                            observation_challenge.clone(),
+                            crate::runtime::companion::OwnerCompanionStream {
+                                task_id: task_id.clone(),
+                                request_id: request_id.clone(),
+                                generation: generation.clone(),
+                                stream_nonce: stream_nonce.clone(),
+                                observation_challenge: observation_challenge.clone(),
+                            },
                             cancel,
                         )
                         .await
@@ -2065,15 +2059,19 @@ where
 }
 
 async fn build_incoming_event(
-    self_peer_id: &str,
-    registry_root: &Path,
-    discovery: &PeerDiscovery,
-    external_peers: &ExternalPeerRegistry,
+    context: &ListenerContext,
     transfer_id: &str,
     sealed_payload: String,
-    incoming_reservations: &Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
-    replay_store: &super::replay_store::TransferReplayStore,
 ) -> Result<IncomingTransferEvent, RuntimeError> {
+    let ListenerContext {
+        self_peer_id,
+        registry_root,
+        discovery,
+        external_peers,
+        incoming_reservations,
+        replay_store,
+        ..
+    } = context;
     let reservation = {
         let mut reservations = incoming_reservations.lock().await;
         replay_store.prune_incoming_reservations(&mut reservations);

@@ -253,14 +253,12 @@ fn resolve_task_file_mentions_with_limit(
             )
         });
 
-    let mut visited = 0usize;
     let mut walk_incomplete = false;
-    for entry_result in builder.build() {
+    for (visited, entry_result) in builder.build().enumerate() {
         if visited >= walk_entry_limit {
             walk_incomplete = true;
             break;
         }
-        visited += 1;
         let entry = match entry_result {
             Ok(entry) => entry,
             Err(_) => {

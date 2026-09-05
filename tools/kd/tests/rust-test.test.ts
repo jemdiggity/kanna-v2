@@ -12,6 +12,7 @@ describe("Rust test orchestration", () => {
       },
       { name: "frontend", command: "pnpm", args: ["--dir", "apps/desktop", "build"] },
       { name: "sidecars", command: "./kd", args: ["build", "sidecars"] },
+      { name: "clippy", command: "cargo", args: ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"] },
       { name: "workspace", command: "cargo", args: ["test", "--workspace", "--exclude", "kanna-daemon"] },
       { name: "daemon", command: "cargo", args: ["test", "-p", "kanna-daemon", "--", "--test-threads=1"] },
     ]);
@@ -67,13 +68,13 @@ describe("Rust test orchestration", () => {
     });
   });
 
-  it("stops after an intermediate failure and retains prior and failed results", async () => {
+  it("stops on clippy warnings before running test binaries and retains prior results", async () => {
     const planned = buildRustTestCommands();
     const outcomes = [
       { exitCode: 0, stdout: "agent protocol types passed", stderr: "" },
       { exitCode: 0, stdout: "frontend passed", stderr: "" },
       { exitCode: 0, stdout: "sidecars passed", stderr: "" },
-      { exitCode: 1, stdout: "", stderr: "workspace failed" },
+      { exitCode: 1, stdout: "", stderr: "clippy failed" },
     ];
     const calls: string[] = [];
     const runner: CommandRunner = {
@@ -90,7 +91,7 @@ describe("Rust test orchestration", () => {
     );
     expect(result).toEqual({
       ok: false,
-      message: "workspace failed",
+      message: "clippy failed",
       data: {
         commands: planned.slice(0, 4).map((command, index) => ({
           ...command,

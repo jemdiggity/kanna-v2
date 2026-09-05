@@ -1673,7 +1673,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",

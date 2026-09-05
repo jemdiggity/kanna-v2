@@ -624,13 +624,13 @@ mod tests {
     /// have. Serialized on the crate's env guard, because the lookup path is
     /// process-global.
     struct StubOpencode {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: tokio::sync::MutexGuard<'static, ()>,
         _dir: tempfile::TempDir,
     }
 
     impl StubOpencode {
         fn responding(script_body: &str) -> Self {
-            let guard = crate::test_sidecar_guard();
+            let guard = crate::test_sidecar_guard_blocking();
             let dir = tempfile::tempdir().expect("stub dir");
             let stub = dir.path().join("opencode");
             std::fs::write(&stub, format!("#!/bin/sh\n{script_body}\n")).expect("write stub");

@@ -618,6 +618,15 @@ fn number(value: &Value, keys: &[&str]) -> Option<i64> {
         .find_map(|key| value.get(key).and_then(Value::as_i64))
 }
 
+/// Companion callers fence frames by sidecar incarnation, so companion verbs
+/// answer with the incarnation that served them.
+fn with_incarnation(mut response: Value, client: &TransferSidecarClient) -> Value {
+    if let Some(object) = response.as_object_mut() {
+        object.insert("incarnation".into(), Value::from(client.incarnation()));
+    }
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,13 +700,4 @@ mod tests {
             assert_eq!(request["control_input"], control_input);
         }
     }
-}
-
-/// Companion callers fence frames by sidecar incarnation, so companion verbs
-/// answer with the incarnation that served them.
-fn with_incarnation(mut response: Value, client: &TransferSidecarClient) -> Value {
-    if let Some(object) = response.as_object_mut() {
-        object.insert("incarnation".into(), Value::from(client.incarnation()));
-    }
-    response
 }

@@ -1869,7 +1869,7 @@ async fn pr_completion_starts_dormant_dependent_from_current_branch_optimistical
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -2324,7 +2324,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -3134,7 +3134,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -3380,7 +3380,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -3659,7 +3659,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -4554,7 +4554,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -4998,7 +4998,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -6273,7 +6273,7 @@ async fn complete_post_and_transition(refinish: bool) {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -6641,7 +6641,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -6843,7 +6843,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",
@@ -7064,7 +7064,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = format!(
         "{}-{}",

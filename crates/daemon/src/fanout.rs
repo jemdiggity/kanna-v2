@@ -230,16 +230,16 @@ impl FanoutState {
         let pending_bytes = Arc::new(AtomicUsize::new(0));
         let lagged = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let writer_task = spawn_writer_task(
-            session_id.to_string(),
+        let writer_task = spawn_writer_task(WriterTask {
+            session_id: session_id.to_string(),
             kind,
-            writer.clone(),
+            writer: writer.clone(),
             rx,
-            pending_bytes.clone(),
-            lagged.clone(),
-            self.recovery_notify.clone(),
-            cancelled.clone(),
-        );
+            pending_bytes: pending_bytes.clone(),
+            lagged: lagged.clone(),
+            recovery_notify: self.recovery_notify.clone(),
+            cancelled: cancelled.clone(),
+        });
         let subscriber = Subscriber {
             writer_id,
             kind,
@@ -516,16 +516,28 @@ pub(crate) async fn existing_session_fanout(
     fanouts.lock().await.get(session_id).cloned()
 }
 
-fn spawn_writer_task(
+struct WriterTask {
     session_id: String,
     kind: SubscriberKind,
     writer: SessionWriter,
-    mut rx: mpsc::UnboundedReceiver<EventLine>,
+    rx: mpsc::UnboundedReceiver<EventLine>,
     pending_bytes: Arc<AtomicUsize>,
     lagged: Arc<AtomicBool>,
     recovery_notify: Arc<tokio::sync::Notify>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-) -> tokio::task::JoinHandle<()> {
+}
+
+fn spawn_writer_task(task: WriterTask) -> tokio::task::JoinHandle<()> {
+    let WriterTask {
+        session_id,
+        kind,
+        writer,
+        mut rx,
+        pending_bytes,
+        lagged,
+        recovery_notify,
+        cancelled,
+    } = task;
     tokio::spawn(async move {
         while let Some(item) = rx.recv().await {
             let mut context =

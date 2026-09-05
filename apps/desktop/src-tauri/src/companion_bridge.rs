@@ -119,6 +119,9 @@ pub struct CompanionBridgeHandle {
     pub entry_url: String,
 }
 
+#[cfg(test)]
+type PhasedTestBarriers<P> = Option<(P, Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>;
+
 pub struct CompanionBridgeManager {
     entries: Mutex<HashMap<CompanionBridgeKey, Arc<CompanionBridgeEntry>>>,
     window_leases: Mutex<HashMap<String, WindowLeaseState>>,
@@ -130,21 +133,9 @@ pub struct CompanionBridgeManager {
     #[cfg(test)]
     cleanup_barriers: StdMutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
     #[cfg(test)]
-    handshake_barriers: StdMutex<
-        Option<(
-            HandshakePhase,
-            Arc<tokio::sync::Barrier>,
-            Arc<tokio::sync::Barrier>,
-        )>,
-    >,
+    handshake_barriers: StdMutex<PhasedTestBarriers<HandshakePhase>>,
     #[cfg(test)]
-    publication_barriers: StdMutex<
-        Option<(
-            PublicationPhase,
-            Arc<tokio::sync::Barrier>,
-            Arc<tokio::sync::Barrier>,
-        )>,
-    >,
+    publication_barriers: StdMutex<PhasedTestBarriers<PublicationPhase>>,
     #[cfg(test)]
     lease_claim_barriers: StdMutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
     #[cfg(test)]
@@ -754,7 +745,7 @@ impl CompanionBridgeManager {
         if let Some(existing) = winner {
             self.replace_entry_bundle(&existing, entry.current_bundle())
                 .await?;
-            return Ok(existing.issue_handle()?);
+            return existing.issue_handle();
         }
 
         self.spawn_entry_server(listener, entry.clone());
@@ -959,9 +950,8 @@ impl CompanionBridgeManager {
             let mut entries = self.entries.lock().await;
             let keys = entries
                 .iter()
-                .filter_map(|(key, entry)| {
-                    (entry.owner_window_label == owner_window_label).then(|| key.clone())
-                })
+                .filter(|(_, entry)| entry.owner_window_label == owner_window_label)
+                .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
             keys.into_iter()
                 .filter_map(|key| entries.remove(&key))
@@ -1073,11 +1063,11 @@ impl CompanionBridgeManager {
             let mut entries = self.entries.lock().await;
             let keys = entries
                 .iter()
-                .filter_map(|(key, entry)| {
-                    (entry.owner_window_label == owner_window_label
-                        && entry.owner_lease_generation != current_lease_generation)
-                        .then(|| key.clone())
+                .filter(|(_, entry)| {
+                    entry.owner_window_label == owner_window_label
+                        && entry.owner_lease_generation != current_lease_generation
                 })
+                .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
             keys.into_iter()
                 .filter_map(|key| entries.remove(&key))
@@ -1094,7 +1084,8 @@ impl CompanionBridgeManager {
             let mut entries = self.entries.lock().await;
             let keys = entries
                 .iter()
-                .filter_map(|(key, entry)| owns(entry).then(|| key.clone()))
+                .filter(|(_, entry)| owns(entry))
+                .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
             keys.into_iter()
                 .filter_map(|key| entries.remove(&key))

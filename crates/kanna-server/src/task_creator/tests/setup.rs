@@ -76,7 +76,7 @@ fn write_setup_repo(
 
 #[test]
 fn pty_setup_keeps_sidecar_provider_directory_as_path_fallback() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard_blocking();
     let codex = ensure_test_sidecar("codex");
     let workspace = std::env::temp_dir().join(format!(
         "kanna-pty-sidecar-setup-path-{}",
@@ -183,7 +183,7 @@ fn seed_source_task(
 
 #[tokio::test]
 async fn initial_pty_task_streams_setup_before_starting_setup_created_provider() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
     let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
@@ -351,7 +351,7 @@ fn pty_setup_failure_keeps_output_and_prevents_provider_launch() {
 
 #[test]
 fn initial_pty_task_binds_first_provider_before_setup() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard_blocking();
     let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
@@ -420,7 +420,7 @@ fn initial_pty_task_binds_first_provider_before_setup() {
 
 #[tokio::test]
 async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
     let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
@@ -500,7 +500,7 @@ async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() 
 
 #[tokio::test]
 async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
     let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
@@ -686,7 +686,7 @@ fn headless_post_preparation_does_not_run_fallback_environment_setup() {
 
 #[tokio::test]
 async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard().await;
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
     let grandchild_pid_file = std::env::temp_dir().join(format!(

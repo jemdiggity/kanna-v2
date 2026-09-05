@@ -29,6 +29,13 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufR
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
+pub(super) struct ArtifactStreamRequest<'a> {
+    pub(super) request_id: &'a str,
+    pub(super) transfer_id: &'a str,
+    pub(super) artifact_id: &'a str,
+    pub(super) framing: ArtifactFraming,
+}
+
 /// The wire `filename` is only ever a file name, so `NAME_MAX` is its natural
 /// ceiling even though the local name is no longer composed from it.
 const MAX_ARTIFACT_FILENAME_BYTES: usize = super::utils::NAME_MAX_BYTES;
@@ -704,12 +711,15 @@ impl TransferRuntime {
         &self,
         peer: &PeerRegistryEntry,
         request: PeerRequest,
-        request_id: &str,
-        transfer_id: &str,
-        artifact_id: &str,
-        artifact_framing: ArtifactFraming,
+        artifact: ArtifactStreamRequest<'_>,
         source_public_key: &x25519_dalek::PublicKey,
     ) -> Result<PathBuf, RuntimeError> {
+        let ArtifactStreamRequest {
+            request_id,
+            transfer_id,
+            artifact_id,
+            framing: artifact_framing,
+        } = artifact;
         let _permit = Arc::clone(&self.artifact_peer_request_permits)
             .try_acquire_owned()
             .map_err(|_| {

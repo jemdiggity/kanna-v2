@@ -298,10 +298,10 @@ impl CompanionIpcSender {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state
+        if state
             .current_generations
             .get(&key)
-            .is_some_and(|(_, current_generation)| current_generation == generation)
+            .is_none_or(|(_, current_generation)| current_generation != generation)
         {
             return;
         }
@@ -414,9 +414,11 @@ async fn run_companion_ipc_writer<W>(
     }
 }
 
+type CompanionIpcEventClass<'a> = ((&'a str, &'a str), bool, &'a str, u64);
+
 fn companion_ipc_event_class(
     event: &SidecarEvent,
-) -> Result<((&str, &str), bool, &str, u64), &'static str> {
+) -> Result<CompanionIpcEventClass<'_>, &'static str> {
     let SidecarEvent::CompanionEvent {
         peer_id,
         task_id,

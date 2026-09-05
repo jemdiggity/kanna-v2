@@ -982,33 +982,6 @@ fn negative_workflow_revision_limit_is_a_definition_error() {
 }
 
 #[test]
-fn revision_budget_is_exhausted_only_at_a_positive_limit() {
-    use super::super::RevisionBudget;
-
-    assert!(!RevisionBudget {
-        rounds: 2,
-        limit: 3
-    }
-    .exhausted());
-    assert!(RevisionBudget {
-        rounds: 3,
-        limit: 3
-    }
-    .exhausted());
-    assert!(RevisionBudget {
-        rounds: 4,
-        limit: 3
-    }
-    .exhausted());
-    // `0` opts the workflow out of the cap entirely.
-    assert!(!RevisionBudget {
-        rounds: 80,
-        limit: 0
-    }
-    .exhausted());
-}
-
-#[test]
 fn revision_prompt_announces_the_round_and_holds_scope() {
     use super::super::RevisionRound;
 

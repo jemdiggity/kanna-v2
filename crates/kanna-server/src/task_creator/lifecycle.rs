@@ -34,6 +34,8 @@ pub(crate) fn rollback_prepared_task_for_api(
     }
 }
 
+// Tests exercise the spawn primitive without recording a stage run.
+#[cfg(test)]
 pub(super) async fn spawn_prepared_task(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
@@ -62,6 +64,7 @@ enum SpawnPreparedError {
     UncertainDelivery(String),
 }
 
+#[cfg(test)]
 impl SpawnPreparedError {
     fn into_message(self) -> String {
         match self {
@@ -216,22 +219,6 @@ async fn seed_terminal_carryover(
             log::warn!("[stage-carryover] failed to seed history for {session_id}: {error}");
         }
     }
-}
-
-pub(crate) async fn spawn_prepared_task_for_api(
-    daemon: &mut DaemonClient,
-    prepared: PreparedTaskSpawn,
-) -> Result<crate::mobile_api::CreateTaskResponse, String> {
-    let created = spawn_prepared_task(daemon, prepared).await?;
-    Ok(crate::mobile_api::CreateTaskResponse {
-        task_id: created.task_id,
-        repo_id: created.repo_id,
-        title: created.title,
-        prompt: created.prompt,
-        stage: created.stage,
-        agent_type: created.agent_type,
-        worktree_path: Some(created.worktree_path),
-    })
 }
 
 pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(

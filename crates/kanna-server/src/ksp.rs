@@ -584,8 +584,10 @@ impl CompanionResources {
             cancel_receiver,
             asset_demand_receiver,
             Arc::clone(&self.materialization_budget),
-            Arc::clone(&self.retained_bytes),
-            Arc::clone(&self.retained_available),
+            CompanionScanRetention {
+                retained_bytes: Arc::clone(&self.retained_bytes),
+                retained_available: Arc::clone(&self.retained_available),
+            },
         );
         CompanionScanSubscription {
             _source: source,
@@ -3413,6 +3415,11 @@ async fn stream_companion(
     }
 }
 
+struct CompanionScanRetention {
+    retained_bytes: Arc<AtomicUsize>,
+    retained_available: Arc<Notify>,
+}
+
 fn spawn_companion_scan_source(
     db_path: String,
     task_id: String,
@@ -3420,9 +3427,12 @@ fn spawn_companion_scan_source(
     mut cancel: watch::Receiver<bool>,
     mut asset_demand: watch::Receiver<usize>,
     materialization_budget: Arc<kanna_visual_companion::CompanionMaterializationBudget>,
-    retained_bytes: Arc<AtomicUsize>,
-    retained_available: Arc<Notify>,
+    retention: CompanionScanRetention,
 ) {
+    let CompanionScanRetention {
+        retained_bytes,
+        retained_available,
+    } = retention;
     tokio::spawn(async move {
         let mut published = PublishedCompanionState::Never;
         let scan_budget = Arc::clone(&materialization_budget);
@@ -9218,7 +9228,7 @@ mod tests {
             ServerFrame::Response { id, status, body } => {
                 assert_eq!(id, 8);
                 assert_eq!(status, 403);
-                assert!(!body.is_some_and(|body| body.get("pairingPayload").is_some()));
+                assert!(body.is_none_or(|body| body.get("pairingPayload").is_none()));
             }
             other => panic!("expected Response, got {other:?}"),
         }

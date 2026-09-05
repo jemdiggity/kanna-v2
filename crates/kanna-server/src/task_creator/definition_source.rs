@@ -97,13 +97,13 @@ impl RepoDefinitionSnapshot {
                     repo_path.display()
                 )
             })?;
-            if candidate_ref == full_ref_name {
-                if exact_oid.replace(candidate_oid.to_string()).is_some() {
-                    return Err(format!(
-                        "Git ref lookup for `{ref_name}` (`{full_ref_name}`) in repository `{}` returned the exact ref more than once",
-                        repo_path.display()
-                    ));
-                }
+            if candidate_ref == full_ref_name
+                && exact_oid.replace(candidate_oid.to_string()).is_some()
+            {
+                return Err(format!(
+                    "Git ref lookup for `{ref_name}` (`{full_ref_name}`) in repository `{}` returned the exact ref more than once",
+                    repo_path.display()
+                ));
             }
         }
 

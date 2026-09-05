@@ -1113,14 +1113,6 @@ pub(crate) struct RevisionBudget {
     pub(crate) limit: i64,
 }
 
-impl RevisionBudget {
-    /// True when the next agent-requested revision would exceed the cap. The
-    /// engine parks the task for its human instead of forking another round.
-    pub(crate) fn exhausted(&self) -> bool {
-        self.limit > 0 && self.rounds >= self.limit
-    }
-}
-
 /// Effective revision-round cap for a task's pinned workflow.
 pub(crate) fn resolve_revision_limit(
     repo: &Repo,
