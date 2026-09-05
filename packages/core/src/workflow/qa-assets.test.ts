@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
@@ -27,8 +27,22 @@ function readRepoPhrases(path: string): string {
   return readRepoFile(path).replace(/\s+/g, " ");
 }
 
+/**
+ * Directory names under `.kanna/agents` that actually define a built-in agent.
+ * A directory may hold only a repo-local `EXTEND.md` — an answer this
+ * repository gives to a built-in that ships elsewhere, or to one that has not
+ * shipped yet — and that is an extension, not a built-in agent definition.
+ */
+function builtInAgentNames(): string[] {
+  return readdirSync(resolve(repoRoot, ".kanna/agents"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => existsSync(resolve(repoRoot, `.kanna/agents/${name}/AGENT.md`)))
+    .sort();
+}
+
 describe("built-in agent completion protocol", () => {
-  const agentNames = readdirSync(resolve(repoRoot, ".kanna/agents"));
+  const agentNames = builtInAgentNames();
 
   it.each(agentNames)("%s records stage completion MCP-first with a CLI fallback", (name) => {
     const agent = readRepoFile(`.kanna/agents/${name}/AGENT.md`);
@@ -64,12 +78,7 @@ describe("built-in agent completion protocol", () => {
 
 describe("QA workflow assets", () => {
   it("keeps process termination guidance in repository conventions", () => {
-    const builtInAgents = readdirSync(resolve(repoRoot, ".kanna/agents"), {
-      withFileTypes: true,
-    })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
+    const builtInAgents = builtInAgentNames();
     expect(builtInAgents.length).toBeGreaterThan(0);
 
     for (const name of builtInAgents) {

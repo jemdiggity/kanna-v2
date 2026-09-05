@@ -102,9 +102,18 @@ child runs the same one. The manager needs no `agent` override.
 
 Its job, in order:
 
-1. **Enumerate.** Resolve the repo's open PRs. This is forge work, so it lives
-   here in user-space, not in the engine: `gh pr list --json
-   number,title,author,headRefName,baseRefName,headRefOid,isDraft,additions,deletions,changedFiles,createdAt,updatedAt,statusCheckRollup,mergeable`.
+0. **Resolve scope.** *Which* PRs is this operator responsible for — only the
+   ones they authored, or every open PR on the repo? The built-in **leaves
+   this undefined and asks**, because both answers are correct for real users
+   and the built-in cannot know which one is looking at it (see "Defaults,
+   extension, and setup"). A repo that has answered it in
+   `.kanna/agents/pr-review-manager/EXTEND.md` is not asked again; when nobody
+   has answered, the manager asks once, proceeds on the answer, and offers to
+   write the extension so it never asks again.
+1. **Enumerate.** Resolve the open PRs in scope. This is forge work, so it
+   lives here in user-space, not in the engine: `gh pr list --json
+   number,title,author,headRefName,baseRefName,headRefOid,isDraft,additions,deletions,changedFiles,createdAt,updatedAt,statusCheckRollup,mergeable`
+   (plus `--author @me` when the scope is the operator's own PRs).
 2. **Order.** Propose a review order and *say why*. The inputs are all cheap
    and all already available: checks red or green; draft or ready; size; age;
    whether the PR's base is another open PR (a stack — the same question
@@ -133,6 +142,60 @@ Its job, in order:
    the manager, when asked) says so.
 
 The manager never reviews code itself and never approves or merges anything.
+
+### Defaults, extension, and setup
+
+Owner directive, 2026-09-05: *"Kanna should ship with sensible default agent
+definitions, but allow extension or replacement, and the initial setup agent
+should help the user make these agent modifications for each of their repos
+when they're initially imported or created. The user may want either option:
+their own PRs or if they're senior level maybe they're responsible for the
+whole repo."*
+
+That is a rule about how these definitions are written, not just about this
+one question. It resolves into three obligations:
+
+1. **The built-in ships the behavior every repo wants, and leaves genuinely
+   per-repo choices undefined.** Review scope is the worked example: "my own
+   PRs" is right for a contributor, "every open PR" is right for someone who
+   owns the repo, and the built-in has no way to tell which it is talking to.
+   So it defines the *procedure* and declares the scope question open, rather
+   than picking a default that is wrong for half its users and silently
+   applied. A built-in that must guess should ask instead.
+2. **The repo answers it by extension, not by replacement.** One
+   `.kanna/agents/pr-review-manager/EXTEND.md` layers the answer onto the
+   resolved agent, so the repo keeps receiving improvements to the built-in it
+   did not fork. Full replacement (`AGENT.md`) stays available for a repo whose
+   review procedure is genuinely its own.
+3. **The `setup` agent asks at import.** `.kanna/agents/setup/AGENT.md`
+   already has this exact shape — inspect first, ask only what inspection
+   cannot answer, compose stock definitions, write `EXTEND.md` only where an
+   answer does not match stock behavior. This design adds one question to its
+   list:
+
+   > **PR review scope** — when you review pull requests in Kanna, are you
+   > responsible for your own PRs, or for every open PR on this repository?
+
+   Inspection can pre-answer it in the common case: if `gh` reports the
+   operator has push/admin permission on the repo, "every open PR" is the
+   likely answer and the question becomes a confirmation. The answer is
+   written as `.kanna/agents/pr-review-manager/EXTEND.md`; no answer is also a
+   valid outcome, and the manager asks the first time it runs.
+
+**Exercised now.** `.kanna/agents/pr-review-manager/EXTEND.md` exists in this
+repository and says Kanna reviews every open PR, with the two repo-specific
+ranking rules that follow from Kanna being a distributed system that ships as
+one signed app. It is committed ahead of the agent it extends and is inert
+until phase 1: an `EXTEND.md` whose base agent does not resolve is skipped by
+`agent_optional`, and a directory holding only an `EXTEND.md` for a
+non-built-in name never enters the `agents()` listing, so it is not an error
+and not a listing.
+
+It did surface one latent assumption, now fixed:
+`packages/core/src/workflow/qa-assets.test.ts` treated every directory under
+`.kanna/agents` as a built-in and read an `AGENT.md` from each, which any
+repo-local extension of a not-yet-built-in agent would have broken. It now
+filters to directories that define an agent.
 
 ### `agents/pr-reviewer/AGENT.md`
 
@@ -300,6 +363,11 @@ Acceptance criteria:
   `pr-review-item` is excluded from the listed lineup while still resolving by
   name, both agents' prompts render, and every tool they reference exists in
   `crates/kanna-tool-catalog`.
+- Definition test for the extension path: with
+  `.kanna/agents/pr-review-manager/EXTEND.md` present, the resolved agent's
+  prompt contains the repo's scope answer; with it absent, the resolved prompt
+  still declares the scope question open. (Kanna's own repo is the fixture for
+  the first half — the file is already committed.)
 
 **Phase 2 — the manager earns its name.** Ordering heuristics with stated
 reasons, stack detection, overlap detection between open PRs, and the "what's
@@ -313,6 +381,12 @@ Acceptance criteria:
 - Two PRs touching the same file are reported as overlapping in the proposal.
 - Nothing is dispatched without an explicit user instruction (asserted on the
   fixture: a triage run that is never answered creates zero children).
+- Agent-flow E2E on a repo with no scope extension: the manager asks the scope
+  question before enumerating, and enumerates nothing until it is answered.
+- The `setup` agent's new question writes a well-formed
+  `.kanna/agents/pr-review-manager/EXTEND.md`, and re-running setup on a repo
+  that already has one does not overwrite it without approval (the existing
+  rule in `.kanna/agents/setup/AGENT.md`).
 
 **Phase 3 — the brief.** The risk ranking, the coverage read, the "read these
 first" list, and `EXTEND.md` tuning.
@@ -337,6 +411,7 @@ Acceptance criteria:
 | Expose `diff_base_ref` | Overload `base_ref` and fix it in the client | The split already exists internally and is already load-bearing for stage forks; naming it is honest and testable | One more field on the most-used create surface |
 | Clean-worktree scope default | Default `branch` for review workflows by name | The diff tool stays ignorant of what a review task is; the rule is general and helps every clean-worktree task | A clean implement task now opens in branch scope — arguably correct, but it is a visible change |
 | Human reviews, agent briefs | Agent renders a PASS/FAIL verdict like the specialty reviewers | The owner's stated goal is to make *the human's* review possible in-app, not to replace it | No aggregate verdict to automate on; a PR review session ends when the human says it does |
+| Built-in leaves review scope undefined and asks | Ship a default ("your own PRs") that a repo overrides | Both answers are correct for real users and the built-in cannot tell which one it is talking to; a wrong silent default is worse than one question | The very first run of the very first repo asks a question before doing anything |
 | Manager proposes, never dispatches unasked | Manager fans out all open PRs immediately | An unasked fan-out over 20 open PRs is 20 sessions the user did not agree to | An extra round-trip before any work starts |
 
 ## Non-goals
@@ -347,18 +422,22 @@ or forge-free review store — [forge-independence.md](./forge-independence.md)
 stays parked and this design does not approach its gate; multi-reviewer
 coordination; reviewing PRs on repositories Kanna has not imported.
 
+## Resolved
+
+- **Scope of "which PRs" (owner, 2026-09-05).** Both answers are real, so the
+  built-in leaves it undefined and asks; the repo answers by `EXTEND.md`; the
+  `setup` agent asks it at import. Kanna's own repo answers "every open PR" and
+  that extension is written. See "Defaults, extension, and setup".
+
 ## Open questions for the owner
 
-1. **Scope of "which PRs".** Every open PR on the repo, or only the ones
-   authored by this operator's Kanna tasks? The first is the honest reading of
-   "devalue GitHub"; the second is a much smaller, sharper tool.
-2. **Should the child be able to act?** The brief-only contract keeps the agent
+1. **Should the child be able to act?** The brief-only contract keeps the agent
    safe and the human in charge. If the owner wants "and then post my review to
    the PR" or "and then approve it", that is a second contract on the same
    agent and should be decided before the AGENT.md is written, not bolted on.
-3. **Naming.** `pr-review` / `pr-review-item` / `pr-review-manager` /
+2. **Naming.** `pr-review` / `pr-review-item` / `pr-review-manager` /
    `pr-reviewer` are placeholders chosen to sit beside `specialized-reviewers` /
    `specialty-review` without colliding. Worth one minute of the owner's taste.
-4. **The deferred diff-tool work.** Reviewing a 40-file PR in one scroll
+3. **The deferred diff-tool work.** Reviewing a 40-file PR in one scroll
    container is the experience this design hands the human. Is the file list
    part of this effort, or its own task?
