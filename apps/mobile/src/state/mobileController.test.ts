@@ -2644,7 +2644,7 @@ describe("createMobileController", () => {
     ]);
   });
 
-  it("preserves an unrelated current error across a successful live snapshot", async () => {
+  it("returns an uncertain outcome without turning a task input failure global", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const auth = createAuthSessionMock();
@@ -2681,17 +2681,20 @@ describe("createMobileController", () => {
     await controller.bootstrap();
     liveUpdate?.([task]);
     liveError?.(sharedError);
-    await controller.sendTaskInput(task.id, "continue");
+    await expect(controller.sendTaskInput(task.id, "continue")).resolves.toEqual({
+      status: "uncertain",
+      message: sharedError.message
+    });
     expect(store.getState()).toMatchObject({
-      connectionState: "error",
+      connectionState: "connected",
       errorMessage: sharedError.message
     });
 
     liveUpdate?.([task]);
 
     expect(store.getState()).toMatchObject({
-      connectionState: "error",
-      errorMessage: sharedError.message,
+      connectionState: "connected",
+      errorMessage: null,
       recentTasks: [task]
     });
   });
@@ -2740,13 +2743,41 @@ describe("createMobileController", () => {
     const connectedState = store.getState().connectionState;
     const taskCollectionStatus = store.getState().taskCollectionStatus;
 
-    await controller.sendTaskInput(task.id, "please also update the docs");
+    await expect(
+      controller.sendTaskInput(task.id, "please also update the docs")
+    ).resolves.toEqual({
+      status: "queued",
+      reason: "input_held_by_draft",
+      message: held.message,
+      queuedInputCount: 1
+    });
 
     expect(store.getState()).toMatchObject({
       connectionState: connectedState,
       taskCollectionStatus,
-      errorMessage: held.message
+      errorMessage: null
     });
+    expect(store.getState().connectionState).not.toBe("error");
+  });
+
+  it("propagates a desktop uncertainty refusal without inviting a retry", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const uncertain = new ServerRefusalError(
+      "terminal input delivery is uncertain: daemon response lost",
+      "delivery_uncertain",
+      503
+    );
+    client.sendTaskInput.mockRejectedValueOnce(uncertain);
+    const controller = createMobileController(client, store);
+
+    await expect(
+      controller.sendTaskInput("task-1", "do not resend this")
+    ).resolves.toEqual({
+      status: "uncertain",
+      message: uncertain.message
+    });
+    expect(client.sendTaskInput).toHaveBeenCalledOnce();
     expect(store.getState().connectionState).not.toBe("error");
   });
 

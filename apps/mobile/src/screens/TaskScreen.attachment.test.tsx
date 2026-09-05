@@ -266,6 +266,106 @@ describe("TaskScreen photo attachments", () => {
     expect(harness.onSendInput).toHaveBeenCalledWith("continue");
   });
 
+  it("keeps text and the photo visible when the desktop rejects the input", async () => {
+    const harness = createHarness();
+    harness.onSendInput.mockResolvedValue({
+      status: "failed",
+      reason: "server_rejected",
+      message: "no live agent session"
+    });
+    const tree = await renderScreen(harness);
+
+    await typeDraft(tree, "keep this dictated message");
+    await press(tree, MOBILE_E2E_IDS.taskAttachButton);
+    await sendComposer(tree);
+
+    expect(
+      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInput }).props.value
+    ).toBe("keep this dictated message");
+    expect(has(tree, MOBILE_E2E_IDS.taskAttachmentPreview)).toBe(true);
+    expect(
+      tree.root
+        .findByProps({ testID: MOBILE_E2E_IDS.taskInputStatus })
+        .findByType("Text" as unknown as React.ComponentType).props.children
+    ).toContain("Your text is still here.");
+  });
+
+  it("does not clear a newer native draft when an earlier send completes", async () => {
+    const harness = createHarness();
+    let resolveSend: ((outcome: { status: "delivered" }) => void) | null = null;
+    harness.onSendInput.mockReturnValue(
+      new Promise<{ status: "delivered" }>((resolve) => {
+        resolveSend = resolve;
+      })
+    );
+    const tree = await renderScreen(harness);
+
+    await typeDraft(tree, "first dictated message");
+    await sendComposer(tree);
+    await sendComposer(tree);
+    expect(harness.onSendInput).toHaveBeenCalledOnce();
+    await typeDraft(tree, "newer draft on the same task");
+
+    await act(async () => {
+      resolveSend?.({ status: "delivered" });
+      await Promise.resolve();
+    });
+
+    expect(
+      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInput }).props.value
+    ).toBe("newer draft on the same task");
+    expect(has(tree, MOBILE_E2E_IDS.taskAttachmentPreview)).toBe(false);
+    expect(
+      tree.root.findAllByProps({ testID: MOBILE_E2E_IDS.taskInputStatus })
+    ).toHaveLength(0);
+  });
+
+  it("forwards one long multiline native dictation update without truncating it", async () => {
+    const harness = createHarness();
+    harness.onSendInput.mockResolvedValue({ status: "delivered" });
+    const dictatedText = [
+      "A short opening sentence.",
+      "A longer dictated paragraph with punctuation, numbers 12345, and enough words to exercise the capped native viewport.",
+      "A final line."
+    ].join("\n");
+    const tree = await renderScreen(harness);
+
+    await typeDraft(tree, dictatedText);
+    await sendComposer(tree);
+
+    expect(harness.onSendInput).toHaveBeenCalledWith(dictatedText);
+    expect(
+      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInput }).props.value
+    ).toBe("");
+  });
+
+  it("does not let a late result clear a different task’s draft", async () => {
+    const harness = createHarness();
+    let resolveSend: ((outcome: { status: "delivered" }) => void) | null = null;
+    harness.onSendInput.mockReturnValue(
+      new Promise<{ status: "delivered" }>((resolve) => {
+        resolveSend = resolve;
+      })
+    );
+    const tree = await renderScreen(harness);
+
+    await typeDraft(tree, "task one input");
+    await sendComposer(tree);
+    await act(async () => {
+      tree.update(screenElement(harness, { ...PTY_TASK, id: "task-2" }));
+    });
+    await typeDraft(tree, "task two draft");
+
+    await act(async () => {
+      resolveSend?.({ status: "delivered" });
+      await Promise.resolve();
+    });
+
+    expect(
+      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInput }).props.value
+    ).toBe("task two draft");
+  });
+
   it("sends nothing when the composer is empty and no photo is attached", async () => {
     const harness = createHarness();
     const tree = await renderScreen(harness);
