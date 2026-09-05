@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
@@ -27,8 +27,22 @@ function readRepoPhrases(path: string): string {
   return readRepoFile(path).replace(/\s+/g, " ");
 }
 
+/**
+ * Directory names under `.kanna/agents` that actually define a built-in agent.
+ * A directory may hold only a repo-local `EXTEND.md` — an answer this
+ * repository gives to a built-in that ships elsewhere, or to one that has not
+ * shipped yet — and that is an extension, not a built-in agent definition.
+ */
+function builtInAgentNames(): string[] {
+  return readdirSync(resolve(repoRoot, ".kanna/agents"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => existsSync(resolve(repoRoot, `.kanna/agents/${name}/AGENT.md`)))
+    .sort();
+}
+
 describe("built-in agent completion protocol", () => {
-  const agentNames = readdirSync(resolve(repoRoot, ".kanna/agents"));
+  const agentNames = builtInAgentNames();
 
   it.each(agentNames)("%s records stage completion MCP-first with a CLI fallback", (name) => {
     const agent = readRepoFile(`.kanna/agents/${name}/AGENT.md`);
@@ -62,14 +76,40 @@ describe("built-in agent completion protocol", () => {
   });
 });
 
+describe("built-in agent tool references", () => {
+  /**
+   * Agent bodies name MCP tools as literal `kanna_*` calls, and a name that
+   * does not exist in the catalog is a call the agent can never make — a
+   * failure a human only sees when the agent tries it mid-task.
+   */
+  it("only names tools the tool catalog serves", () => {
+    const catalog = readRepoFile("crates/kanna-tool-catalog/src/catalog.json");
+    const served = new Set(
+      Array.from(catalog.matchAll(/"name":\s*"(kanna_[a-z_]+)"/g), (match) => match[1])
+    );
+    expect(served.size).toBeGreaterThan(0);
+
+    const documents = [
+      ...builtInAgentNames().map((name) => `.kanna/agents/${name}/AGENT.md`),
+      ...readdirSync(resolve(repoRoot, ".kanna/agents"), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => `.kanna/agents/${entry.name}/EXTEND.md`)
+        .filter((path) => existsSync(resolve(repoRoot, path))),
+    ];
+
+    for (const path of documents) {
+      const referenced = new Set(
+        Array.from(readRepoFile(path).matchAll(/\bkanna_[a-z_]+/g), (match) => match[0])
+      );
+      const unknown = [...referenced].filter((name) => !served.has(name)).sort();
+      expect(unknown, path).toEqual([]);
+    }
+  });
+});
+
 describe("QA workflow assets", () => {
   it("keeps process termination guidance in repository conventions", () => {
-    const builtInAgents = readdirSync(resolve(repoRoot, ".kanna/agents"), {
-      withFileTypes: true,
-    })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
+    const builtInAgents = builtInAgentNames();
     expect(builtInAgents.length).toBeGreaterThan(0);
 
     for (const name of builtInAgents) {
@@ -635,6 +675,45 @@ describe("QA workflow assets", () => {
     expect(dispatcher).toContain("do not use your child task id for that lookup");
     expect(dispatcher).toContain("delivered owner, manager, and reviewer directives");
     expect(dispatcher).not.toContain("Task spec:");
+  });
+
+  it("keeps the dispatched PR reviewers off a required task-spec artifact", () => {
+    const reviewer = readRepoPhrases(".kanna/agents/pr-reviewer/AGENT.md");
+    const triage = readRepoPhrases(".kanna/agents/pr-triage/AGENT.md");
+    const scopeAnswer = readRepoPhrases(".kanna/agents/pr-triage/EXTEND.md");
+
+    // These two read a *reviewed* task's terms the same way the deciding
+    // reviewers above do: the original prompt plus the durable delivered
+    // directives, looked up by the id in the PR's `Kanna-Task:` trailer. The
+    // task usually lives on another machine, so the lookup needs `machine_id`.
+    for (const [name, body] of [
+      ["pr-reviewer", reviewer],
+      ["pr-triage/EXTEND.md", scopeAnswer],
+    ] as const) {
+      expect(body, name).toContain("kanna_get_task");
+      expect(body, name).toContain("kanna_task_inputs");
+      expect(body, name).toContain("machine_id");
+    }
+
+    // A committed `docs/task-specs/<id>.md` was retired by owner direction.
+    // Current tasks legitimately carry a trailer and no such file, so a
+    // reviewer that required one would flag every present-day Kanna PR.
+    for (const [name, body] of [
+      ["pr-reviewer", reviewer],
+      ["pr-triage", triage],
+      ["pr-triage/EXTEND.md", scopeAnswer],
+    ] as const) {
+      expect(body, name).not.toContain("missing spec");
+      expect(body, name).not.toContain("stale spec");
+      expect(body, name).not.toContain("read `docs/task-specs/");
+      expect(body, name).not.toContain("has a task spec at");
+    }
+
+    // pr-reviewer may still mention the file, but only to disclaim it.
+    expect(reviewer).toContain("Never require one");
+    expect(reviewer).toContain("never make its absence a finding");
+    expect(triage).not.toContain("docs/task-specs/");
+    expect(scopeAnswer).not.toContain("docs/task-specs/");
   });
 
   it("keeps both deciding reviewers inside the original task scope", () => {

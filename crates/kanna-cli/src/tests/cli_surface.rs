@@ -666,6 +666,7 @@ fn typed_create_body_matches_catalog_create_task_body() {
         display_name: Some("Short task title".to_string()),
         workflow_name: Some("default".to_string()),
         base_ref: Some("origin/main".to_string()),
+        diff_base_ref: None,
         agent: Some("review-security".to_string()),
         agent_provider: Some("claude".to_string()),
         agent_type: Some("agent".to_string()),

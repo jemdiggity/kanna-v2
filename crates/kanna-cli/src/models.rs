@@ -320,6 +320,8 @@ pub(crate) struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) diff_base_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent_provider: Option<String>,
@@ -524,6 +526,7 @@ pub(crate) struct TaskCreateOptions {
     pub(crate) display_name: Option<String>,
     pub(crate) workflow_name: Option<String>,
     pub(crate) base_ref: Option<String>,
+    pub(crate) diff_base_ref: Option<String>,
     pub(crate) agent: Option<String>,
     pub(crate) agent_provider: Option<String>,
     pub(crate) agent_type: Option<String>,

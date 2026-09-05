@@ -16,6 +16,7 @@ fn default_base_task_request() -> CreateTaskRequest {
         workflow_name: None,
         stage: None,
         base_ref: None,
+        diff_base_ref: None,
         agent: None,
         agent_provider: Some("codex".to_string()),
         agent_type: Some("agent".to_string()),
@@ -37,6 +38,89 @@ fn default_base_task_request() -> CreateTaskRequest {
         notify_task_id: None,
         parent_task_id: None,
     }
+}
+
+/// The fork point and the diff base are separate inputs. A PR review child
+/// forks from the PR head and diffs against the PR base, so `base_ref` and
+/// `diff_base_ref` name different refs; passing only `base_ref` would record
+/// the head as the base and produce an empty branch diff.
+#[test]
+fn task_creation_records_an_explicit_diff_base_separately_from_the_fork_point() {
+    let repo_root = init_git_repo("explicit-diff-base");
+    let base_revision = run_git_fixture(&repo_root, &["rev-parse", "HEAD"]);
+    std::fs::write(repo_root.join("PR_CHANGE.md"), "the change under review").unwrap();
+    run_git_fixture(&repo_root, &["add", "PR_CHANGE.md"]);
+    run_git_fixture(&repo_root, &["commit", "-m", "pull request head"]);
+    let head_revision = run_git_fixture(&repo_root, &["rev-parse", "HEAD"]);
+    run_git_fixture(&repo_root, &["branch", "pr/42", head_revision.as_str()]);
+    run_git_fixture(&repo_root, &["reset", "--hard", base_revision.as_str()]);
+
+    let config = test_config("explicit-diff-base");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            base_ref: Some("pr/42".to_string()),
+            diff_base_ref: Some("main".to_string()),
+            ..default_base_task_request()
+        },
+    )
+    .unwrap();
+
+    // The worktree forked from the PR head...
+    let worktree = std::path::Path::new(&prepared.cwd);
+    assert_eq!(
+        run_git_fixture(worktree, &["rev-parse", "HEAD"]),
+        head_revision
+    );
+    assert!(worktree.join("PR_CHANGE.md").exists());
+
+    // ...while the persisted base — what the diff view compares against and
+    // what $BASE_REF resolves to — is the PR's base.
+    let stored = db
+        .get_pipeline_item(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.base_ref.as_deref(), Some("main"));
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+/// Every ordinary task passes only a fork point, and it stays the diff base.
+#[test]
+fn task_creation_defaults_the_diff_base_to_the_fork_point() {
+    let repo_root = init_git_repo("default-diff-base");
+    run_git_fixture(&repo_root, &["branch", "feature-base"]);
+
+    let config = test_config("default-diff-base");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            base_ref: Some("feature-base".to_string()),
+            diff_base_ref: None,
+            ..default_base_task_request()
+        },
+    )
+    .unwrap();
+
+    let stored = db
+        .get_pipeline_item(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.base_ref.as_deref(), Some("feature-base"));
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
 }
 
 #[test]
@@ -131,6 +215,7 @@ fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
             workflow_name: None,
             stage: launch.stage,
             base_ref: None,
+            diff_base_ref: None,
             agent: launch.agent,
             agent_provider: launch.agent_provider,
             agent_type: launch.agent_type,
@@ -614,6 +699,7 @@ fn create_task_rejects_model_for_provider_without_a_verified_flag() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("antigravity".to_string()),
             agent_type: Some("pty".to_string()),
@@ -666,6 +752,7 @@ fn create_task_rejects_unsupported_effort_before_persisting_state() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("antigravity".to_string()),
             agent_type: Some("pty".to_string()),
@@ -722,6 +809,7 @@ fn create_task_rejects_unsupported_provider_before_persisting_state() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("future-agent".to_string()),
             agent_type: Some("pty".to_string()),
@@ -1253,6 +1341,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: None,
             agent_type: Some("agent".to_string()),
@@ -2012,11 +2101,102 @@ fn legacy_builtin_workflow_names_still_resolve_for_committed_repo_config() {
         );
         assert_eq!(
             names,
-            vec!["no-review", "single-reviewer", "specialized-reviewers"]
+            vec![
+                "no-review",
+                "pr-review",
+                "single-reviewer",
+                "specialized-reviewers"
+            ]
         );
 
         let _ = std::fs::remove_dir_all(repo_root);
     }
+}
+
+/// The dispatched PR review pair: an operator picks `pr-review` to start a
+/// triage session, and `pr-triage` binds `pr-review-single` for each child it
+/// fans out. Both stages are manual — the human is the reviewer, so nothing
+/// advances or closes on its own.
+#[test]
+fn builtin_pr_review_workflows_bind_the_triage_and_reviewer_agents() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-pr-review");
+    std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+    publish_origin_main(&repo_root, "publish repo without workflows");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let session = definitions.workflow("pr-review").unwrap();
+    assert_eq!(session.visibility, DefinitionVisibility::Public);
+    assert_eq!(session.stages.len(), 1);
+    assert_eq!(session.stages[0].name, "triage");
+    assert_eq!(session.stages[0].agent.as_deref(), Some("pr-triage"));
+    assert_eq!(
+        session.stages[0].policy.transition,
+        WorkflowStageTransition::Manual
+    );
+
+    let child = definitions.workflow("pr-review-single").unwrap();
+    assert_eq!(child.visibility, DefinitionVisibility::Internal);
+    assert_eq!(child.stages.len(), 1);
+    assert_eq!(child.stages[0].name, "review");
+    assert_eq!(child.stages[0].agent.as_deref(), Some("pr-reviewer"));
+    assert_eq!(
+        child.stages[0].policy.transition,
+        WorkflowStageTransition::Manual
+    );
+
+    for agent in ["pr-triage", "pr-reviewer"] {
+        let resolved = definitions
+            .agent(agent)
+            .unwrap_or_else(|error| panic!("built-in `{agent}` must resolve: {error}"));
+        assert_eq!(resolved.name, agent);
+        assert!(!resolved.prompt.trim().is_empty());
+    }
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+/// Review scope is deliberately undefined in the built-in triage agent: "my
+/// own PRs" and "every open PR" are both correct depending on who is asking,
+/// so the built-in states the question and a repo answers it by extension.
+#[test]
+fn pr_triage_scope_is_asked_by_the_builtin_and_answered_by_a_repo_extension() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-pr-triage-scope");
+    std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+    publish_origin_main(&repo_root, "publish repo without agent overrides");
+
+    let bundled = RepoDefinitions::resolve(&definition_repo(&repo_root, "main"))
+        .unwrap()
+        .agent("pr-triage")
+        .unwrap();
+    assert!(
+        bundled.prompt.contains("Resolve Review Scope"),
+        "the built-in must state the scope question rather than pick an answer"
+    );
+    assert!(
+        !bundled.prompt.contains("SCOPE ANSWERED FOR THIS REPO"),
+        "the built-in must not carry a repo's answer"
+    );
+
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/pr-triage")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/pr-triage/EXTEND.md"),
+        "## Scope\n\nSCOPE ANSWERED FOR THIS REPO: review every open PR.\n",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "answer the scope question by extension");
+
+    let extended = RepoDefinitions::resolve(&definition_repo(&repo_root, "main"))
+        .unwrap()
+        .agent("pr-triage")
+        .unwrap();
+    assert!(extended.prompt.contains("Resolve Review Scope"));
+    assert!(
+        extended.prompt.contains("SCOPE ANSWERED FOR THIS REPO"),
+        "the repo's answer must layer onto the built-in without replacing it"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
 }
 
 #[test]
@@ -2033,7 +2213,11 @@ fn internal_builtin_workflows_resolve_without_being_offered_as_a_choice() {
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
     let names = definitions.workflow_names().unwrap();
-    for internal in ["architect-consultation", "specialty-review"] {
+    for internal in [
+        "architect-consultation",
+        "pr-review-single",
+        "specialty-review",
+    ] {
         assert!(
             !names.contains(&internal.to_string()),
             "internal built-in `{internal}` must not be offered as a choice; got {names:?}"
@@ -2721,6 +2905,7 @@ fn workflow_names_are_sorted_deduped_remote_and_compiled_union() {
         vec![
             "alpha",
             "no-review",
+            "pr-review",
             "qa",
             "single-reviewer",
             "specialized-reviewers",
@@ -3766,6 +3951,7 @@ fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() 
                 workflow_name: None,
                 stage: None,
                 base_ref: None,
+                diff_base_ref: None,
                 agent: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: Some("agent".to_string()),
@@ -4322,6 +4508,7 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
                 workflow_name: None,
                 stage: None,
                 base_ref: None,
+                diff_base_ref: None,
                 agent: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: None,
@@ -4408,6 +4595,7 @@ fn prepare_task_uses_requested_initial_terminal_geometry() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
@@ -4462,6 +4650,7 @@ fn prepare_task_uses_default_initial_terminal_geometry_for_oversized_request() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
@@ -4525,6 +4714,7 @@ fn prepare_task_uses_create_request_agent_selector() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: Some("setup".to_string()),
             agent_provider: None,
             agent_type: Some("pty".to_string()),
@@ -4598,6 +4788,7 @@ fn prepare_task_named_agent_without_provider_uses_configured_default() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: Some("ship".to_string()),
             agent_provider: None,
             agent_type: Some("pty".to_string()),
@@ -4664,6 +4855,7 @@ fn prepare_task_binds_specialty_agent_on_specialty_review_workflow() {
             workflow_name: Some("specialty-review".to_string()),
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: Some("review-security".to_string()),
             agent_provider: Some("codex".to_string()),
             agent_type: Some("pty".to_string()),
@@ -4743,6 +4935,7 @@ fn prepare_task_binds_bounded_architect_consultation_to_assessed_work_item() {
             workflow_name: Some("architect-consultation".to_string()),
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("pty".to_string()),
@@ -4814,6 +5007,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
@@ -4898,6 +5092,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
@@ -4958,6 +5153,7 @@ fn prepare_task_for_api_prints_transfer_import_summary_before_the_agent() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
@@ -5026,6 +5222,7 @@ fn prepare_task_for_api_omits_the_import_banner_for_local_tasks() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
@@ -5079,6 +5276,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5139,6 +5337,7 @@ fn prepare_task_for_api_uses_requested_task_id() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5187,6 +5386,7 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5244,6 +5444,7 @@ fn dormant_start_preparation_rechecks_open_blockers() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5309,6 +5510,7 @@ fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5404,6 +5606,7 @@ fn dormant_task_composes_repo_preference_with_complete_persisted_spawn_options()
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: Some("dormant-review".to_string()),
             agent_provider: None,
             agent_type: Some("agent".to_string()),
@@ -5546,6 +5749,7 @@ fn dormant_start_uses_stored_explicit_agent_provider_and_model() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: Some("dormant-review".to_string()),
             agent_provider: Some("opencode".to_string()),
             agent_type: None,
@@ -5626,6 +5830,7 @@ fn dormant_start_uses_repo_provider_preference_without_stored_explicit_values() 
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: None,
             agent_type: None,
@@ -5722,6 +5927,7 @@ fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5784,6 +5990,7 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5839,6 +6046,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5914,6 +6122,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("agent".to_string()),
@@ -5977,6 +6186,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("copilot".to_string()),
             agent_type: None,
@@ -6062,6 +6272,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("pty".to_string()),
@@ -6141,6 +6352,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -6193,6 +6405,7 @@ fn prepare_task_rejects_missing_parent_task() {
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
@@ -6336,6 +6549,7 @@ fn prepare_task_uses_builtin_default_workflow_when_repo_has_no_local_default_wor
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
@@ -6460,6 +6674,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: None,
             agent_type: Some("pty".to_string()),
@@ -6514,6 +6729,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: None,
             agent_type: Some("pty".to_string()),
@@ -6571,6 +6787,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: None,
             agent_type: Some("pty".to_string()),
@@ -6612,6 +6829,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             workflow_name: None,
             stage: None,
             base_ref: None,
+            diff_base_ref: None,
             agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
@@ -6669,6 +6887,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
         workflow_name: None,
         stage: None,
         base_ref: None,
+        diff_base_ref: None,
         agent: None,
         agent_provider: None,
         agent_type: None,
@@ -6831,6 +7050,7 @@ fn create_task_effort_reaches_every_provider_native_pty_control() {
         workflow_name: None,
         stage: None,
         base_ref: None,
+        diff_base_ref: None,
         agent: None,
         agent_provider: None,
         agent_type: None,

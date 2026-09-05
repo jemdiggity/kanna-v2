@@ -1792,7 +1792,11 @@ pub(crate) fn prepare_task_for_api_with_error(
             workflow_name: request.workflow_name,
             workflow_def: None,
             base_ref: request.base_ref,
-            stored_base_ref: None,
+            // The fork point and the diff base are the same ref for every
+            // ordinary task; they differ when a task is forked from the tip
+            // of the work it reviews. `prepare_task_spawn` falls back to
+            // `base_ref` when this is absent.
+            stored_base_ref: request.diff_base_ref,
             stage_override: request.stage,
             agent: request.agent,
             explicit_provider,

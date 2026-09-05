@@ -90,6 +90,7 @@ pub(super) async fn run_repo_command(
             workflow_name: None,
             stage: launch.stage,
             base_ref: None,
+            diff_base_ref: None,
             agent: launch.agent,
             agent_provider: launch.agent_provider,
             agent_type: launch.agent_type,
