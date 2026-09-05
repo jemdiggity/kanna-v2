@@ -44,11 +44,10 @@ interface TaskCardProps {
   isSubtask?: boolean;
   repoLabel?: string | null;
   /**
-   * The task's short id, rendered as its own non-shrinking element beside the
-   * title. The owner references tasks by this id constantly, so it must never
-   * be what an overlong title ellipsizes away — the title truncates, the id
-   * does not. Rows without a durable id yet (a task still being created
-   * carries only a local slot id) pass null and render no id.
+   * The task's display id, rendered beside the title in the bounded metadata
+   * column. The owner references tasks by this id constantly; long ids
+   * middle-ellipsize so neither they nor a long title consumes the row.
+   * Rows without a durable id yet pass null and render no id.
    */
   shortId?: string | null;
   /** This phone's own pin state for the row. */
@@ -146,6 +145,16 @@ export function TaskCard({
           {model.title}
         </Text>
         <View style={styles.pillColumn}>
+          {shortId ? (
+            <Text
+              ellipsizeMode="middle"
+              numberOfLines={1}
+              style={styles.shortId}
+              testID={MOBILE_E2E_IDS.taskListItemId(uiId)}
+            >
+              {shortId}
+            </Text>
+          ) : null}
           <View
             style={[
               styles.stagePill,
@@ -176,16 +185,6 @@ export function TaskCard({
           ) : null}
         </View>
       </View>
-      {shortId ? (
-        <Text
-          ellipsizeMode="middle"
-          numberOfLines={1}
-          style={styles.shortId}
-          testID={MOBILE_E2E_IDS.taskListItemId(uiId)}
-        >
-          {shortId}
-        </Text>
-      ) : null}
       {model.waitingPromptSnippet ? (
         <Text
           numberOfLines={3}
@@ -271,11 +270,12 @@ const styles = StyleSheet.create({
     fontStyle: "italic",
     fontWeight: "normal"
   },
-  /** The metadata column only competes with the title for the stage badges. */
+  /** Bounded metadata keeps both a long id and the title readable. */
   pillColumn: {
     alignItems: "flex-end",
     flexShrink: 0,
-    gap: 6
+    gap: 6,
+    maxWidth: "45%"
   },
   stagePill: {
     alignSelf: "flex-start",

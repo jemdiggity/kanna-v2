@@ -1929,6 +1929,16 @@ describe("TaskScreen", () => {
       nestedScrollEnabled: true
     });
     expect(styleEntries(promptScroll)).toContainEqual({ maxHeight: 320 });
+    expect(
+      findPathByTestId(
+        promptScroll,
+        MOBILE_E2E_IDS.taskExpandedTaskId
+      )
+    ).toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskExpandedTaskId)?.props).toMatchObject({
+      children: "task-1",
+      testID: MOBILE_E2E_IDS.taskExpandedTaskId
+    });
     const titleDismissLayer = findByTestId(
       tree,
       "mobile.task-title-dismiss-layer"
@@ -1981,6 +1991,18 @@ describe("TaskScreen", () => {
     expect(
       findByTestId(tree, "mobile.task-title-button")?.props?.accessibilityLabel
     ).not.toContain("Task ID");
+  });
+
+  it("shows an owner-local ID while a recovered task is still settling", () => {
+    const tree = renderTaskScreen({
+      taskId: "create:slot-1",
+      ownerLocalTaskId: "019f6c9d6ed40000000120e4307b4591",
+      taskCreationPhase: "recovering"
+    });
+
+    expect(findByTestId(tree, "mobile.task-detail-task-id")?.props).toMatchObject({
+      children: "019f6c9d6ed40000000120e4307b4591"
+    });
   });
 
   it("keeps the complete task ID in the collapsed header and the expanded panel", () => {

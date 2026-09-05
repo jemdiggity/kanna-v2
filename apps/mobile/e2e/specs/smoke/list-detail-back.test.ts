@@ -433,7 +433,7 @@ describe("PTY fixture selection", () => {
         id: "task-pty",
         title: "Short renamed task",
         prompt:
-          "First canonical prompt line\nSecond detailed line\nMOBILE_PROMPT_END_SENTINEL",
+          `${"Detailed canonical prompt line. ".repeat(12)}\nMOBILE_PROMPT_END_SENTINEL`,
         agentType: "pty",
         closedAt: null
       })

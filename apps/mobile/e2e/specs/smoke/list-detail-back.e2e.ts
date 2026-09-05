@@ -10,6 +10,7 @@ const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
 const BACK_NAVIGATION_SETTLE_MS = 500;
 const TEXT_SELECTION_LONG_PRESS_MS = 1_500;
+const LONG_PROMPT_MINIMUM_CHARS = 300;
 
 // The old regression sliced a large base64 snapshot at 12,000 encoded chars,
 // which can decode to at most about 9 KiB. Requiring 16 KiB decoded proves the
@@ -357,13 +358,15 @@ export async function assertPtyTerminalFixtureAvailable(
   if (
     !expectedTitle ||
     !prompt ||
+    prompt.length < LONG_PROMPT_MINIMUM_CHARS ||
     promptLines.length < 2 ||
     expectedTitle === prompt ||
     !promptEndSentinel?.includes("PROMPT_END_SENTINEL")
   ) {
     throw new Error(
       `Known PTY fixture task ${fixture.taskId} must have a short renamed title and ` +
-        "a distinct multiline prompt whose final line contains PROMPT_END_SENTINEL."
+        `a distinct multiline prompt of at least ${LONG_PROMPT_MINIMUM_CHARS} characters ` +
+        "whose final line contains PROMPT_END_SENTINEL."
     );
   }
 
@@ -846,6 +849,30 @@ export async function openPtyFixtureTask(
   await taskRow.click();
 }
 
+export async function assertPtyFixtureTaskRow(
+  ui: PtyFixtureTaskUi,
+  fixture: TaskPromptFixture
+): Promise<void> {
+  await ui.waitUntil(
+    async () => {
+      const taskRow = await ui.getTaskRowById(fixture.taskId);
+      const rowText = await smokeElementText(taskRow);
+      return (
+        (await taskRow.isExisting()) &&
+        rowText.includes(fixture.expectedTitle) &&
+        rowText.includes(`Task ID ${fixture.taskId}`)
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected fixture row to show ${JSON.stringify(fixture.expectedTitle)} ` +
+        `beside task ID ${JSON.stringify(fixture.taskId)}`
+    }
+  );
+}
+
 export async function ensureTaskListVisible(ui: TaskListUi): Promise<void> {
   const backButton = await ui.getBackButton();
   if (await backButton.isExisting()) {
@@ -1143,6 +1170,7 @@ export async function runListDetailBackSmoke(
     fixture.taskId,
     options.fetchImpl
   );
+  await assertPtyFixtureTaskRow(ui, promptFixture);
   await openPtyFixtureTask(ui, fixture.taskId);
 
   await driver.pause(1_000);

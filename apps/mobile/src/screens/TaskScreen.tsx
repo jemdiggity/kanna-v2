@@ -348,10 +348,10 @@ export function TaskScreen({
   const expandedTaskId = displayTaskId(task);
   // The collapsed header carries the id too: it is how the owner cross-checks
   // the task they are looking at, and a one-line title is exactly what
-  // ellipsizes. A task still being created has only a local slot id, which is
-  // not an id anything can be cross-checked against, so it shows none.
-  const collapsedTaskId =
-    taskCreationPhase === "idle" ? expandedTaskId : null;
+  // ellipsizes. A local creation slot has no durable id, but a recovered task
+  // can already have its owner-local id before creation returns to idle.
+  const collapsedTaskId = task.ownerLocalTaskId?.trim() ||
+    (task.id.startsWith("create:") ? null : expandedTaskId);
   const expandedPrompt = task.prompt?.trim() ? task.prompt : task.title;
   const expandedPromptMaxHeight = Math.min(320, windowHeight * 0.45);
   const effectiveActivity =
@@ -951,20 +951,25 @@ export function TaskScreen({
             {model.stageLabel}
           </Text>
           {isTitleExpanded ? (
-            <ScrollView
-              accessible={false}
-              nestedScrollEnabled
-              showsVerticalScrollIndicator
-              style={[styles.promptScroll, { maxHeight: expandedPromptMaxHeight }]}
-            >
-              <Text
+            <>
+              <ScrollView
                 accessible={false}
-                selectable
-                style={styles.prompt}
-                testID={MOBILE_E2E_IDS.taskExpandedPrompt}
+                nestedScrollEnabled
+                showsVerticalScrollIndicator
+                style={[
+                  styles.promptScroll,
+                  { maxHeight: expandedPromptMaxHeight }
+                ]}
               >
-                {expandedPrompt}
-              </Text>
+                <Text
+                  accessible={false}
+                  selectable
+                  style={styles.prompt}
+                  testID={MOBILE_E2E_IDS.taskExpandedPrompt}
+                >
+                  {expandedPrompt}
+                </Text>
+              </ScrollView>
               <View accessible={false} style={styles.taskIdentity}>
                 <Text accessible={false} style={styles.taskIdLabel}>
                   Task ID
@@ -978,7 +983,7 @@ export function TaskScreen({
                   {expandedTaskId}
                 </Text>
               </View>
-            </ScrollView>
+            </>
           ) : (
             <>
               <Text
