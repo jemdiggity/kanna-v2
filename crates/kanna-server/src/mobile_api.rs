@@ -188,9 +188,10 @@ pub struct TaskDetail {
     pub read_state: Option<String>,
     /// Why messages delivered into this task's agent session are being
     /// refused, or absent when they are not. `inherited-draft-unknown` means
-    /// the daemon adopted the session across a restart or handoff and its
-    /// composer holds text nobody here saw typed, so submitting would append
-    /// to an unsent line; the session is otherwise healthy and idle, which is
+    /// the daemon cannot prove that composer is clear — it adopted the session
+    /// across a restart or handoff and the composer holds text nobody here saw
+    /// typed, or it parked a delivered message's text there unsubmitted — so
+    /// submitting would append to an unsent line; the session is otherwise healthy and idle, which is
     /// why neither `activity` nor `runtimeState` shows anything wrong. A
     /// sender that sees this should stop retrying and say so: an empty
     /// composer clears itself, and anything else needs a human at that

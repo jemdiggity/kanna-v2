@@ -38,6 +38,11 @@ pub enum ErrorCode {
     ProtectedInputProtocolRequired,
     InheritedDraftStateUnknown,
     LogicalInputHeldByDraft,
+    /// A logical message's text reached the PTY, but the terminal never
+    /// settled inside the bound, so its Enter was withheld rather than written
+    /// into a repaint that would swallow it. The text is parked at the
+    /// composer: the delivery is uncertain and must not be retried blindly.
+    LogicalInputSubmissionUnproven,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).

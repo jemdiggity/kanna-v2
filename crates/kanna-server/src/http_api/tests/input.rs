@@ -2652,6 +2652,139 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
     let _ = std::fs::remove_file(config.db_path);
 }
 
+/// A logical message whose text reached the composer but whose Enter was
+/// withheld is exactly the delivery `delivery_uncertain` exists for: the bytes
+/// are on that screen, a human at that terminal may still submit them, and a
+/// retry would put a second copy behind the first. It is answered `503`, and
+/// nothing is recorded as delivered.
+#[tokio::test]
+async fn send_task_input_reports_an_unproven_submission_as_delivery_uncertain() {
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, ErrorCode, Event as DaemonEvent, SessionInfo, SessionState,
+        SessionStatus,
+    };
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("task-input-unproven-submission-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        while commands.len() < 2 {
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+            let response = match &command {
+                DaemonCommand::List => DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-submission-unproven".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: SessionStatus::Idle,
+                        kind: Default::default(),
+                        logical_input_blocked: false,
+                        pending_logical_input_count: None,
+                        composer_text: None,
+                        composer_attestation: Default::default(),
+                    }],
+                },
+                DaemonCommand::SubmitInputIfSession { .. } => DaemonEvent::Error {
+                    code: Some(ErrorCode::LogicalInputSubmissionUnproven),
+                    message: "the terminal never settled, so no Enter was written".to_string(),
+                },
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-submission-unproven",
+        "repo-1",
+        "Unproven submission task",
+        Some("Unproven submission task"),
+        "in progress",
+        "2026-08-12 04:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-live",
+        task_id: "task-submission-unproven",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-submission-unproven"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    drop(db);
+
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-submission-unproven/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "input": "Do not duplicate this" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({
+            "ok": false,
+            "reason": "delivery_uncertain",
+            "message": "terminal input delivery is uncertain: the terminal never settled, so no Enter was written"
+        })
+    );
+    assert!(matches!(
+        daemon_server.await.unwrap().as_slice(),
+        [DaemonCommand::List, DaemonCommand::SubmitInputIfSession {
+            session_id,
+            expected_pid: 42,
+            data,
+        }] if session_id == "task-submission-unproven" && data == b"Do not duplicate this"
+    ));
+
+    // A record asserting the agent was told something it may never have heard
+    // is a worse record than none, so an uncertain delivery writes nothing.
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_task_inputs("task-submission-unproven").unwrap(), 0);
+    drop(db);
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 /// The 2026-08-19 wedge, from the sender's side: the daemon refused the
 /// delivery, the caller got a 500 that read like a server fault, and the only
 /// record of the wedged singleton was inside the failing agent's own stage.

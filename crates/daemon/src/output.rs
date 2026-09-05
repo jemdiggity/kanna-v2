@@ -18,14 +18,120 @@ use crate::fanout::{
     SessionFanouts,
 };
 use crate::session::{
-    MirrorResult, PendingInput, PendingInputKind, SessionHandle, SessionManager, StreamControl,
-    LOGICAL_INPUT_SUBMIT_DELAY_MS, STATUS_DETECTION_THROTTLE_MS,
+    logical_input_consumption_timeout, MirrorResult, PendingInput, PendingInputKind, SessionHandle,
+    SessionManager, StreamControl, WriteOutcome, LOGICAL_INPUT_SUBMIT_DELAY_MS,
+    STATUS_DETECTION_THROTTLE_MS,
 };
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
 const STAGE_MIRROR_OUTPUT: &str = "mirror_output";
 const STAGE_DETECT_STATUS: &str = "detect_status";
 const STAGE_RECOVERY_WRITE: &str = "recovery_write";
+
+/// What the PTY writer is waiting for before it may write the next input.
+///
+/// The writer never guesses at a submission from bytes, and it must not guess
+/// at one from a clock either. A logical message is delivered as two writes —
+/// its text, then its Enter — and the second one is only a submission if the
+/// CLI has finished consuming the first. When it has not, an interactive TUI
+/// coalesces the Enter into the burst it is still draining and the message ends
+/// up parked at the composer as a literal newline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitFence {
+    /// A fixed pause after a synthesized Enter reached the PTY, before the next
+    /// queued message may own the composer.
+    AfterSubmission { until: Instant },
+    /// A logical message's text reached the PTY. Its Enter waits for evidence
+    /// that the CLI consumed it.
+    AwaitingConsumption {
+        /// Mirrored output chunks counted when this window last restarted.
+        /// More since then means the CLI is still repainting what it was given.
+        chunks_seen: u64,
+        /// Earliest instant the terminal could be called settled.
+        quiet_until: Instant,
+        /// Bound on the whole wait, after which submission is unproven.
+        deadline: Instant,
+    },
+}
+
+impl SubmitFence {
+    fn awaiting_consumption(chunks_seen: u64, now: Instant) -> Self {
+        Self::AwaitingConsumption {
+            chunks_seen,
+            quiet_until: now + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
+            deadline: now + logical_input_consumption_timeout(),
+        }
+    }
+
+    fn after_submission(now: Instant) -> Self {
+        Self::AfterSubmission {
+            until: now + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
+        }
+    }
+
+    /// When this fence next needs to be looked at.
+    fn wake_at(&self) -> Instant {
+        match *self {
+            Self::AfterSubmission { until } => until,
+            Self::AwaitingConsumption {
+                quiet_until,
+                deadline,
+                ..
+            } => quiet_until.min(deadline),
+        }
+    }
+}
+
+/// What one look at a consumption fence decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FenceVerdict {
+    /// The fence is over; the writer may continue.
+    Release,
+    /// Still waiting, under this fence.
+    Wait(SubmitFence),
+    /// The bound elapsed with the terminal still repainting. Nothing here can
+    /// prove the CLI took the message, so its Enter is withheld.
+    SubmissionUnproven,
+}
+
+/// Decide a fence from the clock and the output the session has mirrored.
+///
+/// Pure so the rule can be tested without a PTY: the only inputs are the fence,
+/// the current instant, and how many output chunks the session has mirrored.
+fn evaluate_submit_fence(fence: SubmitFence, now: Instant, chunks_now: u64) -> FenceVerdict {
+    match fence {
+        SubmitFence::AfterSubmission { until } => {
+            if now >= until {
+                FenceVerdict::Release
+            } else {
+                FenceVerdict::Wait(fence)
+            }
+        }
+        SubmitFence::AwaitingConsumption {
+            chunks_seen,
+            quiet_until,
+            deadline,
+        } => {
+            let still_repainting = chunks_now != chunks_seen;
+            if !still_repainting && now >= quiet_until {
+                return FenceVerdict::Release;
+            }
+            if now >= deadline {
+                return FenceVerdict::SubmissionUnproven;
+            }
+            let quiet_until = if still_repainting {
+                now + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS)
+            } else {
+                quiet_until
+            };
+            FenceVerdict::Wait(SubmitFence::AwaitingConsumption {
+                chunks_seen: chunks_now,
+                quiet_until,
+                deadline,
+            })
+        }
+    }
+}
 
 fn schedule_lag_recovery_retry(fanout: Arc<SessionFanout>) {
     if fanout
@@ -146,7 +252,7 @@ pub(crate) async fn stream_output(
     let mut previous_slow_stage = None;
     let mut pending_input: VecDeque<PendingInput> = VecDeque::new();
     let mut pending_offset = 0usize;
-    let mut logical_submit_at: Option<Instant> = None;
+    let mut submit_fence: Option<SubmitFence> = None;
     let mut status_interval =
         tokio::time::interval(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS));
     let session_fanout = session_fanout(&fanouts, &session_id).await;
@@ -209,12 +315,56 @@ pub(crate) async fn stream_output(
             }
 
             _ = tokio::time::sleep_until(
-                logical_submit_at.unwrap_or_else(Instant::now).into()
-            ), if logical_submit_at.is_some() => {
-                logical_submit_at = None;
+                submit_fence.as_ref().map(SubmitFence::wake_at).unwrap_or_else(Instant::now).into()
+            ), if submit_fence.is_some() => {
+                let fence = submit_fence.take().expect("the fence guarded this branch");
+                match evaluate_submit_fence(fence, Instant::now(), session.mirrored_chunks()) {
+                    FenceVerdict::Release => {}
+                    FenceVerdict::Wait(next) => submit_fence = Some(next),
+                    FenceVerdict::SubmissionUnproven => {
+                        // The terminal never settled, so nothing here can say
+                        // the CLI took the message. Its Enter is withheld
+                        // rather than written into a repaint that would
+                        // swallow it, and the text stays parked at the
+                        // composer where the caller is told to expect it.
+                        let Some(mut parked) = pending_input.pop_front() else {
+                            continue;
+                        };
+                        pending_offset = 0;
+                        // A withheld Enter carries no draft-released messages
+                        // of its own, but nothing queued behind one may be
+                        // silently dropped either: they go back at the front
+                        // and meet the parked composer through the same
+                        // refusal as any other later message.
+                        for (data, written, released_from_draft) in
+                            parked.take_logical_after_write().into_iter().rev()
+                        {
+                            pending_input.push_front(PendingInput::acknowledged_logical(
+                                data,
+                                written,
+                                released_from_draft,
+                                session.bracketed_paste_mode(),
+                            ));
+                        }
+                        if session.park_unproven_logical_input().is_err() {
+                            log::error!(
+                                "[stream] logical input coordination failed session={}",
+                                session_id
+                            );
+                            break;
+                        }
+                        log::warn!(
+                            "[stream] logical input submission unproven session={} \
+                             terminal never settled within the bound; the message text is \
+                             parked at the composer and later messages are refused",
+                            session_id
+                        );
+                        parked.resolve(WriteOutcome::SubmissionUnproven);
+                    }
+                }
             }
 
-            writable = async_fd.writable(), if !pending_input.is_empty() && logical_submit_at.is_none() => {
+            writable = async_fd.writable(), if !pending_input.is_empty() && submit_fence.is_none() => {
                 let Ok(mut guard) = writable else {
                     log::error!("[stream] writable readiness failed session={}", session_id);
                     break;
@@ -227,6 +377,27 @@ pub(crate) async fn stream_output(
                 let Some(front) = pending_input.front() else {
                     continue;
                 };
+                // A message parked at the composer has not been submitted, so
+                // anything written here would land behind it and be delivered
+                // as one concatenated sentence nobody wrote. The Enter of the
+                // parked message is never in this queue — it was withheld,
+                // not queued — so only fresh message text is refused.
+                if front.kind == PendingInputKind::LogicalMessage && session.logical_input_blocked()
+                {
+                    let refused = pending_input
+                        .pop_front()
+                        .expect("pending input disappeared before refusal");
+                    pending_offset = 0;
+                    if session.complete_logical_input().is_err() {
+                        log::error!(
+                            "[stream] logical input coordination failed session={}",
+                            session_id
+                        );
+                        break;
+                    }
+                    refused.resolve(WriteOutcome::NotWritten);
+                    continue;
+                }
                 let result = guard.try_io(|inner| {
                     let fd = inner.get_ref().as_raw_fd();
                     let slice = &front.data[pending_offset..];
@@ -250,10 +421,10 @@ pub(crate) async fn stream_output(
                                 .is_some_and(PendingInput::advance_logical_message_to_enter);
                             if advanced_to_enter {
                                 pending_offset = 0;
-                                logical_submit_at = Some(
-                                    Instant::now()
-                                        + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
-                                );
+                                submit_fence = Some(SubmitFence::awaiting_consumption(
+                                    session.mirrored_chunks(),
+                                    Instant::now(),
+                                ));
                             } else {
                                 let mut completed = pending_input
                                     .pop_front()
@@ -284,10 +455,8 @@ pub(crate) async fn stream_output(
                                     // safely own its composer. The existing
                                     // text -> Enter fence did not protect the
                                     // Enter -> next-message boundary.
-                                    logical_submit_at = Some(
-                                        Instant::now()
-                                            + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
-                                    );
+                                    submit_fence =
+                                        Some(SubmitFence::after_submission(Instant::now()));
                                     if completed.logical_released_from_draft() {
                                         let event = Event::LogicalInputReleased {
                                             session_id: session_id.clone(),

@@ -94,13 +94,33 @@ A held message is kept, not dropped, and mobile's banner says so: it names the
 count, the reason, and that Kanna sends it once the draft is submitted or
 cleared, so nobody resends and delivers it twice.
 
-When the logical message contains an embedded CR or LF and the terminal
-application has enabled bracketed-paste mode, the daemon frames the text as one
-paste before the delayed Enter. The PTY is otherwise only a byte stream: an
-interactive agent TUI can consume unframed multiline text as several editor
-actions and submit only a trailing fragment. Unadvertised mode and single-line
-input remain unframed, preserving literal-text and provider slash-command
-semantics.
+When the terminal application has enabled bracketed-paste mode, the daemon
+frames the text as one paste before the fenced Enter — for a message with an
+embedded CR or LF, and for any message of at least 256 bytes. The PTY is
+otherwise only a byte stream, and the daemon's writes are not the CLI's reads: a
+PTY master takes about a kilobyte per write, so a longer message reaches the CLI
+as several separate input events, and an interactive agent TUI consumes them as
+several editor actions and submits only a trailing fragment. Measured on
+2026-09-05 against Claude Code 2.1.261: a 1,191-byte single-line message was
+written as 1022 + 169 bytes, and only the 169-byte tail was submitted.
+Unadvertised mode and input short enough to arrive in one write remain unframed,
+preserving literal-text and provider slash-command semantics.
+
+**The Enter waits for the terminal to settle.** Submission is not inferred from
+PTY bytes, and it is not inferred from elapsed time either. A CLI repaints while
+it consumes an input burst, so an Enter written into that repaint is taken as
+part of the burst and the message sits unsent at the composer while the delivery
+reports success — the owner's 1,227-byte dictated message on 2026-09-05 drained
+for about 19 seconds, its Enter went out 150 ms in, and nothing ran for six
+minutes. The daemon now holds the Enter until nothing has been drawn for a
+settle window that restarts on every output chunk, bounded at 25 seconds. When
+that bound elapses the Enter is withheld rather than written blind, and
+`POST /v1/tasks/{task_id}/input` answers `503` with
+`reason: "delivery_uncertain"`: the text is on that composer, a human at that
+terminal may still submit it, and a retry would put a second copy behind it.
+Nothing is recorded as delivered. The parked text then leaves that session's
+composer attestation `unknown` and every later delivery is refused — see below
+and `crates/daemon/SPEC.md`.
 
 Raw terminal producers classify each frame as draft, submission, or control.
 Desktop keyboard events declare unmodified Enter; mobile LAN and relay clients
@@ -1269,8 +1289,16 @@ stage result.
 
 The daemon now resolves most of these itself, by reading the composer it
 inherited rather than waiting for a keystroke (see `crates/daemon/SPEC.md`).
-What remains — a composer holding text nobody here saw typed — is a human's
-decision about that screen, and it is surfaced rather than discovered:
+What remains — a composer holding text this daemon cannot prove is gone — is a
+human's decision about that screen, and it is surfaced rather than discovered.
+Two causes reach it: a session adopted across a restart or handoff whose
+composer holds text nobody here saw typed, and a logical message the daemon
+wrote whose submission it could not prove (above), which parks its text on that
+composer. Both are reported through the one `inherited-draft-unknown` value,
+whose name still says only the first; the value is deliberately unchanged
+because it is read by mobile, desktop, the event feed and the tool catalog, and
+its operational meaning covers both — nothing was delivered, retrying changes
+nothing, and a human at that terminal has to resolve it.
 
 - `GET /v1/tasks/{task_id}` reports `inputBlocked` (`inherited-draft-unknown`,
   or absent when the session accepts input). The value is written by the
@@ -1305,9 +1333,18 @@ every surface that means "what the session said":
   reached that composer since its last producer-declared submission boundary,
   so `text` may be a human's unsent line), `not-typed` (the daemon watched the
   session and counted none, so `text` is provably the provider's own chrome or
-  suggestion), or `unknown` (a session inherited from before attestation, where
-  nothing can be proven). The field is **absent** until a session reports one,
-  which is a different answer from `unknown`.
+  suggestion), or `unknown` (nothing can be proven about that composer: a
+  session inherited from before attestation, or one where the daemon wrote a
+  message and could not prove its submission, so its text is parked there).
+  The field is **absent** until a session reports one, which is a different
+  answer from `unknown`.
+- **A parked Kanna-written message is `unknown`, never `not-typed`.** It was not
+  typed, but `not-typed` asserts the composer is *clear* — it is what lets the
+  next delivery go straight out — and a later message written onto parked text
+  is submitted as one sentence nobody wrote. `unknown` is the honest answer and
+  holds later messages exactly as an inherited composer does. It stays a claim
+  about proof, not about authorship: the ledger is still never told that
+  somebody typed something they did not.
 - `waitingPromptSnippet` (and the deprecated input-only `snippet` alias) never
   contains composer-line text. The
   daemon's snippet extraction cuts at the composer's *position*, not by a
