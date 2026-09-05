@@ -6,6 +6,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::draft_bytes::draft_content_byte_count;
 use crate::headless_terminal::{ComposerState, HeadlessTerminal};
 use crate::protocol::{
     AgentProvider, ComposerAttestation, SessionInfo, SessionState, SessionStatus,
@@ -630,28 +631,33 @@ impl SessionHandle {
                 ));
             }
             RawInputKind::Draft => {
-                state.raw_input_draft_active = true;
-                state.raw_input_draft_state_known = true;
-                // Counted only for bytes that will actually be written. The
-                // writer drops an empty raw input without ever completing it,
-                // so counting one here would leave the completed total short
-                // for the life of the session and wedge attestation shut — the
-                // very state this whole change exists to end. Empty bytes
-                // write nothing to the PTY and so change no rendered frame:
-                // there is nothing for a frame to have to post-date.
-                if !data.is_empty() {
+                // A producer declares that these bytes belong to a human's own
+                // line; only their content decides whether one can exist. The
+                // desktop declares every non-Enter keydown a draft, so an
+                // arrow, an Escape, a PageUp or a click used to arm the ledger
+                // and hold every later phone or manager delivery behind a line
+                // nobody had typed. Bytes that cannot put text at the composer
+                // declare nothing — see [`crate::draft_bytes`].
+                let content_bytes = draft_content_byte_count(&data);
+                if content_bytes == 0 {
+                    routed.push(PendingInput::raw(data, written));
+                } else {
+                    state.raw_input_draft_active = true;
+                    state.raw_input_draft_state_known = true;
+                    // Content implies bytes, and bytes are written, so this
+                    // enqueued count always has a completion coming. The
+                    // writer drops an empty raw input without ever completing
+                    // it, and an unmatched enqueue would wedge attestation
+                    // shut for the life of the session.
                     state.declared_draft_writes_enqueued += 1;
+                    // Content bytes, not the write's length: the escape
+                    // sequence around them changed no composer text and must
+                    // not read as though it had.
+                    if let Some(typed) = state.typed_draft_bytes.as_mut() {
+                        *typed = typed.saturating_add(content_bytes);
+                    }
+                    routed.push(PendingInput::raw_draft(data, written));
                 }
-                // Counted, not interpreted. The daemon does not decide from
-                // the byte values whether a keystroke "really" left text —
-                // that is the same inference this file refuses to make about
-                // submission — so anything a producer declared a draft counts
-                // against the composer until a boundary or a rendered empty
-                // frame clears it.
-                if let Some(typed) = state.typed_draft_bytes.as_mut() {
-                    *typed = typed.saturating_add(data.len() as u64);
-                }
-                routed.push(PendingInput::raw_draft(data, written));
             }
             RawInputKind::Control => routed.push(PendingInput::raw(data, written)),
         }
@@ -769,13 +775,16 @@ impl SessionHandle {
     /// Two things withhold a logical message, and one piece of evidence
     /// answers both. A daemon that never watched a terminal being typed into
     /// cannot know whether a half-typed line is sitting at its prompt; and a
-    /// producer that declared a draft cannot un-declare one, so an arrow key,
-    /// an Escape or a Ctrl-key press — none of which leave an unsent line —
-    /// holds every later message until a human presses Enter there.
-    /// Concatenating onto a real unsent line would submit a sentence nobody
-    /// wrote, but a frame that positively renders the provider's own empty
-    /// composer proves there is no such line: an empty composer holds no
-    /// draft, so there is nothing to concatenate onto and nothing to protect.
+    /// producer that declared a draft cannot un-declare one, so a keystroke
+    /// that put content there — a typed character, a history recall — holds
+    /// every later message until a human presses Enter, even once they have
+    /// deleted or abandoned what they wrote. Concatenating onto a real unsent
+    /// line would submit a sentence nobody wrote, but a frame that positively
+    /// renders the provider's own empty composer proves there is no such line:
+    /// an empty composer holds no draft, so there is nothing to concatenate
+    /// onto and nothing to protect. (Keystrokes that could never put content
+    /// there declare no draft in the first place — see
+    /// [`crate::draft_bytes`].)
     ///
     /// **The frame must be newer than the draft.** A rendered frame is
     /// evidence about the moment it was rendered, and a declared byte that is
@@ -1193,6 +1202,15 @@ impl SessionHandle {
     /// [`SessionHandle::logical_input_blocked`] answers "blocked": the
     /// pessimistic verdict is the one a caller can act on safely, and a
     /// confident answer that the delivery path then contradicts is worse.
+    /// The ledger's own count, for tests that pin what a write contributed.
+    #[cfg(test)]
+    pub fn typed_draft_bytes_for_test(&self) -> Option<u64> {
+        self.input_coordination
+            .lock()
+            .expect("terminal input coordination lock")
+            .typed_draft_bytes
+    }
+
     pub fn composer_attestation(&self) -> ComposerAttestation {
         self.input_coordination
             .lock()
@@ -1823,9 +1841,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        replay_headless_terminal_for_benchmark, BenchmarkStatusState, PtyMasterAttribution,
-        PtyOccupancySnapshot, RawInputKind, SessionHandle, SessionManager, SessionRecord,
-        StreamControl,
+        replay_headless_terminal_for_benchmark, BenchmarkStatusState, ComposerAttestation,
+        PtyMasterAttribution, PtyOccupancySnapshot, RawInputKind, SessionHandle, SessionManager,
+        SessionRecord, StreamControl,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::headless_terminal::{initial_session_status, ComposerState, HeadlessTerminal};
@@ -2048,6 +2066,115 @@ mod tests {
         handle.kill().await.unwrap();
     }
 
+    /// The owner report of 2026-09-05, at the ledger.
+    ///
+    /// Opening a task's terminal on the desktop and pressing keys that leave
+    /// nothing at the prompt used to arm the draft ledger, because the desktop
+    /// declares every non-Enter keydown a draft. The phone was then told its
+    /// message was "queued behind an unsent desktop terminal draft" while that
+    /// composer was visibly empty. These bytes cannot put text anywhere, so
+    /// they declare nothing and hold nothing.
+    #[tokio::test]
+    async fn keystrokes_that_cannot_type_declare_no_draft_and_hold_nothing() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        for keystroke in [
+            b"\x1b[C".as_slice(),
+            b"\x1b[D",
+            b"\x1b[5~",
+            b"\x1b[6~",
+            b"\x1b[H",
+            b"\x1b",
+            b"\x1b[<64;24;5M",
+            b"\x1b[I",
+            b"\x7f",
+            b"\x03",
+            b"\x15",
+        ] {
+            handle
+                .enqueue_raw_input(keystroke.to_vec(), RawInputKind::Draft)
+                .expect("declare a draft for a keystroke that types nothing");
+            let routed = input_rx.recv().await.expect("keystroke");
+            assert_eq!(routed.data, keystroke);
+            assert!(
+                !routed.is_declared_draft(),
+                "{keystroke:?} cannot put text at the composer, so it declares no draft"
+            );
+        }
+
+        assert_eq!(handle.composer_attestation(), ComposerAttestation::NotTyped);
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(
+            !accepted.held_by_raw_draft,
+            "nothing typed means nothing to append to"
+        );
+        let mut delivered = input_rx.recv().await.expect("the message goes out now");
+        assert_eq!(delivered.data, b"owner reply");
+        assert!(delivered.advance_logical_message_to_enter());
+        delivered.acknowledge_written();
+        accepted.written.await.expect("the message is acknowledged");
+        handle.kill().await.unwrap();
+    }
+
+    /// Cursor up and down look like navigation and are not: they recall a
+    /// previous line *into* the composer, which is exactly the unsent line a
+    /// delivered message must never be appended to.
+    #[tokio::test]
+    async fn a_history_recall_key_still_declares_a_draft() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"\x1b[A".to_vec(), RawInputKind::Draft)
+            .expect("declare a draft from cursor-up");
+        assert!(input_rx
+            .recv()
+            .await
+            .expect("cursor-up")
+            .is_declared_draft());
+        assert_eq!(handle.composer_attestation(), ComposerAttestation::Typed);
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(
+            accepted.held_by_raw_draft,
+            "a recalled line is a line, and nothing may be appended to it"
+        );
+        assert!(input_rx.try_recv().is_err());
+        handle.kill().await.unwrap();
+    }
+
+    /// The ledger measures what could reach the composer, not how many bytes a
+    /// producer wrote: the navigation around a typed character changed no
+    /// composer text and must not read as though it had.
+    #[tokio::test]
+    async fn the_ledger_counts_only_the_bytes_that_could_reach_the_composer() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_raw_input(b"\x1b[Chi\x7f\x1b[D".to_vec(), RawInputKind::Draft)
+            .expect("declare a mixed draft write");
+        assert!(input_rx
+            .recv()
+            .await
+            .expect("mixed write")
+            .is_declared_draft());
+        assert_eq!(handle.composer_attestation(), ComposerAttestation::Typed);
+        assert_eq!(handle.typed_draft_bytes_for_test(), Some(2));
+
+        let accepted = handle
+            .enqueue_logical_input(b"owner reply".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+        handle.kill().await.unwrap();
+    }
+
     #[tokio::test]
     async fn terminal_control_on_a_clear_composer_cannot_strand_the_next_logical_input() {
         let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
@@ -2210,18 +2337,20 @@ mod tests {
         handle.kill().await.unwrap();
     }
 
-    /// The regression itself. A producer can declare a draft but cannot
-    /// un-declare one, so an arrow key — which leaves no unsent line — held
-    /// every later delivery until a human pressed Enter at that terminal. The
-    /// composer's own rendered emptiness is the evidence that ends it, and it
-    /// is the same evidence that already resolves an inherited unknown state.
+    /// A producer can declare a draft but cannot un-declare one, so a
+    /// history-recall key that found nothing to recall — leaving no unsent
+    /// line — held every later delivery until a human pressed Enter at that
+    /// terminal. The composer's own rendered emptiness is the evidence that
+    /// ends it, and it is the same evidence that already resolves an inherited
+    /// unknown state.
     #[tokio::test]
     async fn a_declared_draft_over_a_provably_empty_composer_releases_the_held_message() {
         let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
         let mut input_rx = handle.take_input_rx().await.expect("input queue");
 
-        // Cursor-up: a keydown the desktop producer declares a draft, which
-        // leaves nothing at the prompt.
+        // Cursor-up: a keydown the desktop producer declares a draft, and one
+        // that counts, because it can recall a line into the composer. Here
+        // there was nothing to recall, so it left nothing at the prompt.
         handle
             .enqueue_raw_input(b"\x1b[A".to_vec(), RawInputKind::Draft)
             .expect("declare a draft from a navigation key");

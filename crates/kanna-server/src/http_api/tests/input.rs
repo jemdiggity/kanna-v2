@@ -3008,6 +3008,201 @@ async fn held_inputs_are_visible_and_flush_to_distinct_delivery_rows() {
     let _ = std::fs::remove_file(config.db_path);
 }
 
+/// What the phone is told about a message it just sent must be what actually
+/// happened to it.
+///
+/// A delivered message leaves no queue row and no reason at all; only a
+/// message the daemon actually withheld reads `input_held_by_draft`. The
+/// owner's 2026-09-05 report was a banner on a task whose composer was empty,
+/// and the untruth was upstream in the daemon's ledger — this pins the route
+/// and snapshot half so a regression there cannot hide behind it.
+#[tokio::test]
+async fn queued_input_reason_reports_what_actually_happened_to_the_message() {
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, ErrorCode, Event as DaemonEvent, SessionInfo, SessionState,
+        SessionStatus,
+    };
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("task-input-reason-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    // The first delivery is written; the second is withheld behind a real
+    // draft. One connection per POST, each carrying List then the submit.
+    let daemon_server = tokio::spawn(async move {
+        for held in [false, true] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            for _ in 0..2 {
+                let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+                let response = match (&command, held) {
+                    (DaemonCommand::List, _) => DaemonEvent::SessionList {
+                        sessions: vec![SessionInfo {
+                            session_id: "task-reason".to_string(),
+                            pid: 42,
+                            cwd: "/tmp".to_string(),
+                            state: SessionState::Active,
+                            idle_seconds: 0,
+                            status: SessionStatus::Idle,
+                            kind: Default::default(),
+                            logical_input_blocked: false,
+                            pending_logical_input_count: None,
+                            composer_text: None,
+                            composer_attestation: Default::default(),
+                        }],
+                    },
+                    (DaemonCommand::SubmitInputIfSession { .. }, false) => DaemonEvent::Ok,
+                    (DaemonCommand::SubmitInputIfSession { .. }, true) => DaemonEvent::Error {
+                        code: Some(ErrorCode::LogicalInputHeldByDraft),
+                        message: "logical input for session task-reason was not submitted: a \
+                                  human has an unsent line at that terminal"
+                            .to_string(),
+                    },
+                    (other, _) => panic!("unexpected daemon command: {other:?}"),
+                };
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    for task_id in ["task-reason", "task-sending", "task-uncertain"] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            task_id,
+            Some("implement"),
+            "in progress",
+            "2026-09-05 17:00:00",
+        )
+        .unwrap();
+    }
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-live",
+        task_id: "task-reason",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-reason"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    drop(db);
+
+    let router = super::router(Arc::new(super::AppState::new(config.clone())));
+    let send = |input: &str| {
+        let router = router.clone();
+        let input = input.to_string();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::post("/v1/tasks/task-reason/input")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "input": input }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body)
+        }
+    };
+
+    let (status, _) = send("this one goes straight out").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let db = Db::open(&config.db_path).unwrap();
+    let snapshot = db.ui_snapshot().unwrap();
+    let delivered_task = snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-reason")
+        .unwrap();
+    assert_eq!(delivered_task.queued_input_count, 0);
+    assert_eq!(
+        delivered_task.queued_input_reason, None,
+        "a delivered message must report no queue reason at all"
+    );
+    drop(db);
+
+    let (status, body) = send("this one waits for a human").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let queued: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(queued["reason"], "input_held_by_draft");
+    daemon_server.await.unwrap();
+
+    // The other two states the snapshot reports, at their source: a delivery
+    // still in flight reads `sending`, and one whose outcome the server could
+    // not prove reads `delivery_uncertain` — never `input_held_by_draft`.
+    let db = Db::open(&config.db_path).unwrap();
+    db.prepare_queued_task_input(
+        "task-sending",
+        42,
+        crate::db::TaskInputSource::Operator,
+        "in flight",
+    )
+    .unwrap();
+    let uncertain_id = db
+        .prepare_queued_task_input(
+            "task-uncertain",
+            42,
+            crate::db::TaskInputSource::Operator,
+            "outcome unknown",
+        )
+        .unwrap()
+        .unwrap();
+    db.mark_queued_task_input_uncertain(uncertain_id, "session replaced")
+        .unwrap();
+
+    let snapshot = db.ui_snapshot().unwrap();
+    let reason_for = |task_id: &str| {
+        snapshot.entries[0]
+            .items
+            .iter()
+            .find(|item| item.id == task_id)
+            .unwrap()
+            .queued_input_reason
+            .clone()
+    };
+    assert_eq!(
+        reason_for("task-reason").as_deref(),
+        Some("input_held_by_draft")
+    );
+    assert_eq!(reason_for("task-sending").as_deref(), Some("sending"));
+    assert_eq!(
+        reason_for("task-uncertain").as_deref(),
+        Some("delivery_uncertain")
+    );
+    drop(db);
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[tokio::test]
 async fn submit_task_input_sends_one_semantic_daemon_message() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};

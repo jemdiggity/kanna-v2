@@ -1141,7 +1141,7 @@ export function TaskScreen({
                 ? "awaiting delivery confirmation. Check the desktop terminal before retrying."
                 : task.queuedInputReason === "sending"
                   ? "being handed to the desktop terminal. Keep this screen open for confirmation."
-                : "queued behind an unsent desktop terminal draft. It will send after that draft is submitted."}
+                : "queued behind an unsent draft at the desktop terminal. Kanna keeps it and sends it once that draft is submitted or cleared — don't send it again."}
             </Text>
           </View>
         ) : null}

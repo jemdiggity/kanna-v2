@@ -4,6 +4,7 @@ mod bench;
 mod client;
 mod connection;
 mod daemon_lifecycle;
+mod draft_bytes;
 mod fanout;
 mod fd;
 mod fd_transfer;

@@ -409,9 +409,14 @@ it("shows why held task messages are queued and clears the status at zero", () =
   });
   const status = findByTestId(tree, MOBILE_E2E_IDS.taskQueuedInputStatus);
   expect(status).not.toBeNull();
-  expect(JSON.stringify(status?.props?.children)).toContain(
-    "queued behind an unsent desktop terminal draft"
-  );
+  const heldCopy = JSON.stringify(status?.props?.children);
+  expect(heldCopy).toContain("queued behind an unsent draft at the desktop terminal");
+  // The daemon releases a held message at the producer's own submission
+  // boundary *or* when the composer is attested empty, and it keeps the
+  // message either way. Saying only "after that draft is submitted" invited a
+  // resend that would deliver the message twice.
+  expect(heldCopy).toContain("submitted or cleared");
+  expect(heldCopy).toContain("don't send it again");
 
   tree = renderTaskScreen({ queuedInputCount: 0 });
   expect(findByTestId(tree, MOBILE_E2E_IDS.taskQueuedInputStatus)).toBeNull();

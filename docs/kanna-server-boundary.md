@@ -73,10 +73,26 @@ composer. A message retained behind a draft answers `202` with
 summary exposes that backlog and reason. It is first stored in
 `queued_task_input`, not falsely recorded as delivered. Reported by the product owner on 2026-08-20, when replies sent from
 mobile sat at the agent's prompt until someone pressed Enter at that terminal
-while the phone had been told they were delivered. A declared draft that leaves
-nothing at the prompt — a navigation key, an Escape, a Ctrl-key press — no
-longer holds anything: the daemon clears it from the composer's own rendered
-emptiness (see `crates/daemon/SPEC.md`).
+while the phone had been told they were delivered.
+
+**A keystroke that cannot type does not hold anything.** The desktop declares
+every non-Enter keydown a draft, so opening a task's terminal and pressing an
+arrow, an Escape or a PageUp — or clicking, or scrolling — used to park every
+later phone or manager delivery behind a line nobody had typed, and the phone
+was shown a queued-input banner while that composer was visibly empty (owner
+report, 2026-09-05). The daemon now classifies the bytes of each declared draft
+write and only counts the ones that can put text at a composer: navigation,
+scrolling, deletion, mouse and focus reports, a bare Escape and the abandon
+keys create nothing, so they declare no draft. Cursor up and down are the
+exception — they recall a previous line *into* the composer, so they count like
+typing. A real draft still holds, and still releases at the producer's own
+submission boundary or when the composer is attested empty, which is what a
+cleared draft renders as. The full classification and why Escape/Ctrl-C/Ctrl-U
+are inert rather than clearing are in `crates/daemon/SPEC.md`.
+
+A held message is kept, not dropped, and mobile's banner says so: it names the
+count, the reason, and that Kanna sends it once the draft is submitted or
+cleared, so nobody resends and delivers it twice.
 
 When the logical message contains an embedded CR or LF and the terminal
 application has enabled bracketed-paste mode, the daemon frames the text as one
@@ -1302,7 +1318,9 @@ presence; beyond excluding composer rows, its existing semantics are unchanged.
 The same ledger decides whether a delivered message is held — see
 "Refused Task Input" above and `crates/daemon/SPEC.md`. Zero typed bytes is
 positive proof that no unsent line exists, so the message is written even while
-the CLI renders suggestion text; `typed` and `unknown` still hold.
+the CLI renders suggestion text; `typed` and `unknown` still hold. The ledger
+counts only bytes that can *create* composer content, so a session someone only
+navigated, scrolled or clicked in stays `not-typed`.
 
 ## Task Parentage
 
