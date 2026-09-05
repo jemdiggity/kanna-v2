@@ -115,7 +115,6 @@ export async function createScriptedTask(
     terminalPasteSemantics?: boolean;
     terminalCols?: number;
     terminalRows?: number;
-    terminalKeyTraceFile?: string;
     tracePartialInput?: boolean;
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
@@ -131,7 +130,6 @@ export async function createScriptedTask(
     setupCommands: options.setupCommands,
     snapshotHistory: options.snapshotHistory,
     terminalPasteSemantics: options.terminalPasteSemantics,
-    terminalKeyTraceFile: options.terminalKeyTraceFile,
     tracePartialInput: options.tracePartialInput,
   });
 
