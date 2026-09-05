@@ -45,6 +45,7 @@ export const MOBILE_E2E_IDS = {
   taskAttachmentPreview: "mobile.task-attachment-preview",
   taskAttachmentRemove: "mobile.task-attachment-remove",
   taskAttachmentError: "mobile.task-attachment-error",
+  taskInputStatus: "mobile.task-input-status",
   taskQueuedInputStatus: "mobile.task-queued-input-status",
   taskQuickReplyRail: "mobile.quick-reply.rail",
   taskQuickReplyPicker: "mobile.quick-reply.picker",
