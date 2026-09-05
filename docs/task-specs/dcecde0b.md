@@ -23,7 +23,7 @@ manual implementation stage does not publish or advance the task.
 2026-09-05: Read both preceding specs. The review-binding fixture already cancels
 its initial running review before seeding the replacement on this branch; the
 mDNS regression lives in `crates/task-transfer/tests/runtime.rs` and already
-generates unique peer ids. Further root-cause investigation is pending.
+generates unique peer ids. The investigation and final results are recorded below.
 
 ### Baseline and isolation (2026-09-05)
 
@@ -42,7 +42,7 @@ generates unique peer ids. Further root-cause investigation is pending.
   under continued build load, followed by a default-parallel server-binary run
   **1,246/1,246** (71.74s). The diagnostic preserves HTTP error bodies.
 
-### Findings and changes in progress
+### Findings and changes
 
 1. **Inventory: confirmed product race.** B reads A's lock owner, A exits, C
    acquires the lock, then B observes A's death and renames/removes C's live
@@ -64,20 +64,20 @@ generates unique peer ids. Further root-cause investigation is pending.
    demonstrated. The concurrent regression now feeds deterministic Bonjour
    ServiceResolved records through the actual resolver/cache, advertises both
    runs to each cache in different orders, verifies identity-to-endpoint routing,
-   then pairs and transfers concurrently over real loopback TCP. Only the
-   outer 30-second hang guard uses time. The separate live Bonjour integration
+   then pairs and transfers concurrently over real loopback TCP. The only
+   explicit exchange deadline is a 30-second hang guard. The separate live Bonjour integration
    test remains unchanged. Discovery legitimately lists foreign peers; this
    regression's isolation contract is pairing/transfer with the intended partner.
 3. **Review binding:** git history confirms 90e4579f (2026-09-05 06:06) already
    fixed the duplicate-running-review fixture in this exact test, not merely
-   another test in the file. Pin the one-active-main-run invariant before HTTP
-   requests, preserve that cancellation, and retain full error bodies for future
-   failures. Neither the baseline nor the 100 loaded diagnostic repetitions nor
+   another test in the file. The test now pins the one-active-main-run invariant
+   before HTTP requests, preserves that cancellation, and retains full error
+   bodies for future failures. Neither the baseline nor the 100 loaded diagnostic repetitions nor
    the full server binary reproduced the earlier HTTP 500. The historical 500's
    exact error body was not captured, so attributing that status conclusively
    to timing or to the old fixture would go beyond the evidence.
 
-Final loaded proof runs, strict checks, and pre-PR upstream rebase are pending.
+The focused checks and final loaded proof are recorded below.
 
 ### Focused verification
 
@@ -97,5 +97,47 @@ Final loaded proof runs, strict checks, and pre-PR upstream rebase are pending.
   help because there is no root tsconfig, matching the preceding Clippy task.
 - `cargo fmt --all` and `git diff --check` passed.
 - Pre-rebase `cargo clippy --workspace --all-targets` passed with the existing
-  warnings that PR #1297 removes; none identify the new code. Strict proof is
-  pending that upstream merge. No dependency or lockfile changed.
+  warnings that PR #1297 removes; none identify the new code. Strict proof
+  after the upstream merge is recorded below. No dependency or lockfile changed.
+
+### Upstream and combined gate
+
+- The pre-Clippy combined `./kd test all` probe passed (both canonical success
+  messages). This is supporting evidence, not one of the final counted runs:
+  it started before the last harness exit-guard refinement and before the
+  Clippy prerequisite merged.
+- PR #1297 merged at 2026-09-05 13:54:22 UTC. Rebased this branch cleanly onto
+  origin/main `dfb60b5a` (the Clippy merge), preserving both task commits.
+  The old load process was stopped by its recorded PID and its own Cargo
+  process group before rebasing, then restarted against the rebased source.
+- Three strict loaded proof runs were captured as `.tmp/proof-1.log`,
+  `.tmp/proof-2.log`, and `.tmp/proof-3.log`. The load supervisor records each
+  workspace build and exit in `.tmp/load-loop.log`, cleans only the two private
+  package artifacts between builds, and stayed active across all three
+  counted runs.
+
+### Final proof (2026-09-05)
+
+All three consecutive default-parallel `./kd test all` runs on rebased code
+head `72403cef` returned exit 0 and ended with `Canonical local verification
+passed.` Each included strict workspace/all-target Clippy and a fresh kd test
+execution (Turbo explicitly reports cache bypass for kd).
+
+| Run | Full gate | Strict Clippy | Inventory | Server (includes review binding) | Transfer lib (includes controlled mDNS); integration (includes live Bonjour) | Handoff |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | passed, exit 0 | passed | 10/10 | 1,246/1,246 | 86/86; 136/136 | 28/28 |
+| 2 | passed, exit 0 | passed | 10/10 | 1,246/1,246 | 86/86; 136/136 | 28/28 |
+| 3 | passed, exit 0 | passed | 10/10 | 1,246/1,246 | 86/86; 136/136 | 28/28 |
+
+The build supervisor completed 63 workspace builds during this proof period,
+using `.tmp/load-target` and `.tmp/load-build`, without changing test parallelism.
+It was stopped after run 3 by its recorded PID; its owned Cargo process group
+was terminated and the supervisor's exit was confirmed. The last deliberately
+interrupted build is not a failed verification run. No agent-started background
+process remains.
+
+Formatting, diff checks, and kd TypeScript checking also passed after rebase.
+No new ignored tests, lane serialization, dependency changes, or inventory JSON
+schema changes were introduced. This task does not claim to have reproduced or
+explained the historical review HTTP 500 beyond verifying the already-landed
+fixture lifecycle correction and preserving diagnostics for any recurrence.
