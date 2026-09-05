@@ -245,28 +245,22 @@ pub(super) async fn attach_trusted_lan_device(
     response
 }
 
-pub(super) async fn require_privileged_task_access(request: Request<Body>, next: Next) -> Response {
-    if is_privileged_task_route(request.method(), request.uri().path())
-        && privileged_task_access(request.extensions()).is_err()
-    {
+pub(super) async fn require_http_access(request: Request<Body>, next: Next) -> Response {
+    // Deny by default, including GET/HEAD and preflight. Only discovery and
+    // authentication bootstrap may run before the caller proves pairing.
+    let path = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or(request.uri().path(), |path| path.as_str());
+    let bootstrap = matches!(
+        (request.method().as_str(), path),
+        ("GET" | "HEAD", "/v1/status" | "/v1/stream" | "/v2/stream")
+            | ("POST", "/v1/pairing/sessions/claim")
+    );
+    if !bootstrap && privileged_task_access(request.extensions()).is_err() {
         return unauthorized_privileged_task().into_response();
     }
     next.run(request).await
-}
-
-fn is_privileged_task_route(method: &axum::http::Method, path: &str) -> bool {
-    if path == "/v1/cloud/relay/actions/reconnect" {
-        return method != axum::http::Method::OPTIONS;
-    }
-    if path == "/v1/transfers" || path.starts_with("/v1/transfers/") {
-        return method != axum::http::Method::OPTIONS;
-    }
-    if path != "/v1/tasks" && !path.starts_with("/v1/tasks/") {
-        return false;
-    }
-    method != axum::http::Method::GET
-        && method != axum::http::Method::HEAD
-        && method != axum::http::Method::OPTIONS
 }
 
 fn privileged_task_access(

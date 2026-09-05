@@ -94,18 +94,18 @@ async fn e2e_sql_route_requires_loopback_connect_info() {
         .await
         .unwrap();
 
-    assert_eq!(lan_response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(lan_response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn e2e_sql_route_accepts_in_process_http_invokes_as_loopback() {
+async fn e2e_sql_route_accepts_authenticated_in_process_http_invokes() {
     let _lock = E2E_SQL_ENV_LOCK.lock().await;
     let _env = E2eSqlEnvGuard::enable();
     let state = super::test_state_with_seed("desktop-e2e-sql-invoke", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
     });
 
-    let response = super::dispatch_http_invoke(
+    let response = crate::http_api::dispatch_authenticated_http_invoke(
         state,
         "POST",
         "/v1/e2e/sql",

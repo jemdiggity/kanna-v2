@@ -1588,9 +1588,7 @@ async fn handle_stream_channels(
     auth_mode: AuthMode,
     companion_access: bool,
 ) {
-    let state_change_rx = state.subscribe_state_changes();
-    let state_change_tx = frame_tx.clone();
-    let state_change_task = tokio::spawn(forward_state_changes(state_change_rx, state_change_tx));
+    let mut state_change_task = None;
     let mut conn = StreamConn {
         state,
         frame_tx,
@@ -1618,8 +1616,21 @@ async fn handle_stream_channels(
         }
         match serde_json::from_str::<ClientFrame>(&message) {
             Ok(frame) => {
+                // Subscribe before AuthOk can reach the client, but forward
+                // only after authentication succeeds. Failed or malformed
+                // handshakes must never receive task-state broadcasts.
+                let pending_state_changes =
+                    (!conn.authed).then(|| conn.state.subscribe_state_changes());
                 if !conn.handle(frame).await {
                     break;
+                }
+                if conn.authed {
+                    if let Some(receiver) = pending_state_changes {
+                        state_change_task = Some(tokio::spawn(forward_state_changes(
+                            receiver,
+                            conn.frame_tx.clone(),
+                        )));
+                    }
                 }
             }
             Err(error) => {
@@ -1633,7 +1644,9 @@ async fn handle_stream_channels(
     // drains queued ordinary frames and latest companion values before exit.
     conn.shutdown().await;
     drop(conn);
-    state_change_task.abort();
+    if let Some(task) = state_change_task {
+        task.abort();
+    }
 }
 
 fn is_relay_tunnel_control_message(message: &str) -> bool {
@@ -11993,6 +12006,69 @@ mod tests {
         let _ = task.await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn state_changes_are_forwarded_only_after_successful_stream_authentication() {
+        let state = crate::http_api::test_state_with_seed("ksp-state-auth", "State Auth", |_| {});
+        let mut store = crate::pairing::PairingStore::default();
+        store.add_trusted_device(
+            &state.config().desktop_id,
+            "phone",
+            "Phone",
+            &crate::pairing::hash_device_secret("secret"),
+        );
+        store
+            .save(Path::new(&state.config().pairing_store_path))
+            .unwrap();
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            frame_tx,
+            companion_tx,
+            Arc::clone(&state),
+            AuthMode::RequirePairedDevice,
+            false,
+        ));
+        // A malformed frame is a barrier: the connection has started, but
+        // has not authenticated. A paused clock proves absence without a
+        // wall-clock race or sleeping on a shared build machine.
+        incoming_tx.send("not-json".into()).await.unwrap();
+        assert!(
+            matches!(outbound_rx.recv().await, Some(ServerFrame::Error { code, .. }) if code == "bad_frame")
+        );
+        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), outbound_rx.recv())
+                .await
+                .is_err()
+        );
+        incoming_tx
+            .send(
+                serde_json::to_string(&ClientFrame::Auth {
+                    credential: Some(
+                        serde_json::json!({"deviceId":"phone", "deviceSecret":"secret"})
+                            .to_string(),
+                    ),
+                    capabilities: vec![],
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::AuthOk { .. })
+        ));
+        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::StateChanged { .. })
+        ));
+        drop(incoming_tx);
+        task.await.unwrap();
+        std::fs::remove_file(&state.config().pairing_store_path).unwrap();
+    }
+
     #[tokio::test]
     async fn direct_lan_stream_rejects_empty_paired_device_credential() {
         let state = Arc::new(crate::http_api::AppState::new(test_config(
@@ -12113,7 +12189,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn previous_mobile_gets_read_only_v1_access_from_current_non_loopback_desktop() {
+    async fn previous_mobile_without_pairing_is_rejected_by_non_loopback_v1() {
         let (base_url, server) =
             serve_non_loopback_test_router("ksp-v1-previous-mobile-upgrade").await;
         let mut socket = ws_connect(&format!("{base_url}/v1/stream")).await;
@@ -12129,18 +12205,6 @@ mod tests {
 
         assert!(matches!(
             recv_frame(&mut socket).await,
-            ServerFrame::AuthOk { .. }
-        ));
-        send_frame(
-            &mut socket,
-            &ClientFrame::AgentInput {
-                task_id: "task-1".into(),
-                text: "must remain read-only".into(),
-            },
-        )
-        .await;
-        assert!(matches!(
-            recv_frame(&mut socket).await,
             ServerFrame::Error { code, .. } if code == "unauthorized"
         ));
         server.abort();
@@ -12150,6 +12214,15 @@ mod tests {
     async fn non_loopback_v1_rejects_agent_terminal_lifecycle_and_file_frames() {
         let (base_url, server) = serve_non_loopback_test_router("ksp-v1-privileged-denial").await;
         let frames = [
+            ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Terminal,
+                from_seq: 0,
+                include_assets: None,
+                accept_snapshot_chunks: None,
+                attachment_epoch: None,
+                term_resume: None,
+            },
             ClientFrame::AgentInput {
                 task_id: "task-1".into(),
                 text: "must not reach the agent".into(),
@@ -12180,23 +12253,11 @@ mod tests {
 
         for frame in frames {
             let mut socket = ws_connect(&format!("{base_url}/v1/stream")).await;
-            send_frame(
-                &mut socket,
-                &ClientFrame::Auth {
-                    credential: None,
-                    capabilities: vec![],
-                },
-            )
-            .await;
-            assert!(matches!(
-                recv_frame(&mut socket).await,
-                ServerFrame::AuthOk { .. }
-            ));
             send_frame(&mut socket, &frame).await;
             assert!(
                 matches!(
                     recv_frame(&mut socket).await,
-                    ServerFrame::Error { code, .. } if code == "unauthorized"
+                    ServerFrame::Error { code, .. } if code == "unauthenticated"
                 ),
                 "non-loopback v1 frame was not denied before dispatch: {frame:?}",
             );
