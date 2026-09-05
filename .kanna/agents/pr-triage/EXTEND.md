@@ -1,6 +1,6 @@
 ## Kanna Repository Review Scope
 
-The built-in `pr-review-manager` deliberately leaves review scope undefined and
+The built-in `pr-triage` agent deliberately leaves review scope undefined and
 asks for it. In this repository it is already answered: **review every open pull
 request on the repo, whoever or whatever opened it** — Kanna task branches,
 hand-authored branches, and dependency bumps alike.
@@ -24,7 +24,7 @@ this repository works:
   repository's own `AGENTS.md`/`CLAUDE.md` is the authority on which of these
   are load-bearing; read it before ranking, not after.
 
-> Inert until the built-in `pr-review-manager` agent ships (phase 1 of
+> Inert until the built-in `pr-triage` agent ships (phase 1 of
 > `docs/specs/pr-review-dispatch.md`). An `EXTEND.md` whose base agent does not
 > resolve is skipped, so this file changes nothing until then — it is
 > deliberately committed ahead of the agent as the worked example of the

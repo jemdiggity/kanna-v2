@@ -57,11 +57,11 @@ Consequences worth stating up front:
 
 ```
 Task: "Review open PRs"                    workflow pr-review        (public)
-  agent pr-review-manager · parked, conversational
+  agent pr-triage · parked, conversational
   │  triages open PRs, proposes an order, dispatches on the user's word,
   │  tracks the children, answers "what's left?"
   │
-  ├── Child: "PR #412 · relay reconnect"   workflow pr-review-item  (internal)
+  ├── Child: "PR #412 · relay reconnect"   workflow pr-review-single  (internal)
   │     agent pr-reviewer
   │     worktree forked from the PR head · diff base = the PR base
   │     writes a risk-ranked brief, then parks for the human's questions
@@ -81,13 +81,13 @@ other built-in.
 
 ### `workflows/pr-review.json` — public
 
-One manual stage, `triage`, bound to `pr-review-manager`. Public because the
+One manual stage, `triage`, bound to `pr-triage`. Public because the
 user starts a review session by picking it in the new-task modal, which is the
 app's only agent entry point (it picks a workflow and a provider, not an
 agent). Manual so the session parks and stays conversational: the user keeps
 talking to the manager between PRs.
 
-### `workflows/pr-review-item.json` — internal
+### `workflows/pr-review-single.json` — internal
 
 One manual stage, `review`, bound to `pr-reviewer`. `"visibility": "internal"`
 for the same reason `specialty-review` is: Kanna binds it itself, so it must
@@ -98,7 +98,7 @@ every child, whatever the outcome, with the human deciding when it is done.
 Unlike `specialty-review`, this workflow **does** bind its agent, because every
 child runs the same one. The manager needs no `agent` override.
 
-### `agents/pr-review-manager/AGENT.md`
+### `agents/pr-triage/AGENT.md`
 
 Its job, in order:
 
@@ -107,7 +107,7 @@ Its job, in order:
    this undefined and asks**, because both answers are correct for real users
    and the built-in cannot know which one is looking at it (see "Defaults,
    extension, and setup"). A repo that has answered it in
-   `.kanna/agents/pr-review-manager/EXTEND.md` is not asked again; when nobody
+   `.kanna/agents/pr-triage/EXTEND.md` is not asked again; when nobody
    has answered, the manager asks once, proceeds on the answer, and offers to
    write the extension so it never asks again.
 1. **Enumerate.** Resolve the open PRs in scope. This is forge work, so it
@@ -129,7 +129,7 @@ Its job, in order:
      which works for cross-fork PRs and, being a *local* ref, leaves the child
      branch with no upstream (this matters — see "The workspace question");
    - `kanna_create_task` with `parent_task_id` = the manager's task,
-     `workflow_name: "pr-review-item"`, `base_ref: "pr/<n>"` (the fork point),
+     `workflow_name: "pr-review-single"`, `base_ref: "pr/<n>"` (the fork point),
      `diff_base_ref: "origin/<base>"` (the diff base), an explicit
      `display_name` of `PR #<n> · <short title>`, and a prompt naming the PR,
      its author, its base, its head sha, and the user's stated concern if they
@@ -163,7 +163,7 @@ one question. It resolves into three obligations:
    than picking a default that is wrong for half its users and silently
    applied. A built-in that must guess should ask instead.
 2. **The repo answers it by extension, not by replacement.** One
-   `.kanna/agents/pr-review-manager/EXTEND.md` layers the answer onto the
+   `.kanna/agents/pr-triage/EXTEND.md` layers the answer onto the
    resolved agent, so the repo keeps receiving improvements to the built-in it
    did not fork. Full replacement (`AGENT.md`) stays available for a repo whose
    review procedure is genuinely its own.
@@ -179,10 +179,10 @@ one question. It resolves into three obligations:
    Inspection can pre-answer it in the common case: if `gh` reports the
    operator has push/admin permission on the repo, "every open PR" is the
    likely answer and the question becomes a confirmation. The answer is
-   written as `.kanna/agents/pr-review-manager/EXTEND.md`; no answer is also a
+   written as `.kanna/agents/pr-triage/EXTEND.md`; no answer is also a
    valid outcome, and the manager asks the first time it runs.
 
-**Exercised now.** `.kanna/agents/pr-review-manager/EXTEND.md` exists in this
+**Exercised now.** `.kanna/agents/pr-triage/EXTEND.md` exists in this
 repository and says Kanna reviews every open PR, with the two repo-specific
 ranking rules that follow from Kanna being a distributed system that ships as
 one signed app. It is committed ahead of the agent it extends and is inert
@@ -232,10 +232,28 @@ record and what task detail and the sidebar show. Manual transition means
 completing does not end the session — the agent parks, and the human keeps
 asking it questions while reading the diff.
 
-What it does not do: approve, merge, request changes on the forge, or push
-anything. If the human asks it to post the review to GitHub, it does that as an
-explicit `gh` action on the human's word — user-space work, on request, never
-as part of the brief.
+### What the reviewer may do to the forge
+
+The brief-only contract has one seam: if the human forms a verdict in Kanna and
+then has to open GitHub to type it, GitHub is still where the decision gets
+recorded, and the directive's whole point leaks away. So the child can carry the
+human's words back — under a line drawn between two different things:
+
+- **Transcription.** Posting a review comment, or a request for changes, in the
+  human's name, with the human's words. The agent is a typist. **In the
+  built-in**, on the human's explicit instruction in the session, never as part
+  of the brief and never inferred from the human reacting to it. Before posting,
+  it restates verbatim what it is about to post and to which PR.
+- **Authority.** Approving the PR, dismissing another reviewer's changes,
+  merging. Here the agent is not transcribing a judgment, it is *exercising* the
+  human's standing as a reviewer of record. **Not in the built-in.** A repo that
+  wants it writes `.kanna/agents/pr-reviewer/EXTEND.md` — the same path this
+  design already uses for review scope, and the right place for a per-repo
+  decision about how much authority an agent holds.
+
+Merging stays out of both: the merge master owns merging
+([merge-master.md](./merge-master.md)), and a PR review session never merges,
+extension or not.
 
 ## The workspace question
 
@@ -323,20 +341,15 @@ before it lands, and it can ship a release after A and B.
   serve their own case (reviewing a task's branch inside its workflow). What
   `f1c3ca89` decides to remove is decided there, not here.
 
-## Deferred (named, not fixed)
+## The diff tool
 
-The human still reads the diff in the tool that exists, and the first design's
-diagnosis of that tool remains true. This design deliberately does not fix:
+The human reads the diff in the tool that exists, and the first design's
+diagnosis of that tool remains true. One of those gaps is load-bearing for this
+design and is therefore in it, as **phase 4**: without a file list and
+viewed-tracking, a forty-file PR is a scroll, and organizing *which* PR to read
+does not help once you are inside it.
 
-- no file list, +/− counts, jump-to-file, or viewed-tracking — the single
-  biggest cost of reviewing a large PR in the app today;
-- the 1 MiB patch cap on the remote/mobile path, and the per-file render skip
-  on desktop;
-- mobile has no equivalent of this flow at all.
-
-Each is independently useful and independently schedulable. None blocks this
-design from shipping and being used. If the owner wants one of them, the file
-list is the one that pays for itself first.
+The rest stays out — see "Still deferred".
 
 ## Phasing
 
@@ -360,11 +373,11 @@ Acceptance criteria:
   with `diff_base_ref` set to the default branch renders that branch's changes
   on first open — the case that is empty today.
 - Definition tests, per the existing pattern: both workflows resolve,
-  `pr-review-item` is excluded from the listed lineup while still resolving by
+  `pr-review-single` is excluded from the listed lineup while still resolving by
   name, both agents' prompts render, and every tool they reference exists in
   `crates/kanna-tool-catalog`.
 - Definition test for the extension path: with
-  `.kanna/agents/pr-review-manager/EXTEND.md` present, the resolved agent's
+  `.kanna/agents/pr-triage/EXTEND.md` present, the resolved agent's
   prompt contains the repo's scope answer; with it absent, the resolved prompt
   still declares the scope question open. (Kanna's own repo is the fixture for
   the first half — the file is already committed.)
@@ -384,7 +397,7 @@ Acceptance criteria:
 - Agent-flow E2E on a repo with no scope extension: the manager asks the scope
   question before enumerating, and enumerates nothing until it is answered.
 - The `setup` agent's new question writes a well-formed
-  `.kanna/agents/pr-review-manager/EXTEND.md`, and re-running setup on a repo
+  `.kanna/agents/pr-triage/EXTEND.md`, and re-running setup on a repo
   that already has one does not overwrite it without approval (the existing
   rule in `.kanna/agents/setup/AGENT.md`).
 
@@ -400,6 +413,38 @@ Acceptance criteria:
 - A repo `EXTEND.md` naming a critical path moves it up the ranking.
 - The child's `kanna_complete_stage` summary is present and the session stays
   alive and answerable afterwards.
+- Transcription: on an explicit instruction the child posts the human's words
+  to the PR and restates them first; with no instruction, a fixture run posts
+  nothing. Approving is refused by the built-in and named as an `EXTEND.md`
+  decision.
+
+**Phase 4 — the change map.** Independent of phases 2-3 and schedulable
+alongside or ahead of them: it is desktop work, they are agent-prompt work.
+
+This design organizes the review — which PR, in what order, which hunks matter
+— without improving the *read*. Pressing ⌘D still gives one long scrolling
+patch, and on a forty-file PR you lose your place. That is the honest cost of
+building no UI, and it is worth paying down to the minimum that fixes it:
+
+- `git_diff_numstat` (git2, no shelling) returning
+  `{path, oldPath?, status, additions, deletions, binary}` for the range;
+- a file list beside the diff: path, +/−, status, click to jump;
+- a per-file viewed toggle (`v`) and an unviewed count.
+
+Not the withdrawn design's three panes, not lazy per-file loading, not
+commit-scoped ranges — those are separate arguments. This is the part that
+turns scrolling into navigation.
+
+Acceptance criteria:
+
+- Unit: numstat against a fixture repo reports renames with `oldPath`, flags
+  binary files, and counts add/delete/modify correctly.
+- Desktop E2E: a 40-file fixture branch renders a complete file list; clicking
+  file 37 scrolls to it.
+- Desktop E2E: `v` marks a file viewed, the unviewed count decrements, and the
+  state survives closing and reopening the diff for the same head.
+- Perf: first-content time for the existing 20×1500 perf fixture does not
+  regress against the `KANNA_E2E_DIFF_FIRST_CONTENT_MS` budget.
 
 ## Tradeoffs
 
@@ -413,6 +458,7 @@ Acceptance criteria:
 | Human reviews, agent briefs | Agent renders a PASS/FAIL verdict like the specialty reviewers | The owner's stated goal is to make *the human's* review possible in-app, not to replace it | No aggregate verdict to automate on; a PR review session ends when the human says it does |
 | Built-in leaves review scope undefined and asks | Ship a default ("your own PRs") that a repo overrides | Both answers are correct for real users and the built-in cannot tell which one it is talking to; a wrong silent default is worse than one question | The very first run of the very first repo asks a question before doing anything |
 | Manager proposes, never dispatches unasked | Manager fans out all open PRs immediately | An unasked fan-out over 20 open PRs is 20 sessions the user did not agree to | An extra round-trip before any work starts |
+| Transcription built in, authority by extension | Brief-only; or both built in | A verdict the human must retype on GitHub leaks the whole point; approving on their behalf is a different risk class and belongs to the repo, not to Kanna's default | Two similar-looking capabilities separated by a rule the agent has to hold correctly — the restate-before-posting step is what makes it auditable |
 
 ## Non-goals
 
@@ -428,16 +474,38 @@ coordination; reviewing PRs on repositories Kanna has not imported.
   built-in leaves it undefined and asks; the repo answers by `EXTEND.md`; the
   `setup` agent asks it at import. Kanna's own repo answers "every open PR" and
   that extension is written. See "Defaults, extension, and setup".
+- **Whether the child may act on the forge** (owner delegated the call).
+  Transcription in the built-in, authority by extension, merging never. See
+  "What the reviewer may do to the forge".
+- **Naming** (owner delegated the call). Workflows `pr-review` (public) and
+  `pr-review-single` (internal); agents `pr-triage` and `pr-reviewer`.
+  `pr-review-single` says what distinguishes it from the session workflow
+  rather than sharing a near-identical name with it, which is the mistake
+  `specialized-reviewers` / `specialty-review` had to be defended against.
+  The manager is `pr-triage`, not `pr-review-manager`: the owner's word was
+  "manager", but in this repository `-manager` means `task-manager`'s shape —
+  a long-running orchestrator with an event loop — and this agent is a
+  conversational triage session that parks. Naming it for what it does keeps
+  that distinction legible. One word from the owner reverses this.
+- **Whether the diff-tool work is part of this effort** (owner delegated the
+  call). Yes — as phase 4 below, scoped to the minimum, and parallel to phases
+  2-3 rather than behind them.
 
-## Open questions for the owner
+## Still deferred
 
-1. **Should the child be able to act?** The brief-only contract keeps the agent
-   safe and the human in charge. If the owner wants "and then post my review to
-   the PR" or "and then approve it", that is a second contract on the same
-   agent and should be decided before the AGENT.md is written, not bolted on.
-2. **Naming.** `pr-review` / `pr-review-item` / `pr-review-manager` /
-   `pr-reviewer` are placeholders chosen to sit beside `specialized-reviewers` /
-   `specialty-review` without colliding. Worth one minute of the owner's taste.
-3. **The deferred diff-tool work.** Reviewing a 40-file PR in one scroll
-   container is the experience this design hands the human. Is the file list
-   part of this effort, or its own task?
+Named, not scheduled, not blocking anything above, and each independently
+useful on its own:
+
+- the 1 MiB patch cap on the remote/mobile path, and the per-file render skip
+  on desktop — both are "go to GitHub" answers for a large enough PR;
+- a mobile equivalent of this flow. Mobile can read a task's diff today but has
+  no review session, and this design does not give it one.
+
+## Open questions
+
+None outstanding. Every question this design raised has been answered — by the
+owner for scope and the extension rule, and by the author's judgment, at the
+owner's direction, for forge authority, naming, and whether the diff-tool work
+belongs to this effort. What remains is the owner's accept/reject on the design
+as a whole, and `f1c3ca89`'s independent decision about the existing PR
+approval UI, which this design neither uses nor removes.
