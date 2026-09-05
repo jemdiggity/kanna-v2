@@ -1,5 +1,7 @@
 # Self-hosting the Kanna relay
 
+> **Status (2026-09-03): the mobile custom relay endpoint control is hidden in shipped builds.** It exists only in `dev` builds; App Store and TestFlight users cannot reach it, and a relay URL stored on a device before this change is ignored by those builds (the stored value is left alone, so it returns if the control is restored). Self-hosting therefore currently requires building the mobile and desktop clients against your own Firebase project — see "Authentication and subscription boundary" for why. The feature is hidden, not removed: `CUSTOM_RELAY_CONTROL_APP_ENVS` in `apps/mobile/src/relaySettings.ts` is the single switch that restores it.
+
 Kanna's mobile and desktop clients can use `services/relay` at an operator-owned endpoint. A self-hosted relay keeps the same Firebase authentication as Kanna's hosted relays, but it does not require a Kanna Cloud entitlement when entitlement enforcement is left off.
 
 ## Authentication and subscription boundary
@@ -36,10 +38,10 @@ The response should report `"status":"ok"`.
 ## Point both clients at it
 
 1. Stop `kanna-server`, edit its active `server.toml`, set `relay_url = "wss://relay.example.com"`, and restart the desktop app/server. Use the active instance's config path; development worktrees, staging, and production each have a separate file.
-2. On mobile, open Account, find **Relay connection**, enter the same `wss://` URL, and tap **Use custom relay**. The app closes existing relay sockets and reconnects through the custom endpoint immediately.
-3. Confirm the Account sheet says **Using custom relay**. **Reset to default** returns to the relay baked into the mobile environment and reconnects without an app restart.
+2. On mobile, point the build at the relay. **A shipped (staging or production) build has no user-facing control for this**; its relay comes from `relayUrl` in `apps/mobile/src/mobileEnvironments.json` (or `EXPO_PUBLIC_KANNA_RELAY_URL` at build time), so self-hosting means building the app yourself against your own Firebase project and relay. In a `dev` build the runtime control is still present: open Account, find **Relay connection**, enter the same `wss://` URL, and tap **Use custom relay**. The app closes existing relay sockets and reconnects through the custom endpoint immediately.
+3. In a `dev` build, confirm the Account sheet says **Using custom relay**. **Reset to default** returns to the relay baked into the mobile environment and reconnects without an app restart.
 
-The mobile override is stored on that device. It affects relay control sockets, task streams, reconnects, and signed-in push registration; it does not change LAN discovery or the Firebase project configured in the app build.
+The mobile override is stored on that device, and is only honored by builds where the control is shown. It affects relay control sockets, task streams, reconnects, and signed-in push registration; it does not change LAN discovery or the Firebase project configured in the app build.
 
 ## TLS requirement
 

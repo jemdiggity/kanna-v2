@@ -25,7 +25,9 @@ const harness = vi.hoisted(() => ({
   },
   reloadToApplyUpdate: vi.fn().mockResolvedValue(undefined),
   updateMobileCrashContext: vi.fn(),
-  requestMobileAccountDeletion: vi.fn().mockResolvedValue(undefined)
+  requestMobileAccountDeletion: vi.fn().mockResolvedValue(undefined),
+  appEnv: null as string | null,
+  startMobilePushNotifications: vi.fn()
 }));
 
 vi.mock("react-native", async () => {
@@ -70,6 +72,17 @@ vi.mock("./appModel", () => ({
     return harness.currentModel;
   }),
   resolveForceCloud: vi.fn(() => false)
+}));
+
+vi.mock("./lib/expoConfig", () => ({
+  readExpoConfig: () =>
+    harness.appEnv ? { extra: { kanna: { appEnv: harness.appEnv } } } : null
+}));
+
+vi.mock("./lib/notifications/mobilePush", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./lib/notifications/mobilePush")>()),
+  startMobilePushNotifications: (...args: unknown[]) =>
+    harness.startMobilePushNotifications(...args)
 }));
 
 vi.mock("./lib/updates/otaUpdates", () => ({
@@ -145,6 +158,10 @@ beforeEach(() => {
   harness.reloadToApplyUpdate.mockReset().mockResolvedValue(undefined);
   harness.requestMobileAccountDeletion.mockReset().mockResolvedValue(undefined);
   harness.updateMobileCrashContext.mockReset();
+  harness.appEnv = null;
+  harness.startMobilePushNotifications
+    .mockReset()
+    .mockResolvedValue(() => undefined);
 });
 
 afterEach(async () => {
@@ -218,6 +235,7 @@ function createModel() {
     navigator: { tabs: [], utilityActions: [] },
     sessionStore,
     defaultRelayUrl: "wss://relay.default.example",
+    customRelayControlEnabled: true,
     setCustomRelayUrl: vi.fn().mockResolvedValue(undefined),
     setForceCloud: vi.fn(),
     setForeground: vi.fn()
@@ -722,6 +740,55 @@ describe("App component wiring", () => {
     await accountSheet.props.onSaveCustomRelayUrl("wss://relay.next.example");
     expect(model.setCustomRelayUrl).toHaveBeenCalledWith(
       "wss://relay.next.example"
+    );
+  });
+
+  it("hides the relay card and ignores a stored endpoint where the control is hidden", async () => {
+    const { model, sessionStore } = createModel();
+    (model as { customRelayControlEnabled: boolean }).customRelayControlEnabled =
+      false;
+    sessionStore.setCustomRelayUrl("wss://relay.stored.example");
+    const renderer = await mountModel(model);
+    const accountSheet = renderer.root.findByType("AccountSheet");
+
+    expect(accountSheet.props).toMatchObject({
+      customRelayControlEnabled: false,
+      customRelayUrl: null,
+      defaultRelayUrl: "wss://relay.default.example"
+    });
+    // Untouched on disk, so re-enabling the control restores the setting.
+    expect(sessionStore.getState().customRelayUrl)
+      .toBe("wss://relay.stored.example");
+  });
+
+  it("keeps dev push registration gated on the custom relay endpoint", async () => {
+    harness.appEnv = "dev";
+    const { model, sessionStore } = createModel();
+    sessionStore.setAuthState({
+      status: "signedIn",
+      user: {
+        uid: "uid-1",
+        email: "person@example.test",
+        emailVerified: true,
+        cloudAccess: "active"
+      }
+    });
+    sessionStore.ensureMobileDeviceId(() => "mobile-test-device");
+    await mountModel(model);
+
+    // A dev build without a custom relay must not register push.
+    expect(harness.startMobilePushNotifications).not.toHaveBeenCalled();
+
+    await act(async () => {
+      sessionStore.setCustomRelayUrl("wss://relay.dev.example");
+      await flushMicrotasks();
+    });
+
+    expect(harness.startMobilePushNotifications).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deviceId: "mobile-test-device",
+        relayUrl: "wss://relay.dev.example"
+      })
     );
   });
 

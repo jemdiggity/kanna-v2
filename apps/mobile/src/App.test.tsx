@@ -316,6 +316,7 @@ describe("createAppModel", () => {
       },
       authSession: createSignedInAuthSession(),
       options: {
+        customRelayControlEnabled: true,
         relayUrl: "wss://relay.default.example",
         taskIndex: {
           listDesktops: vi.fn().mockResolvedValue([]),
@@ -349,6 +350,55 @@ describe("createAppModel", () => {
     await model.setCustomRelayUrl(null);
     expect(relayClients.at(-1)?.relayUrl).toBe("wss://relay.default.example");
     expect(relayClients[2]?.client.close).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a stored custom endpoint in a build where the control is hidden", async () => {
+    const relayClients: Array<{ relayUrl: string; client: RelayDesktopClient }> = [];
+    const save = vi.fn().mockResolvedValue(undefined);
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          mobileDeviceId: null,
+          customRelayUrl: "wss://relay.home.example",
+          selectedDesktopId: null,
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks"
+        }),
+        save
+      },
+      authSession: createSignedInAuthSession(),
+      options: {
+        customRelayControlEnabled: false,
+        relayUrl: "wss://relay.default.example",
+        taskIndex: {
+          listDesktops: vi.fn().mockResolvedValue([]),
+          listRecentTasks: vi.fn().mockResolvedValue([]),
+          subscribeRecentTasks: vi.fn(() => () => undefined)
+        },
+        createRelayClient: ({ relayUrl }) => {
+          const client = createRelayClientMock();
+          relayClients.push({ relayUrl, client });
+          return client;
+        },
+        bonjourBrowser: createStaticBonjourBrowser([])
+      }
+    });
+
+    await model.initialize();
+
+    expect(model.customRelayControlEnabled).toBe(false);
+    // The stored endpoint never routes traffic...
+    expect(relayClients.length).toBeGreaterThan(0);
+    expect(new Set(relayClients.map(({ relayUrl }) => relayUrl)))
+      .toEqual(new Set(["wss://relay.default.example"]));
+    // ...but it stays on the device, so re-enabling the control restores it.
+    expect(model.sessionStore.getState().customRelayUrl)
+      .toBe("wss://relay.home.example");
+    expect(save).not.toHaveBeenCalledWith(expect.objectContaining({
+      customRelayUrl: null
+    }));
   });
 
   it("parses the force-cloud override from Expo public env", () => {
