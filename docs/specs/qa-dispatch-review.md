@@ -198,7 +198,9 @@ that when either guard is removed.
 Origin is what separates a bounded agent loop from human judgment.
 `RequestRevisionRequest.origin` (`agent`, the default, or `human`) is
 deliberately **not** exposed in the tool catalog — an agent cannot claim human
-origin. The desktop's revision action (⇧⌘S in the diff modal) sends
+origin. The parked-revision recovery composer in
+`apps/desktop/src/components/MainPanel.vue` (section `revision-recovery`,
+gated on `detail.revisionRounds >= detail.revisionLimit`) sends
 `origin: "human"`: it is never refused, and it resets `revision_rounds` to 0,
 handing the agents a fresh budget to satisfy what the human asked for.
 

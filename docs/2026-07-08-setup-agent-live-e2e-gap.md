@@ -1,8 +1,7 @@
 # Setup Agent Live E2E Gap
 
-Phase 3 of `docs/specs/native-review.md` adds a built-in `setup` agent plus
-mock coverage for the entry points: command palette launch and AddRepo import
-launching a normal Kanna setup task.
+The built-in `setup` agent has mock coverage for the entry points: command
+palette launch and AddRepo import launching a normal Kanna setup task.
 
 A deeper end-to-end test that lets a real setup agent inspect a fixture repo,
 answer its interview, write `.kanna/config.json`, and then exercise the
@@ -17,8 +16,8 @@ That test needs a deterministic live-agent harness that can:
   including that the stock answer *selects* a built-in workflow
   (`no-review`, `single-reviewer`, or `specialized-reviewers`) plus
   `flavors.merge` rather than authoring a workflow file;
-- continue through the ordinary `pr` stage, in-app review approval, `approve`,
-  and `merge@github` without touching a real production repository;
+- continue through the ordinary `pr` stage, `approve`, and `merge@github`
+  without touching a real production repository;
 - exercise the incompatible-flavor guards, where the answers stop being
   independent: `pr@push-only` publishes no PR and so must drop the `approve`
   post onto a repo-local workflow instead of selecting a built-in, manual

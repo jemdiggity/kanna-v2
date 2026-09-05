@@ -53,8 +53,7 @@ engine does not control the state of, so the handoff had to move to the engine.
   `task.merge_handoff_missing`. A promised handoff with nothing to hand off is a
   failed approval, not a finished workflow.
 - Workflows whose final stage declares no `approve` post promise no merge side
-  effect and are untouched — the same predicate the desktop's approval UI uses
-  (`pinnedApproveMergePost`).
+  effect and are untouched.
 
 ## What is covered, and where
 
