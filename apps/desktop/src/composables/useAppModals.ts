@@ -661,6 +661,11 @@ export function useAppModals({
     sidebarShellStyle,
     canResizeSidebar,
     currentDiffViewKey,
+    // The per-view diff state record, keyed by `currentDiffViewKey`. Returned
+    // so a caller can drop a view's remembered state — the E2E harness resets
+    // it to exercise a genuine first open, which is when the diff view probes
+    // the worktree for its opening scope instead of reusing the last one.
+    diffViewStates,
     currentDiffViewState,
     updateCurrentDiffViewState,
     restoreTransferredModal,

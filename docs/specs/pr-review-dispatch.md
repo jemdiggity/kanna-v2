@@ -327,6 +327,14 @@ per-task scope still wins, and skips the probe entirely. A remote task view
 keeps `working`: its worktree is on another machine and this probe cannot
 reach it.
 
+Known transient: the probe is asynchronous, so on a first open the toolbar
+shows its pre-probe tab (Working) until the answer arrives, then switches. Only
+one diff load happens — `openView` awaits the probe before loading — so this is
+a highlighted tab over an empty pane for the duration of one git status, not a
+wasted render. Left as is rather than reshaped, because removing it means
+changing what the toolbar renders while undecided, which is UI work with its
+own verification bar. If it reads badly in use, that is the fix to make.
+
 Hardening, not a prerequisite:
 
 **C. Recorded base should outrank branch upstream.** Reorder
@@ -382,11 +390,18 @@ Acceptance criteria (met except where noted):
   view both fall back to working. Covered by the `DiffView opening scope`
   component tests, and by `git_worktree_is_dirty` unit tests for the clean,
   mixed, and untracked-only cases.
-- **Not yet covered: the desktop E2E** that drives ⌘D against a real task whose
-  worktree is forked from a feature branch with `diff_base_ref` set — the
-  end-to-end case this design exists for. The component tests pin the decision
-  and the git tests pin the probe, but nothing yet proves the wiring through a
-  running app. See the E2E note below.
+- Desktop E2E, the end-to-end case this design exists for: a task whose
+  worktree is forked from a feature branch and whose recorded base is what that
+  branch came from opens ⌘D on the branch diff and renders the change; the same
+  task with an uncommitted file opens on the working diff.
+  Writing it found a harness defect worth recording: the suite's
+  `resetSelectedDiffViewState` read `currentDiffViewKey` and `diffViewStates`
+  off `setupState`, where App.vue does not put them — it exposes those members
+  only through `modalLayerController.appModals`. With the key `undefined` the
+  helper's own guard swallowed the miss, so it had silently cleared nothing at
+  all four of its call sites. It now resolves correctly and throws when it
+  cannot reach app state. A reset helper that quietly does nothing is how a
+  suite reports green while testing something other than what it claims.
 - Definition tests, per the existing pattern: both workflows resolve,
   `pr-review-single` is excluded from the listed lineup while still resolving by
   name, and both agents' prompts render. Covered by

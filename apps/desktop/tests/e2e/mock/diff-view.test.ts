@@ -70,16 +70,29 @@ async function openDiffModal(client: WebDriverClient): Promise<void> {
   await client.waitForElement(".diff-view", 5_000);
 }
 
+/**
+ * Drop the selected view's remembered diff state so the next open is a genuine
+ * first open. `currentDiffViewKey` and `diffViewStates` live on the
+ * `useAppModals` return, which App.vue does not destructure — it reaches
+ * setupState only through `modalLayerController`. Resolving the wrong object
+ * silently cleared nothing, so this throws rather than pretending.
+ */
 async function resetSelectedDiffViewState(client: WebDriverClient): Promise<void> {
   await closeDiffModalIfOpen(client);
-  await client.executeSync(
+  const outcome = await client.executeSync<string>(
     `const ctx = window.__KANNA_E2E__.setupState;
-     const keyRef = ctx.currentDiffViewKey;
+     const modals = ctx.modalLayerController?.appModals ?? ctx.appModals ?? ctx;
+     const keyRef = modals.currentDiffViewKey;
      const key = keyRef?.__v_isRef ? keyRef.value : keyRef;
-     if (key && ctx.diffViewStates) {
-       delete ctx.diffViewStates[key];
-     }`
+     const states = modals.diffViewStates;
+     if (!states) return "unreachable:diffViewStates";
+     if (!key) return "unreachable:currentDiffViewKey";
+     delete states[key];
+     return "cleared:" + key;`
   );
+  if (!outcome.startsWith("cleared:")) {
+    throw new Error(`diff view state reset could not reach app state: ${outcome}`);
+  }
 }
 
 async function clickDiffToolbarButton(client: WebDriverClient, label: string): Promise<void> {
@@ -111,6 +124,14 @@ async function getContextToggleState(
     throw new Error("diff context toggle not found");
   }
   return state;
+}
+
+async function activeDiffScope(client: WebDriverClient): Promise<string> {
+  return client.executeSync<string>(
+    `const button = Array.from(document.querySelectorAll(".scope-selector button"))
+       .find((element) => element.classList.contains("active"));
+     return (button?.textContent || "").trim();`
+  );
 }
 
 async function setDiffScope(client: WebDriverClient, scope: "Working" | "Branch"): Promise<void> {
@@ -1264,22 +1285,22 @@ describe("diff view", () => {
     });
 
     try {
-      // No remembered scope: this is a first open.
+      // No remembered scope: this is a first open. The scope is decided by an
+      // async worktree probe, so assert on what actually rendered — the
+      // toolbar briefly shows its pre-probe value.
       await resetSelectedDiffViewState(client);
       await openDiffModal(client);
 
-      const openingScope = await client.executeSync<string>(
-        `const button = Array.from(document.querySelectorAll(".scope-selector button"))
-           .find((element) => element.classList.contains("active"));
-         return (button?.textContent || "").trim();`
-      );
-      expect(openingScope).toBe("Branch");
-
+      // The committed marker is only in the branch range: the working diff of
+      // a clean worktree is empty, so rendering it proves the branch scope was
+      // chosen. Assert on what rendered rather than on the toolbar, which
+      // briefly shows its pre-probe tab.
       const branchText = await waitForDiffText(
         client,
         `return text.includes("review child committed marker");`,
       );
       expect(branchText).toContain("review child committed marker");
+      expect(await activeDiffScope(client)).toBe("Branch");
 
       // An uncommitted change makes the worktree dirty, and a first open then
       // lands on the working scope, as it always has.
@@ -1295,12 +1316,14 @@ describe("diff view", () => {
       await resetSelectedDiffViewState(client);
       await openDiffModal(client);
 
-      const dirtyOpeningScope = await client.executeSync<string>(
-        `const button = Array.from(document.querySelectorAll(".scope-selector button"))
-           .find((element) => element.classList.contains("active"));
-         return (button?.textContent || "").trim();`
+      // The dirty marker is untracked, so it appears only in the working diff;
+      // the branch range stops at HEAD.
+      const workingText = await waitForDiffText(
+        client,
+        `return text.includes("review child dirty marker");`,
       );
-      expect(dirtyOpeningScope).toBe("Working");
+      expect(workingText).toContain("review child dirty marker");
+      expect(await activeDiffScope(client)).toBe("Working");
     } finally {
       await closeDiffModalIfOpen(client);
       await resetSelectedDiffViewState(client);
