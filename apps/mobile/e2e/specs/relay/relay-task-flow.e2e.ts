@@ -161,6 +161,7 @@ interface RelayUi {
   getTaskActionMenuTitle(): Promise<RelayElement>;
   getTaskActionOption(label: string): Promise<RelayElement>;
   getTaskInput(): Promise<RelayElement>;
+  getTaskInputStatus(): Promise<RelayElement>;
   getTaskDetailScreen(): Promise<RelayElement>;
   getTaskDetailActivity(): Promise<RelayElement>;
   getTaskMoreButton(): Promise<RelayElement>;
@@ -476,6 +477,9 @@ function createRelayUi(driver: Browser): RelayUi {
     async getTaskInput() {
       return driver.$(selectors.taskInput);
     },
+    async getTaskInputStatus() {
+      return driver.$(selectors.taskInputStatus);
+    },
     async getTaskDetailScreen() {
       return driver.$(selectors.taskDetailScreen);
     },
@@ -547,6 +551,7 @@ export async function verifyRelayComposerResetJourney(
   ui: Pick<
     RelayUi,
     | "getTaskInput"
+    | "getTaskInputStatus"
     | "getTaskSendButton"
     | "isKeyboardShown"
     | "waitUntil"
@@ -576,6 +581,18 @@ export async function verifyRelayComposerResetJourney(
   const send = await ui.getTaskSendButton();
   await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await send.click();
+
+  const deliveryStatus = await ui.getTaskInputStatus();
+  await deliveryStatus.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await ui.waitUntil(
+    async () =>
+      (await deliveryStatus.getText()).includes("accepted by the desktop"),
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the desktop-accepted task input outcome",
+    },
+  );
 
   let lastValue: string | null = null;
   let lastLabel: string | null = null;

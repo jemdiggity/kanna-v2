@@ -22,7 +22,10 @@ import type {
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../lib/api/client";
-import { isInputHeldByDraft } from "../lib/transports/serverRefusal";
+import {
+  isInputHeldByDraft,
+  ServerRefusalError
+} from "../lib/transports/serverRefusal";
 import type { CompanionEvent } from "@kanna/agent-protocol";
 import { TaskCreationError } from "../lib/api/client";
 import { RepoNotRegisteredError } from "../lib/api/client";
@@ -127,7 +130,7 @@ export interface MobileController {
     taskId: string,
     input: string,
     attachment?: TaskInputAttachment
-  ): Promise<void>;
+  ): Promise<TaskInputSendOutcome>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
   /** Pull the next older chunk of terminal scrollback, if the desktop kept any
@@ -146,6 +149,29 @@ export interface MobileController {
   closeDesktopTask(taskId: string): Promise<void>;
   dispose(): void;
 }
+
+/**
+ * The composer-facing result of a logical task-input submission.
+ *
+ * `delivered` means the desktop server got an acknowledgement from its daemon
+ * boundary; it does not claim that the provider CLI has already processed the
+ * bytes. `uncertain` is deliberately not retryable because the request may
+ * already have reached that boundary.
+ */
+export type TaskInputSendOutcome =
+  | { status: "delivered" }
+  | {
+      status: "queued";
+      reason: "input_held_by_draft";
+      message: string;
+      queuedInputCount: number;
+    }
+  | {
+      status: "failed";
+      reason: "transport_rejected" | "server_rejected";
+      message: string;
+    }
+  | { status: "uncertain"; message: string };
 
 const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 const MARK_READ_DEBOUNCE_MS = 1_000;
@@ -236,6 +262,64 @@ function generateTaskCreationId(): string {
 function isStaleRepoCommandError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /\b409\b|catalog changed|stale/i.test(message);
+}
+
+function nestedServerRefusal(error: unknown): ServerRefusalError | null {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof ServerRefusalError) {
+      return current;
+    }
+    current = "cause" in current
+      ? (current as { cause?: unknown }).cause
+      : null;
+  }
+  return null;
+}
+
+function taskInputOutcomeForError(error: unknown): TaskInputSendOutcome {
+  const refusal = nestedServerRefusal(error);
+  if (refusal) {
+    if (isInputHeldByDraft(refusal)) {
+      return {
+        status: "queued",
+        reason: "input_held_by_draft",
+        message: refusal.message,
+        queuedInputCount: 1
+      };
+    }
+    if (refusal.reason === "delivery_uncertain") {
+      return { status: "uncertain", message: refusal.message };
+    }
+    return {
+      status: "failed",
+      reason: "server_rejected",
+      message: refusal.message
+    };
+  }
+
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "no_selected_desktop"
+  ) {
+    return {
+      status: "failed",
+      reason: "transport_rejected",
+      message: error instanceof Error ? error.message : "No desktop is selected."
+    };
+  }
+
+  return {
+    status: "uncertain",
+    message:
+      error instanceof Error
+        ? error.message
+        : "The connection ended before input delivery was confirmed."
+  };
 }
 
 export function createMobileController(
@@ -3430,7 +3514,11 @@ export function createMobileController(
     async sendTaskInput(taskId, input, attachment) {
       const submittedInput = input.trim();
       if (!submittedInput && !attachment) {
-        return;
+        return {
+          status: "failed",
+          reason: "transport_rejected",
+          message: "Input is empty."
+        };
       }
 
       try {
@@ -3446,24 +3534,20 @@ export function createMobileController(
           activeTaskAgent?.taskId === taskId
         ) {
           activeTaskAgent.subscription.sendInput(submittedInput);
+          return { status: "delivered" };
         } else {
-          await (attachment
+          const result = await (attachment
             ? client.sendTaskInput(taskId, submittedInput, attachment)
             : client.sendTaskInput(taskId, submittedInput));
+          return result ?? { status: "delivered" };
         }
-        setUnownedErrorMessage(null);
       } catch (error) {
-        // A message held behind an unsent line at that terminal is an ordinary
-        // outcome of a healthy session, not a broken connection. Surface what
-        // the desktop said and leave the app's connection state alone —
-        // otherwise one held reply drops the whole app into its error state.
-        if (isInputHeldByDraft(error)) {
-          setUnownedErrorMessage(
-            error instanceof Error ? error.message : "Mobile app request failed"
-          );
-          return;
-        }
-        fail(error);
+        // Input failures belong to the composer. A generic connection error
+        // must not erase the draft or turn a healthy task-specific queue
+        // refusal into a global app failure. Unknown transport failures are
+        // uncertain because the request may already have reached the desktop;
+        // the composer must never retry those automatically.
+        return taskInputOutcomeForError(error);
       }
     },
 

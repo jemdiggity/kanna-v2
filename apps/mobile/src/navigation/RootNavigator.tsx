@@ -46,7 +46,10 @@ import { TaskScreen } from "../screens/TaskScreen";
 import type { TaskQuickReply } from "../screens/taskQuickReplies";
 import { TasksScreen } from "../screens/TasksScreen";
 import { unreadActivityCount } from "../screens/activityTaskOrder";
-import type { MobileController } from "../state/mobileController";
+import type {
+  MobileController,
+  TaskInputSendOutcome
+} from "../state/mobileController";
 import { buildMachineInventory } from "../state/machineInventory";
 import type {
   RepoCheckoutOffer,
@@ -732,14 +735,18 @@ function TaskDetailRoute({
           ? controller.closeTaskPreview(durableTaskId)
           : Promise.resolve();
       }}
-      onSendInput={(input, attachment) => {
+      onSendInput={(input, attachment): Promise<TaskInputSendOutcome> => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (!durableTaskId) {
-          return;
+          return Promise.resolve({
+            status: "failed",
+            reason: "transport_rejected",
+            message: "The task identity is no longer available."
+          });
         }
-        void (attachment
+        return attachment
           ? controller.sendTaskInput(durableTaskId, input, attachment)
-          : controller.sendTaskInput(durableTaskId, input));
+          : controller.sendTaskInput(durableTaskId, input);
       }}
       onSendTerminalInput={(dataB64) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);

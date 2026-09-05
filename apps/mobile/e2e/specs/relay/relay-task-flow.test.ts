@@ -623,8 +623,13 @@ describe("relay composer reset journey", () => {
       }),
       waitForDisplayed: vi.fn(async () => undefined),
     };
+    const deliveryStatus = {
+      getText: vi.fn(async () => "Input accepted by the desktop; agent processing is not confirmed yet."),
+      waitForDisplayed: vi.fn(async () => undefined),
+    };
     const ui = {
       getTaskInput: vi.fn(async () => input),
+      getTaskInputStatus: vi.fn(async () => deliveryStatus),
       getTaskSendButton: vi.fn(async () => send),
       isKeyboardShown: vi.fn(async () => keyboardShown),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {

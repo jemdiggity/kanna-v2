@@ -49,6 +49,7 @@ import type {
   TaskTerminalOutputSource,
   TaskTerminalStatus
 } from "../state/sessionStore";
+import type { TaskInputSendOutcome } from "../state/mobileController";
 import type { TerminalOutputLike } from "../state/terminalOutputBuffer";
 import type {
   CompanionEvent,
@@ -141,7 +142,10 @@ interface TaskScreenProps {
   taskPreviewRouteAvailable?: boolean;
   onOpenTaskPreview?(portName?: string): Promise<TaskPreviewOpenResult>;
   onCloseTaskPreview?(): Promise<void>;
-  onSendInput(input: string, attachment?: TaskInputAttachment): void;
+  onSendInput(
+    input: string,
+    attachment?: TaskInputAttachment
+  ): Promise<TaskInputSendOutcome> | void;
   /** Injected by the attachment tests; production uses the Expo picker. */
   pickAttachment?(source: ImageAttachmentSource): Promise<PreparedImageAttachment | null>;
   onSendTerminalInput?(dataB64: string): void;
@@ -162,6 +166,52 @@ interface TaskScreenProps {
 
 function preserveExpandedTextSelection(): void {
   // Pressability suppresses onPress after a long press when this handler exists.
+}
+
+type ComposerInputStatus = {
+  taskId: string;
+  outcome: TaskInputSendOutcome | { status: "sending" };
+};
+
+function composerInputStatusMessage(
+  outcome: ComposerInputStatus["outcome"]
+): string {
+  switch (outcome.status) {
+    case "sending":
+      return "Sending input to the desktop…";
+    case "delivered":
+      return "Input accepted by the desktop; agent processing is not confirmed yet.";
+    case "queued":
+      return "Input queued behind the desktop’s unsent draft. It will send after that draft is submitted.";
+    case "failed":
+      return `Input was not sent: ${outcome.message} Your text is still here.`;
+    case "uncertain":
+      return `Input delivery is uncertain: ${outcome.message} Check the desktop terminal before retrying. Your text is still here.`;
+  }
+}
+
+function composerInputStatusIconColor(
+  outcome: ComposerInputStatus["outcome"]
+): string {
+  if (outcome.status === "failed" || outcome.status === "uncertain") {
+    return "#FF9A8B";
+  }
+  if (outcome.status === "queued") {
+    return "#F7C66A";
+  }
+  return "#9BB0CC";
+}
+
+function composerInputStatusIcon(
+  outcome: ComposerInputStatus["outcome"]
+): "warning-outline" | "time-outline" | "checkmark-circle-outline" {
+  if (outcome.status === "failed" || outcome.status === "uncertain") {
+    return "warning-outline";
+  }
+  if (outcome.status === "sending" || outcome.status === "queued") {
+    return "time-outline";
+  }
+  return "checkmark-circle-outline";
 }
 
 export function TaskScreen({
@@ -228,6 +278,11 @@ export function TaskScreen({
   const [attachmentErrorMessage, setAttachmentErrorMessage] = useState<
     string | null
   >(null);
+  const [inputDeliveryStatus, setInputDeliveryStatus] =
+    useState<ComposerInputStatus | null>(null);
+  const [inputSendingTaskId, setInputSendingTaskId] = useState<string | null>(
+    null
+  );
   const [isPickingAttachment, setIsPickingAttachment] = useState(false);
   const [isComposerScrollable, setIsComposerScrollable] = useState(false);
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
@@ -394,6 +449,11 @@ export function TaskScreen({
   // desktop hides the control for exactly the same reason: no affordance beats
   // one that quietly loses the photo.
   const canAttachPhoto = !isAgentTask && desktopSupportsAttachments;
+  const isInputSending = inputSendingTaskId === task.id;
+  const activeInputDeliveryStatus =
+    inputDeliveryStatus?.taskId === task.id
+      ? inputDeliveryStatus.outcome
+      : null;
   const composerSnapshotRef = useRef({
     taskId: task.id,
     draftInput,
@@ -408,6 +468,13 @@ export function TaskScreen({
     isComposerDisabled,
     onSendInput
   };
+  const inputSubmissionRef = useRef<{
+    token: symbol;
+    taskId: string;
+    input: string;
+    draftInput: string;
+    attachment: PreparedImageAttachment | null;
+  } | null>(null);
   const composerLayoutRef = useRef({
     contentHeight: TASK_COMPOSER_MIN_HEIGHT,
     deferredContentHeight: null as number | null,
@@ -466,6 +533,9 @@ export function TaskScreen({
       composerLayoutRef.current.deferredContentHeight = null;
       applyComposerContentHeight(deferredContentHeight);
     }
+    if (inputDeliveryStatus?.taskId === task.id) {
+      setInputDeliveryStatus(null);
+    }
     setDraftInput(nextDraftInput);
   };
   const clearDraftInput = () => {
@@ -480,6 +550,9 @@ export function TaskScreen({
   };
   const removeAttachment = () => {
     composerSnapshotRef.current.attachment = null;
+    if (inputDeliveryStatus?.taskId === task.id) {
+      setInputDeliveryStatus(null);
+    }
     setAttachment(null);
     setAttachmentErrorMessage(null);
   };
@@ -497,6 +570,9 @@ export function TaskScreen({
         return;
       }
       composerSnapshotRef.current.attachment = picked;
+      if (inputDeliveryStatus?.taskId === task.id) {
+        setInputDeliveryStatus(null);
+      }
       setAttachment(picked);
     } catch (error) {
       setAttachmentErrorMessage(
@@ -553,20 +629,111 @@ export function TaskScreen({
     const nextInput = input.trim();
     const nextAttachment = snapshot.attachment;
     // A photo on its own is a message: the composed input the agent receives
-    // is the image reference, with or without accompanying text.
-    if ((!nextInput && !nextAttachment) || snapshot.isComposerDisabled) {
+    // is the image reference, with or without accompanying text. One logical
+    // submission may be in flight at a time for this task; the native input
+    // remains editable, but Send cannot duplicate the pending request.
+    if (
+      (!nextInput && !nextAttachment) ||
+      snapshot.isComposerDisabled ||
+      inputSubmissionRef.current?.taskId === snapshot.taskId
+    ) {
       return;
     }
 
-    // Forwarded only when there is one: an input with no photo must reach
-    // every layer below exactly as it always did.
-    if (nextAttachment) {
-      snapshot.onSendInput(nextInput, nextAttachment.payload);
-    } else {
-      snapshot.onSendInput(nextInput);
+    const submission = {
+      token: Symbol("task-input-submission"),
+      taskId: snapshot.taskId,
+      input: nextInput,
+      draftInput: snapshot.draftInput,
+      attachment: nextAttachment
+    };
+    inputSubmissionRef.current = submission;
+    setInputSendingTaskId(snapshot.taskId);
+    setInputDeliveryStatus({
+      taskId: snapshot.taskId,
+      outcome: { status: "sending" }
+    });
+
+    let sendResult: Promise<TaskInputSendOutcome> | void;
+    try {
+      // Forwarded only when there is one: an input with no photo must reach
+      // every layer below exactly as it always did. The callback's promise is
+      // the authoritative boundary for clearing native draft state.
+      sendResult =
+        nextAttachment
+          ? snapshot.onSendInput(nextInput, nextAttachment.payload)
+          : snapshot.onSendInput(nextInput);
+    } catch (error) {
+      sendResult = Promise.reject(error);
     }
-    clearDraftInput();
-    Keyboard.dismiss();
+
+    const finishSubmission = (outcome: TaskInputSendOutcome | void) => {
+      if (inputSubmissionRef.current?.token !== submission.token) {
+        return;
+      }
+      inputSubmissionRef.current = null;
+      setInputSendingTaskId(null);
+      const current = composerSnapshotRef.current;
+      const stillOwnsSubmittedDraft =
+        current.taskId === submission.taskId &&
+        current.draftInput === submission.draftInput &&
+        current.attachment === submission.attachment;
+      if (!stillOwnsSubmittedDraft) {
+        return;
+      }
+
+      const resolvedOutcome: TaskInputSendOutcome =
+        outcome ?? { status: "delivered" };
+      setInputDeliveryStatus({
+        taskId: submission.taskId,
+        outcome: resolvedOutcome
+      });
+      if (
+        resolvedOutcome.status === "delivered" ||
+        resolvedOutcome.status === "queued"
+      ) {
+        clearDraftInput();
+        Keyboard.dismiss();
+      }
+    };
+    const failSubmission = (error: unknown) => {
+      // A callback that rejects without mapping its transport error is still
+      // unsafe to retry: the request may have reached the desktop. Keep the
+      // draft and expose the conservative outcome at the composer.
+      if (inputSubmissionRef.current?.token !== submission.token) {
+        return;
+      }
+      inputSubmissionRef.current = null;
+      setInputSendingTaskId(null);
+      const current = composerSnapshotRef.current;
+      if (
+        current.taskId !== submission.taskId ||
+        current.draftInput !== submission.draftInput ||
+        current.attachment !== submission.attachment
+      ) {
+        return;
+      }
+      setInputDeliveryStatus({
+        taskId: submission.taskId,
+        outcome: {
+          status: "uncertain",
+          message:
+            error instanceof Error
+              ? error.message
+              : "the connection ended before delivery was confirmed"
+        }
+      });
+    };
+
+    // A synchronous void callback is retained for lightweight embedders and
+    // test doubles; production navigation returns the controller promise.
+    // Handling it synchronously also keeps native TextInput clearing
+    // deterministic for callbacks that explicitly guarantee acceptance.
+    if (sendResult === undefined) {
+      finishSubmission(undefined);
+    } else {
+      void sendResult.then(finishSubmission).catch(failSubmission);
+    }
   };
   const sendDraftInput = () => submitInput(composerSnapshotRef.current.draftInput);
   const navigateBack = () => {
@@ -655,6 +822,7 @@ export function TaskScreen({
     setCompanionModalTaskId(null);
     setDiffModalTaskId(null);
     setPreviewModalTaskId(null);
+    setInputDeliveryStatus(null);
     removeAttachment();
     return () => {
       if (!lifecycle.isOpen) return;
@@ -1127,6 +1295,29 @@ export function TaskScreen({
             {attachmentErrorMessage}
           </Text>
         ) : null}
+        {activeInputDeliveryStatus ? (
+          <View
+            accessibilityLiveRegion="polite"
+            accessibilityLabel="Task input delivery status"
+            style={[
+              styles.taskInputStatus,
+              activeInputDeliveryStatus.status === "failed" ||
+              activeInputDeliveryStatus.status === "uncertain"
+                ? styles.taskInputStatusError
+                : null
+            ]}
+            testID={MOBILE_E2E_IDS.taskInputStatus}
+          >
+            <Ionicons
+              color={composerInputStatusIconColor(activeInputDeliveryStatus)}
+              name={composerInputStatusIcon(activeInputDeliveryStatus)}
+              size={16}
+            />
+            <Text style={styles.taskInputStatusText}>
+              {composerInputStatusMessage(activeInputDeliveryStatus)}
+            </Text>
+          </View>
+        ) : null}
         {(task.queuedInputCount ?? 0) > 0 ? (
           <View
             accessibilityLiveRegion="polite"
@@ -1218,7 +1409,7 @@ export function TaskScreen({
             />
           </ScrollView>
           <QuickReplySendControl
-            disabled={isComposerDisabled}
+            disabled={isComposerDisabled || isInputSending}
             gestureScopeKey={task.id}
             hydrated={quickRepliesHydrated}
             replies={quickReplies}
@@ -1607,6 +1798,28 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginBottom: 8,
     paddingHorizontal: 4
+  },
+  taskInputStatus: {
+    alignItems: "center",
+    backgroundColor: "rgba(32, 48, 76, 0.72)",
+    borderColor: "rgba(155, 176, 204, 0.42)",
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9
+  },
+  taskInputStatusError: {
+    backgroundColor: "rgba(92, 34, 31, 0.76)",
+    borderColor: "rgba(255, 154, 139, 0.5)"
+  },
+  taskInputStatusText: {
+    color: "#C6D6EC",
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17
   },
   attachButton: {
     alignItems: "center",
