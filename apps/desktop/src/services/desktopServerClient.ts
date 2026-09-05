@@ -5,6 +5,7 @@ import type { BlockerTaskStates, PipelineItem, Repo, TaskBlocker } from "../type
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import type { TransferImportSummary } from "../stores/transferImportSummary";
 import { invoke } from "../invoke";
+import { localControlAuthHeaders } from "./localControlCredential";
 
 export interface DesktopSnapshotEntry {
   repo: Repo;
@@ -187,7 +188,10 @@ async function requestJson<T>(
       const baseUrl = await desktopServerBaseUrl();
       const response = await fetch(`${baseUrl}${path}`, {
         method,
-        headers: requestBody === undefined ? undefined : { "content-type": "application/json" },
+        headers: {
+          ...(await localControlAuthHeaders()),
+          ...(requestBody === undefined ? {} : { "content-type": "application/json" }),
+        },
         body: requestBody,
       });
       if (response.ok) {

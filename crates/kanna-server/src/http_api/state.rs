@@ -23,7 +23,7 @@ pub(super) struct AuthenticatedHttpInvoke;
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,
-    pub(super) local_task_events_token: Option<String>,
+    pub(crate) local_task_events_token: Option<String>,
     pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,
     pub(super) pairing_persistence_mutation: Arc<Mutex<()>>,
     #[cfg(debug_assertions)]

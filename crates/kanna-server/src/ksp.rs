@@ -48,6 +48,11 @@ pub enum AuthMode {
     LegacyReadOnlyOrPaired,
     AlreadyAuthenticated,
     RequirePairedDevice,
+    /// A browser-originated loopback upgrade. The desktop webview proves this
+    /// desktop's local control credential in its first `auth` frame, because a
+    /// browser cannot attach a header to a WebSocket handshake; nothing else
+    /// reaching loopback from a browser can read that credential.
+    RequireLocalControlToken,
     #[allow(dead_code)]
     RequireCredential,
 }
@@ -2958,6 +2963,10 @@ impl StreamConn {
                 Some(value) => self.paired_device_credential_matches(value),
                 None => false,
             },
+            AuthMode::RequireLocalControlToken => match credential.as_deref() {
+                Some(value) => self.local_control_credential_matches(value),
+                None => false,
+            },
             AuthMode::RequireCredential => match credential.as_deref() {
                 Some(value) => self.credential_matches(value).await,
                 None => false,
@@ -3010,6 +3019,18 @@ impl StreamConn {
                 )
             },
         )
+    }
+
+    /// Whether an in-band credential is this desktop's local control token.
+    /// Compared in constant time, like every other secret on this path.
+    fn local_control_credential_matches(&self, credential: &str) -> bool {
+        if credential.is_empty() {
+            return false;
+        }
+        self.state
+            .local_task_events_token
+            .as_deref()
+            .is_some_and(|expected| constant_time_eq(expected.as_bytes(), credential.as_bytes()))
     }
 
     async fn credential_matches(&self, credential: &str) -> bool {

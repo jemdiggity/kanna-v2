@@ -24,6 +24,14 @@ import {
   setDesktopSnapshotFetcherForTests,
 } from "./desktopServerClient";
 
+/**
+ * The webview is a browser, so `kanna-server` refuses its requests unless they
+ * carry this desktop's local control credential; the Tauri mock hands out this
+ * one. See `services/localControlCredential.ts`.
+ */
+const LOCAL_CREDENTIAL_HEADERS = { Authorization: "Bearer mock-local-control-credential" };
+const JSON_REQUEST_HEADERS = { ...LOCAL_CREDENTIAL_HEADERS, "content-type": "application/json" };
+
 const mocks = vi.hoisted(() => {
   const invoke = vi.fn(async (command: string, args?: { name?: string }) => {
     if (command === "ensure_mobile_server") return undefined;
@@ -82,7 +90,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/snapshot",
       {
         method: "GET",
-        headers: undefined,
+        headers: LOCAL_CREDENTIAL_HEADERS,
         body: undefined,
       },
     );
@@ -112,7 +120,7 @@ describe("desktopServerClient", () => {
     await expect(fetchDesktopTaskDetail("task/parked")).resolves.toEqual(detail);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48121/v1/tasks/task%2Fparked",
-      { method: "GET", headers: undefined, body: undefined },
+      { method: "GET", headers: LOCAL_CREDENTIAL_HEADERS, body: undefined },
     );
   });
 
@@ -143,7 +151,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/tasks",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify(ordinaryRequest),
       },
     );
@@ -152,7 +160,7 @@ describe("desktopServerClient", () => {
       `http://127.0.0.1:48121/v1/tasks/${"0123456789abcdef".repeat(4)}`,
       {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify(ordinaryRequest),
       },
     );
@@ -284,7 +292,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/repos",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify({
           path: "/tmp/transferred-repo",
           name: "Transferred Repo",
@@ -321,7 +329,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/repos/repo%2Fwith%20space/agent-providers",
       {
         method: "GET",
-        headers: undefined,
+        headers: LOCAL_CREDENTIAL_HEADERS,
         body: undefined,
       },
     );
@@ -349,14 +357,14 @@ describe("desktopServerClient", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       "http://127.0.0.1:48121/v1/repos/repo%2Fone/commands",
-      { method: "GET", headers: undefined, body: undefined }
+      { method: "GET", headers: LOCAL_CREDENTIAL_HEADERS, body: undefined }
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       "http://127.0.0.1:48121/v1/repos/repo%2Fone/commands/custom%3Aship%2Frelease/run",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify({ catalogRevision: "catalog-v1" })
       }
     );
@@ -386,7 +394,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/repos/repo%2Fwith%20space/kanna-definitions",
       {
         method: "GET",
-        headers: undefined,
+        headers: LOCAL_CREDENTIAL_HEADERS,
         body: undefined,
       },
     );
@@ -432,7 +440,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/workflows/qa%20candidate",
       {
         method: "GET",
-        headers: undefined,
+        headers: LOCAL_CREDENTIAL_HEADERS,
         body: undefined,
       },
     );
@@ -465,7 +473,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/repos/repo%2Fone/kanna-definitions/agents/review%40strict",
       {
         method: "GET",
-        headers: undefined,
+        headers: LOCAL_CREDENTIAL_HEADERS,
         body: undefined,
       },
     );
@@ -563,7 +571,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/backup",
       {
         method: "POST",
-        headers: undefined,
+        headers: LOCAL_CREDENTIAL_HEADERS,
         body: undefined,
       },
     );
@@ -579,7 +587,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/tasks/task-1/actions/close",
       {
         method: "POST",
-        headers: undefined,
+        headers: LOCAL_CREDENTIAL_HEADERS,
         body: undefined,
       },
     );
@@ -602,7 +610,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/tasks/task%2Fwith%20space/actions/cloud-task-identity",
       {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify({ cloudTaskId: "task-source-stable" }),
       },
     );
@@ -632,7 +640,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/tasks/task%2Fwith%20space/actions/set-workflow",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify({ workflowName: "single-reviewer" }),
       },
     );
@@ -660,7 +668,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/settings/cloud-transfer-identity",
       {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify(identity),
       },
     );
@@ -721,7 +729,7 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/window-workspace/mutations",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: JSON_REQUEST_HEADERS,
         body: JSON.stringify(mutation),
       },
     );

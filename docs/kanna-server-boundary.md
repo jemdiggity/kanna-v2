@@ -208,10 +208,126 @@ what makes a dropped link cost O(delta); an offset only means anything inside
 the `stream_id` generation that produced it, so a daemon reconnect voids it and
 the client falls back to a bounded snapshot.
 
+## The Browser/Local-Client Boundary
+
+A loopback address is not authority. `kanna-server` listens on a port any web
+page the user opens can reach, so "the peer is `127.0.0.1`" describes the
+desktop app, the CLI, an MCP server, a sidecar — and equally a page served by
+`http://attacker.example`, by a task's own dev server, or by the task preview
+proxy. The router used to grant privileged access on that address alone, under
+`CorsLayer::permissive()`, and to promote a browser's WebSocket upgrade of
+`/v1/stream` / `/v2/stream` to empty in-band auth, which no CORS rule constrains
+at all.
+
+`require_local_client_authority` (`http_api/lan_trust.rs`) classifies every
+request on the real listener instead:
+
+- **Tunneled** dispatches (relay, KSP) synthesize their own requests and carry
+  their own authenticated marker. They never pass through this middleware.
+- **Browser-originated** — the request carries an `Origin` or any `Sec-Fetch-*`
+  header. Both are forbidden header names: a browser sets them itself and page
+  script can neither suppress nor forge them. Such a request must present this
+  desktop's **local control credential** (`Authorization: Bearer <token>` or
+  `X-Kanna-Local-Token`), or a verified paired device secret. Otherwise it is
+  refused with 403, on every route, before any handler runs.
+- **Local process** — no `Origin`, no `Sec-Fetch-*`. Keeps the loopback
+  authority it has always had. A process running as the user already holds it:
+  it can read the credential file, the database and every worktree, so
+  requiring a token from the CLI, the MCP server, the sidecars and every
+  running agent would be a migration, not a boundary.
+- **Loopback `Host` validation.** DNS rebinding is the one browser attack that
+  leaves no `Origin` to inspect: a page at `http://attacker.example` re-resolves
+  its own name to `127.0.0.1`, so its fetches are *same-origin* and carry
+  neither `Origin` nor a cross-site `Sec-Fetch-Site`. What it cannot rewrite is
+  the `Host` it must send. A loopback caller must therefore address this server
+  by an IP literal or `localhost`; a DNS name is refused.
+- **A CORS preflight** carries no credential and grants none, so it passes
+  through to the CORS layer. The request it precedes is classified like any
+  other.
+
+The **local control credential** is the 32-byte hex token in
+`task-events.token`, beside the pairing store, mode `0600`. It is the same file
+the account-wide task-event feed already used; it is now the general local
+control credential. Task agents receive its path as
+`KANNA_TASK_EVENTS_TOKEN_PATH`.
+
+**CORS headers are not authorization.** `CorsLayer::permissive()` is replaced
+by an explicit mirrored-origin layer, but it carries no security weight and
+never did: it tells a compliant browser what it may read, and says nothing to a
+WebSocket upgrade, a `no-cors` request, or a rebound same-origin one. The origin
+is mirrored rather than allowlisted because the desktop webview's own origin is
+a moving target (`tauri://localhost` packaged, the Vite origin under `kd dev
+up`) and an allowlist there can only ever break the app; authority comes from
+the credential, and a mirrored origin grants nothing a rejected request could
+use.
+
+The layer stays *inside* the authorization middlewares, where it already was.
+`tower_http` short-circuits every `OPTIONS` request as a preflight, so a CORS
+layer mounted outside them would answer `OPTIONS` on every route with no
+authorization at all — and deny-by-default for every method, preflight
+included, is the contract
+`every_registered_http_route_denies_unpaired_lan_by_default` pins. The cost is
+that a refusal carries no CORS headers, so the webview sees a network error
+rather than the 403 text; the server logs the reason at `warn`, and the client
+logs a credential it could not read.
+
+### The KSP upgrades
+
+A browser cannot attach a header to a WebSocket handshake, so `/v1/stream` and
+`/v2/stream` are admitted past the header check and authenticate in band. A
+browser-originated loopback upgrade gets `AuthMode::RequireLocalControlToken`:
+its first `auth` frame must carry the local control credential. Non-browser
+loopback upgrades keep `AuthMode::AllowEmpty`; non-loopback upgrades keep the
+paired-device rules unchanged.
+
+### Who is affected
+
+Nothing that was working stops working:
+
+| Client | Shape | Effect |
+|---|---|---|
+| `kanna-cli`, `kanna-mcp`, agents | no `Origin`/`Sec-Fetch-*`, `Host` is an address | unchanged |
+| `task-transfer` and other sidecars | same | unchanged |
+| Paired mobile over LAN | React Native `fetch`, no browser headers, device secret | unchanged |
+| Authenticated relay dispatch | tunneled | unchanged |
+| Desktop webview (packaged and `kd dev up`) | a browser | now sends the credential on every `fetch` and in its KSP `auth` frame |
+| A page the user opened, a task's dev server, the preview proxy | a browser without the credential | refused |
+
+The desktop gets the credential from the Tauri command `local_control_credential`,
+which reads the server's own credential file; `apps/desktop/src/services/localControlCredential.ts`
+caches it for `desktopServerClient`, `desktopTaskActions`, the DEV-E2E SQL route
+and the shared stream client.
+
+### Residual limitations
+
+- A browser predating the `Sec-Fetch-*` set (Safari before 16.4) issuing a
+  *no-cors* cross-origin GET sends neither `Origin` nor fetch metadata, so it is
+  indistinguishable from a local process. The same-origin policy still makes
+  that response unreadable to the page, and every state-changing route is
+  non-GET, which a browser always accompanies with `Origin`. Rebinding, the way
+  such a page would make itself same-origin and readable, is refused by the
+  `Host` check regardless of browser vintage.
+- A caller may omit `Host` entirely — hyper serves such a request rather than
+  refusing it — but a browser cannot, so that only leaves a local process in the
+  class it was already in.
+- A process already running as the user can read the credential file. This is a
+  boundary against browsers, not against local process authority, which Kanna
+  does not have and cannot obtain.
+- The task preview proxy (`http_api/preview.rs`) is a separate listener with its
+  own enter-secret and cookie boundary; it is not covered here.
+
+Boundary behaviour is pinned by `crates/kanna-server/tests/local_client_boundary_http.rs`,
+which drives a launched `kanna-server` process over a real socket — hostile
+`Origin`, rebinding `Host`, missing and invalid credentials, allowed callers,
+preflight, and a genuine WebSocket handshake.
+
 ## v1 LAN Surface
 
 HTTP authorization is enforced by default at the router, for every method
-(including GET/HEAD and OPTIONS). Direct loopback clients retain local access;
+(including GET/HEAD and OPTIONS). Direct loopback clients retain local access
+only as *local process* clients — a browser reaching the same address is
+classified and refused separately, see
+[The Browser/Local-Client Boundary](#the-browserlocal-client-boundary);
 LAN callers must present `X-Kanna-Device-Id` and `X-Kanna-Device-Secret` verified
 against the pairing store. Authenticated relay invokes retain their explicit
 internal authority; an unauthenticated tunnel cannot inherit its synthesized

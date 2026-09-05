@@ -87,7 +87,12 @@ describe("requestRevision", () => {
     expect(result).toBe(false);
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:48120/v1/tasks/task-1/actions/request-revision", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // The webview is a browser: `kanna-server` refuses a browser-originated
+      // request that does not carry this desktop's local control credential.
+      headers: {
+        Authorization: "Bearer mock-local-control-credential",
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
         targetStage: "in progress",
         summary: "needs changes",
