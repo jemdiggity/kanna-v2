@@ -677,6 +677,45 @@ describe("QA workflow assets", () => {
     expect(dispatcher).not.toContain("Task spec:");
   });
 
+  it("keeps the dispatched PR reviewers off a required task-spec artifact", () => {
+    const reviewer = readRepoPhrases(".kanna/agents/pr-reviewer/AGENT.md");
+    const triage = readRepoPhrases(".kanna/agents/pr-triage/AGENT.md");
+    const scopeAnswer = readRepoPhrases(".kanna/agents/pr-triage/EXTEND.md");
+
+    // These two read a *reviewed* task's terms the same way the deciding
+    // reviewers above do: the original prompt plus the durable delivered
+    // directives, looked up by the id in the PR's `Kanna-Task:` trailer. The
+    // task usually lives on another machine, so the lookup needs `machine_id`.
+    for (const [name, body] of [
+      ["pr-reviewer", reviewer],
+      ["pr-triage/EXTEND.md", scopeAnswer],
+    ] as const) {
+      expect(body, name).toContain("kanna_get_task");
+      expect(body, name).toContain("kanna_task_inputs");
+      expect(body, name).toContain("machine_id");
+    }
+
+    // A committed `docs/task-specs/<id>.md` was retired by owner direction.
+    // Current tasks legitimately carry a trailer and no such file, so a
+    // reviewer that required one would flag every present-day Kanna PR.
+    for (const [name, body] of [
+      ["pr-reviewer", reviewer],
+      ["pr-triage", triage],
+      ["pr-triage/EXTEND.md", scopeAnswer],
+    ] as const) {
+      expect(body, name).not.toContain("missing spec");
+      expect(body, name).not.toContain("stale spec");
+      expect(body, name).not.toContain("read `docs/task-specs/");
+      expect(body, name).not.toContain("has a task spec at");
+    }
+
+    // pr-reviewer may still mention the file, but only to disclaim it.
+    expect(reviewer).toContain("Never require one");
+    expect(reviewer).toContain("never make its absence a finding");
+    expect(triage).not.toContain("docs/task-specs/");
+    expect(scopeAnswer).not.toContain("docs/task-specs/");
+  });
+
   it("keeps both deciding reviewers inside the original task scope", () => {
     for (const name of ["review", "qa-dispatcher"]) {
       const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);

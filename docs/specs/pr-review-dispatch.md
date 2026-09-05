@@ -188,11 +188,12 @@ one question. It resolves into three obligations:
 **Exercised now.** `.kanna/agents/pr-triage/EXTEND.md` exists in this
 repository and says Kanna reviews every open PR, with the two repo-specific
 ranking rules that follow from Kanna being a distributed system that ships as
-one signed app. It is committed ahead of the agent it extends and is inert
-until phase 1: an `EXTEND.md` whose base agent does not resolve is skipped by
-`agent_optional`, and a directory holding only an `EXTEND.md` for a
-non-built-in name never enters the `agents()` listing, so it is not an error
-and not a listing.
+one signed app. Phase 1 ships the built-in `pr-triage` it extends, so it is
+live: the extension layers onto the resolved agent. (It was originally
+committed ahead of that agent, which was safe because an `EXTEND.md` whose base
+agent does not resolve is skipped by `agent_optional`, and a directory holding
+only an `EXTEND.md` for a non-built-in name never enters the `agents()`
+listing — so it was neither an error nor a listing.)
 
 It did surface one latent assumption, now fixed:
 `packages/core/src/workflow/qa-assets.test.ts` treated every directory under

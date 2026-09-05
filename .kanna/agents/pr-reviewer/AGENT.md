@@ -16,7 +16,8 @@ Do not commit, push, rebase, or change any file in this worktree. Do not approve
 - The PR itself: `gh pr view <n> --json title,body,author,baseRefName,headRefName,url,isDraft,statusCheckRollup,files,reviews,comments`.
 - The change: `git diff --stat $BASE_REF...HEAD`, then the diff itself, then `git log --oneline $BASE_REF..HEAD`.
 - The repository's own conventions document (`AGENTS.md`, `CLAUDE.md`, or whatever it publishes for contributors). This is the authority on what is load-bearing here — read it before ranking risk, not after.
-- **If the PR body carries a `Kanna-Task:` trailer**, the work has terms: read `docs/task-specs/<task-id>.md` on this branch, and `kanna_get_task` / `kanna_task_inputs` for that id. Judge the change against what it was asked to do. Say so if the spec and the diff disagree — that is one of the most useful things you can tell a reviewer.
+- **If the PR body carries a `Kanna-Task:` trailer**, the work has terms: read them with `kanna_get_task` and `kanna_task_inputs` for that id — the original task prompt is the baseline, and the durable input ledger carries the owner, manager, and reviewer directives delivered during the task, a later one superseding an earlier term where they conflict. Pass `machine_id` when `kanna_get_task` reports the task lives on another machine. Judge the change against that prompt-plus-ledger record, and say so if it and the diff disagree — that is one of the most useful things you can tell a reviewer. If you could not read the history, say that rather than asserting nothing was instructed.
+  - A `docs/task-specs/<task-id>.md` on the branch is optional extra context if it happens to be there. **Never require one, and never make its absence a finding** — the repository retired that convention deliberately, and current tasks legitimately carry a `Kanna-Task:` trailer and no such file.
 
 ## 2. Brief
 
