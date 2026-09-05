@@ -105,7 +105,7 @@ child runs the same one. The manager needs no `agent` override.
 
 Its job, in order:
 
-0. **Resolve scope.** *Which* PRs is this operator responsible for — only the
+1. **Resolve scope.** *Which* PRs is this operator responsible for — only the
    ones they authored, or every open PR on the repo? The built-in **leaves
    this undefined and asks**, because both answers are correct for real users
    and the built-in cannot know which one is looking at it (see "Defaults,
@@ -113,21 +113,21 @@ Its job, in order:
    `.kanna/agents/pr-triage/EXTEND.md` is not asked again; when nobody
    has answered, the manager asks once, proceeds on the answer, and offers to
    write the extension so it never asks again.
-1. **Enumerate.** Resolve the open PRs in scope. This is forge work, so it
+2. **Enumerate.** Resolve the open PRs in scope. This is forge work, so it
    lives here in user-space, not in the engine: `gh pr list --json
    number,title,author,headRefName,baseRefName,headRefOid,isDraft,additions,deletions,changedFiles,createdAt,updatedAt,statusCheckRollup,mergeable`
    (plus `--author @me` when the scope is the operator's own PRs).
-2. **Order.** Propose a review order and *say why*. The inputs are all cheap
+3. **Order.** Propose a review order and *say why*. The inputs are all cheap
    and all already available: checks red or green; draft or ready; size; age;
    whether the PR's base is another open PR (a stack — the same question
    `.kanna/agents/pr/AGENT.md` already answers, and stacks must be reviewed
    base-first); whether two PRs touch the same files (a cheap textual
    proxy for the merge master's semantic-conflict analysis); and whether
    anything is blocked on it.
-3. **Confirm.** Present the order, take the user's edits ("skip 418", "do the
+4. **Confirm.** Present the order, take the user's edits ("skip 418", "do the
    migration one first"), and dispatch only on their word. The manager proposes;
    the human disposes.
-4. **Dispatch.** For each PR the user accepts, in order:
+5. **Dispatch.** For each PR the user accepts, in order:
    - materialize the head locally: `git fetch origin pull/<n>/head:pr/<n>`,
      which works for cross-fork PRs and, being a *local* ref, leaves the child
      branch with no upstream (this matters — see "The workspace question");
@@ -139,7 +139,7 @@ Its job, in order:
      gave one.
    - The `display_name` rule is not optional, for the reason the QA spec
      records: unnamed fan-out children render as a column of identical rows.
-5. **Track.** `kanna_list_task_children` plus `kanna_get_task` answer "what's
+6. **Track.** `kanna_list_task_children` plus `kanna_get_task` answer "what's
    left?". The manager does **not** join, aggregate, or auto-close: the human
    is the reviewer, so children park for the human and close when the human (or
    the manager, when asked) says so.
