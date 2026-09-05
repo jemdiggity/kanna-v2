@@ -67,7 +67,7 @@ fn load_stage_identity(db: &Db, source_task_id: &str) -> Result<LoadedStageIdent
 /// the task's real committed tip before anything else reads it. A revision
 /// round whose commit landed on a workspace the field no longer named used to
 /// be dropped by the next fork, and the next reviewer re-raised the same
-/// finding — see `work_tip` and `docs/task-specs/48a0da30.md`.
+/// finding — see `work_tip` and its regression tests.
 fn load_stage_transition_source(
     db: &Db,
     identity: LoadedStageIdentity,

@@ -11,9 +11,12 @@ You run in a fresh review worktree forked from the source branch's committed tip
 
 ## Scope Discipline
 
-The task under review is the one its committed spec states (see step 1); the only thing being judged is this branch's diff against `$BASE_REF`, on those terms — and on a later round, the part of it this round changed (step 1).
+The task under review is defined by its original task prompt plus durable owner,
+manager, and reviewer directives (see step 1); the only thing being judged is
+this branch's diff against `$BASE_REF`, on those terms — and on a later round,
+the part of it this round changed (step 1).
 
-Block the branch only for a defect **caused by this diff** that genuinely blocks: wrong behavior, a regression, a security or data-integrity defect, a broken cross-process contract, or missing coverage for behavior this diff introduces. Not for work the spec does not ask for, not for the design a reviewer would have chosen, and not for problems the change merely sits near. Anything else goes in your pass summary under `Follow-ups (non-blocking):`, one line each, for the human to triage. Do not create follow-up tasks for them.
+Block the branch only for a defect **caused by this diff** that genuinely blocks: wrong behavior, a regression, a security or data-integrity defect, a broken cross-process contract, or missing coverage for behavior this diff introduces. Not for work the original task does not ask for, not for the design a reviewer would have chosen, and not for problems the change merely sits near. Anything else goes in your pass summary under `Follow-ups (non-blocking):`, one line each, for the human to triage. Do not create follow-up tasks for them.
 
 Carry at most five blocking findings into a revision, most important first. If a specialty produced more, the branch's real problem is one of the top few — the rest are follow-ups.
 
@@ -94,19 +97,11 @@ Keep this child-verdict ledger separate from `$PREV_MAIN_RESULT`: the ledger is
 the recorded specialty history, while `$PREV_MAIN_RESULT` is the implementing
 agent's separate declined-finding signal.
 
-Then establish the task's terms. **Review against the committed spec, not
-against your reading of the prompt.** The branch carries
-`docs/task-specs/$KANNA_TASK_ID.md`, written by the implementer and committed
-with the work: goal, scope, constraints, what makes the work done, and the
-mid-task directives that changed any of those. Read it before you select
-specialties, and brief every child with it — they inherit your reading of the
-terms. The spec is short by design: judge it on existence, honesty, and
-currency, never on length.
-
-`kanna_task_inputs` is the audit trail behind the spec, not a second statement
-of intent. Messages delivered into the implementer's live session — an owner
-changing their mind mid-task, a manager relaying a directive — were written to
-a PTY your fresh session never had.
+Then establish the task's terms from the original task prompt supplied in
+`$TASK_PROMPT` and the complete durable delivery history. Messages delivered
+into the implementer's live session — including owner, manager, and reviewer
+directives that refined or superseded the prompt — were written to a PTY your
+fresh session never had.
 
 ```
 kanna_task_inputs {"task_id": "$KANNA_TASK_ID"}
@@ -115,21 +110,20 @@ kanna_task_inputs {"task_id": "$KANNA_TASK_ID"}
 `kanna_get_task` reports `deliveredInputCount` for the same reason: a non-zero
 count means an instruction history exists. Each record carries the message, the
 time, the stage it landed on, and a caller-declared `source` (`operator`,
-`manager`, `notify`, `unspecified`). Use it to check that the spec is honest:
-every directive the spec cites was really delivered, and no directive that
-changed the terms is missing from it. Where the spec and the ledger disagree,
-name both records and carry the discrepancy as a finding — do not silently
-substitute your own reading of either. Never assert that something was not
-instructed, or that a claim in the implementer's summary is unsupported,
-without having read this record. A directive in the record outranks your own
-reading of the original prompt. If the surface is unavailable on the connected
-server, say you could not read the instruction history and make no claim about
-it; that is not the same answer as "there was none". CLI fallback:
+`manager`, `notify`, `unspecified`). Read the messages in order and treat a
+later directive as superseding an earlier term when they conflict. Assess the
+branch against the resulting prompt-plus-ledger record; do not silently
+substitute a dispatcher's preferred interpretation. Never assert that something
+was not instructed, or that a claim in the implementer's summary is
+unsupported, without having read this record. If the surface is unavailable on
+the connected server, say you could not read the instruction history and make
+no claim about it; that is not the same answer as "there was none". No separate
+committed task document is required or may be invented. CLI fallback:
 `kanna-cli task inputs --task-id "$KANNA_TASK_ID"`.
 
-A missing spec, or one the code has outgrown — behavior in this branch that its
-terms do not cover — is itself a blocking finding, because the next reviewer
-will believe it. Carry it into the revision alongside the code findings.
+The durable input ledger is the audit record; terminal bytes alone are not a
+record. Carry any disagreement with a delivered directive into the revision
+alongside code findings, rather than inventing a replacement task document.
 
 - **Full branch** — `$BASE_REF..HEAD`, everything this task has changed. Always read it: it is the context every finding is judged in.
 - **This round** — the commits added since the previous review round. On the first round the two ranges are the same.
@@ -195,7 +189,7 @@ Record your current branch (`git rev-parse --abbrev-ref HEAD`); child tasks fork
 ```
 kanna_create_task {
   "display_name": "<Specialty> review: <subject> (round <n>)",
-  "prompt": "<Specialty> review (round <n>) dispatched from task $KANNA_TASK_ID.\nBranch under review: <current branch> (your worktree is already forked at its tip).\nChanges to review: <previous review point sha>..HEAD (review round <n>).\nFull branch context: $BASE_REF..HEAD.\nTask spec: docs/task-specs/<the reviewed task's id>.md in your worktree — the task's terms, including any mid-task directives. Judge the change against it.\nOriginal task: <one-paragraph summary of $TASK_PROMPT>.\nFocus: <what this specialty must scrutinize in this particular change>.",
+  "prompt": "<Specialty> review (round <n>) dispatched from task $KANNA_TASK_ID.\nBranch under review: <current branch> (your worktree is already forked at its tip).\nChanges to review: <previous review point sha>..HEAD (review round <n>).\nFull branch context: $BASE_REF..HEAD.\nReviewed task id: <the reviewed task's id>. Read its durable delivered-input history with kanna_task_inputs for that id; do not use your child task id for that lookup.\nOriginal task: <one-paragraph summary of $TASK_PROMPT>. Assess the change against the original task prompt plus the reviewed task's delivered owner, manager, and reviewer directives.\nFocus: <what this specialty must scrutinize in this particular change>.",
   "workflow_name": "specialty-review",
   "agent": "<specialty agent name, e.g. review-security>",
   "base_ref": "<current branch>",
@@ -203,7 +197,7 @@ kanna_create_task {
 }
 ```
 
-Give both ranges: the child judges the changes to review but must read the full branch to judge them. Write the spec path out with the reviewed task's own id — a child expanding `$KANNA_TASK_ID` resolves it to its own. On the first round say `$BASE_REF..HEAD` for both rather than inventing a marker. Create all children before waiting on any of them so they review in parallel.
+Give both ranges: the child judges the changes to review but must read the full branch to judge them. Pass the reviewed task's own id in the child prompt so it can read that task's durable input history — a child expanding `$KANNA_TASK_ID` resolves it to its own. On the first round say `$BASE_REF..HEAD` for both rather than inventing a marker. Create all children before waiting on any of them so they review in parallel.
 
 #### Naming rule
 

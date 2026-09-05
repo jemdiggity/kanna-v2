@@ -43,7 +43,6 @@ a reference below.
 | Server boundary and v1 LAN API surface | `docs/kanna-server-boundary.md` |
 | Mobile app, OTA operations | `apps/mobile/`, `docs/specs/mobile-ota-updates.md` |
 | Feature specs (merge master, task graph, QA dispatch, RCs) | `docs/specs/` |
-| What a task means, and what reviewers judge against | `docs/specs/task-spec-artifact.md` |
 | Every DB table and migration | `crates/kanna-server/src/db/mod.rs` |
 | Agent provider registry | `crates/kanna-agent-protocol/src/providers.rs` |
 | Built-in workflows and agents | `.kanna/workflows/*.json`, `.kanna/agents/*/AGENT.md` |
@@ -341,21 +340,15 @@ delivery that already reached the PTY. Add a new injected-message kind to this
 record where it is delivered, not by diffing terminals. See
 `docs/kanna-server-boundary.md`.
 
-**A task's terms live in its committed spec.** The delivered-input ledger is an
-audit trail, not a statement of intent: snippets do not compose into a
-contract, and a reviewer left to reconstruct intent from the stage prompt plus
-raw directives diverges from reality as directives accumulate. The implement
-agent therefore writes `docs/task-specs/<task-id>.md` early, seeded from the
-task prompt (goal, scope, constraints, what makes the work done), and updates
-it in the same commit as the work whenever a mid-task directive, reviewer
-feedback, or a declined finding changes the terms. `commit` commits it, and
-`review`/`qa-dispatcher` judge the branch against it, using `kanna_task_inputs`
-to verify the spec honestly reflects what was delivered — a disagreement is a
-finding, never a licence to substitute a reviewer's own reading. Proportional
-by design: a three-line spec is a correct spec, and length is never a finding;
-absence, dishonesty, and staleness are. This is a convention carried entirely
-by agent definitions — no engine, server, or workflow JSON knows the file
-exists. See `docs/specs/task-spec-artifact.md`.
+**Task terms come from the prompt and durable delivered directives.** The
+original task prompt is the baseline. `kanna_task_inputs` is the durable,
+full-text record of owner, manager, and reviewer directives delivered to the
+running session; read it in order when later input may have refined or
+superseded the prompt. Reviewers assess the branch against that combined
+record, and must not require or invent a separate committed documentation
+artifact. The input ledger remains an audit trail of what was delivered, not
+terminal output or an excuse to claim that no instruction existed without
+reading it. See `docs/kanna-server-boundary.md`.
 
 **The composer is not session output.** A CLI's composer line — Claude's `❯`,
 Codex's `›` — is where somebody is *about* to speak, and the Claude CLI fills it
@@ -410,10 +403,10 @@ Run the real app (`./kd mobile run --simulator` with the iOS Simulator for mobil
 bare `expo start`; `./kd dev up` for desktop), exercise the changed states and
 relevant accessibility variants such as Reduce Motion for animation work,
 capture and inspect screenshots, and summarize that verification in the PR
-description. Save artifacts under the in-worktree, gitignored
-`docs/task-specs/<task>-screenshots/`, never commit the binaries, and treat the
-written PR/task-spec description as the durable record after the worktree is
-removed. Unit and component tests do not substitute for a render.
+description or task result. Save artifacts under the in-worktree, gitignored
+`docs/task-screenshots/<task>-screenshots/`, never commit the binaries, and
+treat the written PR description or task result as the durable record after the
+worktree is removed. Unit and component tests do not substitute for a render.
 For UI feel or interaction changes (animation, gesture, or dynamic layout), simulator verification is necessary but not sufficient: pause before review for human on-device testing, and iterate owner feedback in the same task so polish lands in as few PRs as possible.
 
 ## Coding Style

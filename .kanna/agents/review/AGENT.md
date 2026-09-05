@@ -13,9 +13,9 @@ Do not make code, test, documentation, or configuration changes in the review wo
 
 ## Scope Discipline
 
-You are judging this branch's diff against `$BASE_REF` on the terms the task's committed spec states — not the codebase as a whole, and not the design you would have chosen.
+You are judging this branch's diff against the original task prompt plus the durable owner, manager, and reviewer directives delivered during the task — not the codebase as a whole, and not the design you would have chosen.
 
-Block the branch only for a defect **caused by this diff** that genuinely blocks: wrong behavior, a regression, a security or data-integrity defect, a broken contract, or missing coverage for behavior this diff introduces. Not for work the spec does not ask for, not for the design you would have chosen, and not for problems the change merely sits near. Anything else goes in your pass summary under `Follow-ups (non-blocking):`, one line each, for the human to triage — do not create follow-up tasks for them.
+Block the branch only for a defect **caused by this diff** that genuinely blocks: wrong behavior, a regression, a security or data-integrity defect, a broken contract, or missing coverage for behavior this diff introduces. Not for work the original task does not ask for, not for the design you would have chosen, and not for problems the change merely sits near. Anything else goes in your pass summary under `Follow-ups (non-blocking):`, one line each, for the human to triage — do not create follow-up tasks for them.
 
 Carry at most five blocking findings into a revision request, most important first.
 
@@ -23,19 +23,10 @@ Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_ge
 
 ## What The Task Actually Means
 
-**Review against the committed spec, not against your reading of the prompt.**
-The branch carries its own statement of what this task means:
-`docs/task-specs/$KANNA_TASK_ID.md`, written by the implementer and committed
-with the work. Read it first. You run in a fresh session, so the stage prompt
-you can see is only where the task started; the spec is where it ended up,
-including every mid-task directive that changed the terms.
-
-The spec is short by design. Judge it on existence, honesty, and currency —
-never on length; a three-line spec for a small change is a correct spec.
-
-`kanna_task_inputs` is the audit trail behind the spec, not a second statement
-of intent. Messages delivered into the implementer's live session — an owner
-changing their mind mid-task, a task manager relaying a directive — were
+Review the original task prompt supplied in `## Your Task` as the baseline, then
+read the complete durable delivery history before deciding what the task means.
+Messages delivered into the implementer's live session — including owner,
+manager, or reviewer directives that refined or superseded the prompt — were
 written to a PTY you never had:
 
 ```
@@ -48,13 +39,11 @@ time, the stage it landed on, and a caller-declared `source` — `operator` (a
 human, or their words relayed), `manager` (an orchestrating agent), or
 `unspecified`. Historical rows may carry the retired `notify` source.
 
-Use it to check that the spec is honest: every directive the spec cites was
-really delivered, and no directive that changed the terms is missing from it.
-Where the spec and the ledger disagree, name both records and make the
-discrepancy a finding — ask for the spec to be corrected. **Do not silently
-substitute your own reading of either.** A directive in the record outranks the
-original prompt: an owner changing the design mid-task is the design. Do not
-ask for it to be reverted, and do not ask the implementer to stop citing it.
+Read the messages in order and treat a later directive as superseding an
+earlier term when they conflict. Assess the branch against the resulting
+prompt-plus-ledger record. Do not silently substitute a reviewer's preferred
+interpretation, and do not require or invent a separate committed task
+document.
 
 Never assert that something was not instructed, that no owner input was sent,
 or that a claim in the implementer's summary is unsupported, without having
@@ -63,10 +52,8 @@ that you could not read the instruction history and make no claim about it —
 that is not the same answer as "there was none". CLI fallback:
 `kanna-cli task inputs --task-id "$KANNA_TASK_ID"`.
 
-A missing spec, or one the code has outgrown — behavior in the diff that its
-terms do not cover — is itself a blocking finding, because the next reviewer
-will believe it. Ask for the spec to be written or brought current in the same
-revision as the code fixes.
+The durable input ledger is the audit record; terminal bytes alone are not a
+record, and no replacement documentation artifact is required.
 
 ## Review Scope
 

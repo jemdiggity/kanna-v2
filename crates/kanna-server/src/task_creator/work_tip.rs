@@ -10,10 +10,10 @@
 //! reviewer reads code without the previous round's fix and re-raises the
 //! identical finding, so the revision budget burns without converging.
 //!
-//! Observed live on task `7a38cc18` (2026-08-21): a resumed revision rewound
-//! `pipeline_item.branch` to the implement workspace while each round's commit
-//! landed on the reviewer's fork, and three consecutive review forks were cut
-//! from the same pre-revision base. See `docs/task-specs/48a0da30.md`.
+//! Observed live on 2026-08-21: a resumed revision rewound `pipeline_item.branch`
+//! to the implement workspace while each round's commit landed on the reviewer's
+//! fork, and three consecutive review forks were cut from the same pre-revision
+//! base. The regression is covered by the tests in this module.
 //!
 //! Which branch holds the tip is therefore a question for git, not for the run
 //! records: the engine cannot see where an agent `cd`s. Every stage
