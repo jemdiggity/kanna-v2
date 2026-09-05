@@ -6,6 +6,7 @@ export interface ScriptedAgentOptions {
   terminalKeyTraceFile?: string;
   terminalPasteSemantics?: boolean;
   tracePartialInput?: boolean;
+  traceTerminalKeys?: boolean;
   snapshotHistory?: {
     sentinel: string;
   };

@@ -269,6 +269,10 @@ export interface MobileRelayHarness {
   };
   taskOrdering: RelayTaskOrderingFixture;
   terminalEvents: TerminalEventCollector;
+  terminalKeys: {
+    count(key: "ENTER" | "ESC"): number;
+    waitForCount(key: "ENTER" | "ESC", count: number): Promise<void>;
+  };
   publishHybridCloudRefresh(): Promise<void>;
   setLanHttpEnabled(enabled: boolean): Promise<void>;
   stop(): Promise<void>;
