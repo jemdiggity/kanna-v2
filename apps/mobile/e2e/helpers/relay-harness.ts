@@ -156,6 +156,17 @@ interface TerminalEventCollector {
     dataB64: string;
     rows: number;
   }>;
+  waitForNewSnapshot(
+    expectation: {
+      minEncodedChars: number;
+      sentinel: string;
+    },
+    timeoutMs?: number,
+  ): Promise<{
+    cols: number;
+    dataB64: string;
+    rows: number;
+  }>;
 }
 
 interface RemoteHarnessModule {
@@ -251,7 +262,7 @@ export interface MobileRelayHarness {
     timeoutMs?: number,
   ): Promise<string>;
   waitForLocalTaskActivity(activity: TaskActivity, timeoutMs?: number): Promise<void>;
-  waitForMobileTerminalGeometry(timeoutMs?: number): Promise<void>;
+  beginMobileTerminalGeometryObservation(timeoutMs?: number): Promise<void>;
 }
 
 export interface RelayTaskOrderingFixture {
@@ -618,33 +629,24 @@ export async function startMobileRelayHarness(
       waitForLocalTaskActivity(activity, timeoutMs) {
         return waitForLocalTaskActivity(harness, localTask, activity, timeoutMs);
       },
-      async waitForMobileTerminalGeometry(timeoutMs = 10_000) {
-        const observer = remote.terminal.collectTerminalEvents(
-          harness,
-          localTask.taskId
+      async beginMobileTerminalGeometryObservation(timeoutMs = 10_000) {
+        const snapshot = await terminalEvents!.waitForNewSnapshot(
+          {
+            minEncodedChars: terminalFixture.minDecodedBytes,
+            sentinel: terminalFixture.sentinel
+          },
+          timeoutMs
         );
-        try {
-          const snapshot = await observer.waitForSnapshot(
-            {
-              minEncodedChars: terminalFixture.minDecodedBytes,
-              sentinel: terminalFixture.sentinel
-            },
-            timeoutMs
+        if (
+          snapshot.cols !== terminalFixture.expectedCols ||
+          snapshot.rows !== terminalFixture.expectedRows
+        ) {
+          throw new Error(
+            `Expected a post-mount daemon PTY resize to ${terminalFixture.expectedCols}x` +
+              `${terminalFixture.expectedRows}, received ${snapshot.cols}x${snapshot.rows}`
           );
-          if (
-            snapshot.cols !== terminalFixture.expectedCols ||
-            snapshot.rows !== terminalFixture.expectedRows
-          ) {
-            throw new Error(
-              `Expected daemon PTY dimensions ${terminalFixture.expectedCols}x` +
-                `${terminalFixture.expectedRows} after mobile mount, received ` +
-                `${snapshot.cols}x${snapshot.rows}`
-            );
-          }
-        } finally {
-          observer.close();
         }
-      }
+      },
     };
   } catch (error) {
     terminalEvents?.close();

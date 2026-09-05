@@ -785,6 +785,41 @@ describe("RootNavigator task collection integration", () => {
     expect(visibleText()).toContain("Loaded from the desktop");
   });
 
+  it("seeds the mobile terminal geometry before opening a task stream", async () => {
+    const task: TaskSummary = {
+      id: "task-1",
+      repoId: "repo-1",
+      title: "Viewport-seeded terminal",
+      stage: "in progress"
+    };
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([task]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([task]);
+    const store = createSessionStore();
+    controller = createMobileController(client, store);
+    const resize = vi.spyOn(controller, "resizeTaskTerminal");
+    const open = vi.spyOn(controller, "openTask");
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+    });
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === "mobile.task-row.task-1"
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(resize).toHaveBeenCalledWith("task-1", 80, 48);
+    expect(open).toHaveBeenCalledWith("task-1");
+    expect(resize.mock.invocationCallOrder[0]).toBeLessThan(
+      open.mock.invocationCallOrder[0]
+    );
+  });
+
   it("pins from the row swipe straight into the phone's own record and reorders", async () => {
     const newer: TaskSummary = {
       id: "task-newer",

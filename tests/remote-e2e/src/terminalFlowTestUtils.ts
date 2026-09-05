@@ -64,6 +64,12 @@ export interface TerminalEventCollector {
   sendInput(dataB64: string, submissionBoundary?: boolean, controlInput?: boolean): void;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
+  /** Wait for a snapshot produced after this call, never one retained from
+   * fixture setup or this observer's own attach. */
+  waitForNewSnapshot(
+    expectation: TerminalSnapshotExpectation,
+    timeoutMs?: number,
+  ): Promise<ObservedTerminalSnapshot>;
   waitForSnapshot(
     expectation: TerminalSnapshotExpectation,
     timeoutMs?: number,
@@ -400,8 +406,10 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
   }> = [];
   private readonly snapshotWaiters: Array<{
     expectation: TerminalSnapshotExpectation;
+    minimumSequence: number;
     resolve(snapshot: ObservedTerminalSnapshot): void;
   }> = [];
+  private snapshotSequence = 0;
   private readonly exitWaiters: Array<{
     expectedCode: number;
     resolve(): void;
@@ -469,7 +477,7 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
       return this.lastSnapshot;
     }
     return await new Promise<ObservedTerminalSnapshot>((resolve, reject) => {
-      const waiter = { expectation, resolve };
+      const waiter = { expectation, minimumSequence: 0, resolve };
       const timeout = setTimeout(() => {
         const index = this.snapshotWaiters.indexOf(waiter);
         if (index >= 0) {
@@ -484,6 +492,33 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
       }, timeoutMs);
       this.snapshotWaiters.push({
         expectation,
+        minimumSequence: 0,
+        resolve: (snapshot) => {
+          clearTimeout(timeout);
+          resolve(snapshot);
+        },
+      });
+    });
+  }
+
+  async waitForNewSnapshot(
+    expectation: TerminalSnapshotExpectation,
+    timeoutMs = 10_000,
+  ): Promise<ObservedTerminalSnapshot> {
+    const minimumSequence = this.snapshotSequence + 1;
+    return await new Promise<ObservedTerminalSnapshot>((resolve, reject) => {
+      const waiter = { expectation, minimumSequence, resolve };
+      const timeout = setTimeout(() => {
+        const index = this.snapshotWaiters.indexOf(waiter);
+        if (index >= 0) this.snapshotWaiters.splice(index, 1);
+        reject(new Error(
+          `timed out waiting for a new terminal snapshot from ${this.taskId}; ` +
+            `last snapshot sequence=${this.snapshotSequence}`,
+        ));
+      }, timeoutMs);
+      this.snapshotWaiters.push({
+        expectation,
+        minimumSequence,
         resolve: (snapshot) => {
           clearTimeout(timeout);
           resolve(snapshot);
@@ -532,6 +567,7 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
     }
     switch (event.type) {
       case "snapshot": {
+        this.snapshotSequence += 1;
         const decoded = Buffer.from(event.dataB64, "base64").toString("utf8");
         this.chunks = [decoded];
         this.lastSnapshot = {
@@ -541,7 +577,10 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
         };
         this.resolveOutputWaiters();
         for (const waiter of [...this.snapshotWaiters]) {
-          if (snapshotMatches(this.lastSnapshot, waiter.expectation)) {
+          if (
+            this.snapshotSequence >= waiter.minimumSequence &&
+            snapshotMatches(this.lastSnapshot, waiter.expectation)
+          ) {
             this.snapshotWaiters.splice(this.snapshotWaiters.indexOf(waiter), 1);
             waiter.resolve(this.lastSnapshot);
           }
