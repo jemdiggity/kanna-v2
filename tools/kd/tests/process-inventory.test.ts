@@ -91,6 +91,7 @@ describe("kd process inventory", () => {
     interface Writer {
       child: ReturnType<typeof spawn>;
       exited: Promise<number | null>;
+      finish: () => Promise<number | null>;
       release: () => void;
       wait: (event: string) => Promise<void>;
     }
@@ -112,6 +113,10 @@ describe("kd process inventory", () => {
       });
       const writer = {
         child, exited,
+        finish: async () => {
+          await vi.waitUntil(() => child.exitCode !== null || child.signalCode !== null);
+          return exited;
+        },
         release: () => writeFileSync(`${path}.${socket}.release`, ""),
         wait: async (event: string) => {
           await vi.waitUntil(() => {
@@ -130,7 +135,7 @@ describe("kd process inventory", () => {
       const contender = startWriter("contender", "owner");
       await contender.wait("gated");
       first.release();
-      expect(await first.exited).toBe(0);
+      expect(await first.finish()).toBe(0);
 
       const replacement = startWriter("replacement", "inventory");
       await replacement.wait("gated");
@@ -140,8 +145,8 @@ describe("kd process inventory", () => {
       await contender.wait("contended-again");
       expect(existsSync(`${path}.lock`)).toBe(true);
       replacement.release();
-      expect(await replacement.exited).toBe(0);
-      expect(await contender.exited).toBe(0);
+      expect(await replacement.finish()).toBe(0);
+      expect(await contender.finish()).toBe(0);
       expect(readProcessInventory(path).map((resource) => resource.kind === "tmux-server" ? resource.socket : "").sort())
         .toEqual(["contender", "first", "replacement", "seed"]);
       expect(readFileSync(path, "utf8")).toContain('"version": 1');
