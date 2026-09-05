@@ -189,8 +189,14 @@ pub(crate) async fn run_server_services(
     http_state: Arc<http_api::AppState>,
 ) {
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
-    let protected_input_daemon =
+    let mut protected_input_daemon =
         establish_protected_input_generation(&config, ProtectedInputWait::Startup).await;
+    crate::task_creator::reconcile_lifecycle_operations_on_startup(
+        &mut protected_input_daemon,
+        &config.db_path,
+        &db,
+    )
+    .await;
     let protected_input_maintenance =
         maintain_protected_input_generations(config.clone(), protected_input_daemon);
     // The transfer engine is a peer of the LAN API, not a child of it: a

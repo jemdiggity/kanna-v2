@@ -168,6 +168,17 @@ impl Db {
                 FOREIGN KEY (task_id) REFERENCES pipeline_item(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE lifecycle_operation_intent (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN ('post', 'stage_spawn')),
+                phase TEXT NOT NULL CHECK (phase IN ('prepared', 'spawn_ready', 'submitted', 'committed')),
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE UNIQUE INDEX idx_lifecycle_operation_intent_task
+                ON lifecycle_operation_intent(task_id);
+
             CREATE TABLE stage_run (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,

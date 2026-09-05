@@ -61,7 +61,8 @@ pub(crate) use definitions::DEFAULT_REVISION_LIMIT;
 pub(crate) use environment::{resolve_agent_executable, warm_login_shell_path};
 pub(crate) use lifecycle::{
     daemon_session_presence, dispatch_prepared_post_for_api, kill_session_replacing,
-    prepared_task_id, prune_completion_contexts_on_startup, remove_completion_contexts,
+    prepared_task_id, prune_completion_contexts_on_startup,
+    reconcile_lifecycle_operations_on_startup, remove_completion_contexts,
     rerun_prepared_stage_for_api, resolve_legacy_completion_retry_run,
     rollback_prepared_stage_run_for_api, rollback_prepared_task_for_api,
     spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
