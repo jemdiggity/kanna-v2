@@ -3,6 +3,7 @@ import * as smokeModule from "./list-detail-back.e2e";
 import {
   assertPtyTerminalFixtureAvailable,
   ensureTaskListVisible,
+  exerciseTaskPromptExpansion,
   exerciseActivityDismissSwipe,
   exerciseTaskPinSwipe,
   exerciseListDetailBackFromOrigin,
@@ -11,6 +12,7 @@ import {
   performTaskDetailEdgeSwipeBack,
   PTY_SNAPSHOT_MIN_DECODED_BYTES,
   resolveRequiredPtyTerminalFixture,
+  assertPtyFixtureTaskRow,
   waitForRenderedPtyTerminal,
   waitForTaskTerminalLive
 } from "./list-detail-back.e2e";
@@ -47,6 +49,7 @@ describe("origin-preserving list/detail/back", () => {
 
 interface FakeElement {
   click: ReturnType<typeof vi.fn>;
+  isDisplayed?: ReturnType<typeof vi.fn>;
   isExisting: ReturnType<typeof vi.fn>;
   waitForDisplayed: ReturnType<typeof vi.fn>;
 }
@@ -433,7 +436,7 @@ describe("PTY fixture selection", () => {
         id: "task-pty",
         title: "Short renamed task",
         prompt:
-          "First canonical prompt line\nSecond detailed line\nMOBILE_PROMPT_END_SENTINEL",
+          `${"Detailed canonical prompt line. ".repeat(12)}\nMOBILE_PROMPT_END_SENTINEL`,
         agentType: "pty",
         closedAt: null
       })
@@ -519,10 +522,12 @@ describe("task prompt expansion journey", () => {
     };
     const collapsedTaskId = {
       ...createElement(() => !expanded),
+      isDisplayed: vi.fn(async () => !expanded),
       getText: vi.fn(async () => (expanded ? "" : taskId))
     };
     const expandedTaskId = {
       ...createElement(() => expanded),
+      isDisplayed: vi.fn(async () => expanded),
       getText: vi.fn(async () => (expanded ? taskId : "")),
       longPress: vi.fn(async ({ duration }: { duration: number }) => {
         if (duration === 1_500) {
@@ -584,8 +589,10 @@ describe("task prompt expansion journey", () => {
     });
 
     expect(titleButton.click).toHaveBeenCalledTimes(3);
+    expect(collapsedTaskId.isDisplayed).toHaveBeenCalled();
     expect(collapsedTaskId.getText).toHaveBeenCalled();
     expect(expandedPrompt.getText).toHaveBeenCalled();
+    expect(expandedTaskId.isDisplayed).toHaveBeenCalled();
     expect(expandedTaskId.getText).toHaveBeenCalled();
     expect(expandedTaskId.longPress).toHaveBeenCalledWith({ duration: 1_500 });
     expect(copyMenuItem.click).toHaveBeenCalledTimes(1);
@@ -599,6 +606,118 @@ describe("task prompt expansion journey", () => {
     expect(await expandedPrompt.isExisting()).toBe(false);
     expect(await expandedTaskId.isExisting()).toBe(false);
     expect(expanded).toBe(false);
+  });
+
+  it("fails when an existing collapsed task ID is off-screen", async () => {
+    const taskId = "019f6c9d6ed40000000120e4307b4591";
+    const collapsedTaskId = {
+      ...createElement(() => true),
+      getText: vi.fn(async () => taskId),
+      isDisplayed: vi.fn(async () => false)
+    };
+    const ui = {
+      getCollapsedTaskId: vi.fn(async () => collapsedTaskId),
+      getCollapsedTitle: vi.fn(async () => ({
+        ...createElement(() => true),
+        getText: vi.fn(async () => "Task title")
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (!(await condition())) throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(
+      exerciseTaskPromptExpansion(ui as never, {
+        expectedTitle: "Task title",
+        promptEndSentinel: "PROMPT_END_SENTINEL",
+        taskId
+      })
+    ).rejects.toThrow(`Expected complete collapsed task ID ${JSON.stringify(taskId)}`);
+    expect(collapsedTaskId.isDisplayed).toHaveBeenCalled();
+  });
+
+  it("fails when an existing expanded task ID is off-screen immediately after expansion", async () => {
+    const taskId = "019f6c9d6ed40000000120e4307b4591";
+    let expanded = false;
+    const titleButton = createElement(() => true, () => {
+      expanded = true;
+    });
+    const expandedTaskId = {
+      ...createElement(() => expanded),
+      getText: vi.fn(async () => taskId),
+      isDisplayed: vi.fn(async () => false)
+    };
+    const ui = {
+      getCollapsedTaskId: vi.fn(async () => ({
+        ...createElement(() => !expanded),
+        getText: vi.fn(async () => taskId),
+        isDisplayed: vi.fn(async () => !expanded)
+      })),
+      getCollapsedTitle: vi.fn(async () => ({
+        ...createElement(() => true),
+        getText: vi.fn(async () => "Task title")
+      })),
+      getExpandedPrompt: vi.fn(async () => ({
+        ...createElement(() => expanded),
+        getText: vi.fn(async () => "PROMPT_END_SENTINEL")
+      })),
+      getExpandedTaskId: vi.fn(async () => expandedTaskId),
+      getTitleButton: vi.fn(async () => titleButton),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (!(await condition())) throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(
+      exerciseTaskPromptExpansion(ui as never, {
+        expectedTitle: "Task title",
+        promptEndSentinel: "PROMPT_END_SENTINEL",
+        taskId
+      })
+    ).rejects.toThrow(`Expected complete expanded task ID ${JSON.stringify(taskId)}`);
+    expect(expandedTaskId.isDisplayed).toHaveBeenCalled();
+  });
+});
+
+describe("assertPtyFixtureTaskRow", () => {
+  const fixture = {
+    expectedTitle: "A task title that remains legible",
+    promptEndSentinel: "PROMPT_END_SENTINEL",
+    taskId: "019f6c9d6ed40000000120e4307b4591"
+  };
+
+  function createRowUi(displayed: boolean) {
+    const row = {
+      ...createElement(() => true),
+      getText: vi.fn(async () => `${fixture.expectedTitle} Task ID ${fixture.taskId}`),
+      isDisplayed: vi.fn(async () => displayed)
+    };
+    return {
+      row,
+      ui: {
+        getTaskRowById: vi.fn(async () => row),
+        waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+          if (!(await condition())) throw new Error(options.timeoutMsg);
+        })
+      }
+    };
+  }
+
+  it("accepts a displayed fixture row with both title and ID", async () => {
+    const { row, ui } = createRowUi(true);
+
+    await assertPtyFixtureTaskRow(ui as never, fixture);
+
+    expect(row.isDisplayed).toHaveBeenCalled();
+  });
+
+  it("fails when the fixture row exists but is off-screen", async () => {
+    const { row, ui } = createRowUi(false);
+
+    await expect(assertPtyFixtureTaskRow(ui as never, fixture)).rejects.toThrow(
+      "Expected fixture row to show"
+    );
+    expect(row.isDisplayed).toHaveBeenCalled();
   });
 });
 

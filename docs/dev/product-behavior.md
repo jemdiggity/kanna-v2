@@ -196,8 +196,9 @@ modal account sheet; there is no settings tab.
 **Task cards** are tinted by workflow stage from the app-icon palette
 (`in progress` orange, `review` purple, `pr` green, `consultation` blue;
 custom stages hash onto a fixed sub-palette; blocked is a rose badge on top of
-the stage color). A short task id sits beside the truncating title, and up to
-three lines of the task's latest output snippet render on the card — live via
+the stage color). A short task id sits beside the truncating title; unusually
+long IDs middle-ellipsize in their bounded metadata column so the title remains
+legible. Up to three lines of the task's latest output snippet render on the card — live via
 the KSP task-summary stream while connected, falling back to the resting
 (Firestore) snippet on disconnect.
 

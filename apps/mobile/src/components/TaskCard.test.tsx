@@ -484,7 +484,7 @@ describe("TaskCard", () => {
     const mobileCreatedId =
       "3235f764375599b803c5751e2da246629ee062bf4df34ea4380c1c709243d349";
     const storedTitle =
-      "Check how PR787 aligns with merged BLE OTA work";
+      `Check how PR787 aligns with ${"merged BLE OTA work ".repeat(8)}today`;
 
     const tree = TaskCard({
       task: {
@@ -498,8 +498,9 @@ describe("TaskCard", () => {
       onPress: vi.fn()
     }) as ElementNode;
 
-    const titleNode = findTextNodeByCompleteText(tree, storedTitle);
-    expect(titleNode).not.toBeNull();
+    const titleNode = findNodeByProp(tree, "numberOfLines", 2);
+    expect(textContent(titleNode)).toContain("Check how PR787 aligns");
+    expect(textContent(titleNode)).not.toContain(mobileCreatedId);
     const idNode = findNodeByProp(
       tree,
       "testID",
@@ -514,9 +515,14 @@ describe("TaskCard", () => {
       alignSelf: "flex-end",
       maxWidth: "100%"
     });
-    expect(findImmediateParent(tree, titleNode)).not.toBe(
-      findImmediateParent(tree, idNode)
+    const idColumn = findImmediateParent(tree, idNode);
+    expect(findImmediateParent(tree, titleNode)).toBe(
+      findImmediateParent(tree, idColumn)
     );
+    expect(flattenStyle(idColumn?.props?.style)).toMatchObject({
+      flexShrink: 0,
+      maxWidth: "45%"
+    });
   });
 
   it("uses a prompt excerpt instead of a 64-hex id when the title is blank", () => {
