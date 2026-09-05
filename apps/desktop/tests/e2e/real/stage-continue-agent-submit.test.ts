@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo, publishFixtureChanges } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
@@ -100,7 +100,7 @@ describe("real post injection into a live agent session", () => {
             post: {
               name: "commit",
               agent: "commit-real",
-              prompt: "Run exactly: printf 'submitted\\n' > continue-stage-real-submit.txt. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
+              prompt: "Run exactly: printf 'submitted\\n' > continue-stage-real-submit.txt. Then call the MCP tool kanna_complete_stage with task_id from KANNA_TASK_ID, status success, and summary 'continue submitted'. Use the existing MCP connection. Do not use kanna-cli or HTTP for completion. Do not wait for any additional input.",
             },
           },
           { name: "holding", policy: { transition: "manual" } },
@@ -195,16 +195,20 @@ describe("real post injection into a live agent session", () => {
     expect(runRows.length).toBeGreaterThanOrEqual(1);
     expect(runRows[0]?.stage).toBe("commit");
 
-    const stageRows = (await queryDb(
-      client,
-      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
-      [taskId],
-    )) as Array<{ stage: string | null; closed_at: string | null }>;
-    // The marker is written before the agent's stage-complete lands, so the
-    // task is either still in the post ("in progress") or already
-    // transitioned to "holding"; it is never closed.
-    expect(["in progress", "holding"]).toContain(stageRows[0]?.stage);
-    expect(stageRows[0]?.closed_at).toBeNull();
+    await vi.waitFor(async () => {
+      const stageRows = (await queryDb(
+        client,
+        "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
+        [taskId],
+      )) as Array<{ stage: string | null; closed_at: string | null }>;
+      expect(stageRows[0]?.stage).toBe("holding");
+      expect(stageRows[0]?.closed_at).toBeNull();
+      const posts = (await queryDb(client,
+        "SELECT status FROM stage_run WHERE task_id = ? AND kind = 'post'", [taskId],
+      )) as Array<{ status: string }>;
+      expect(posts).toHaveLength(1);
+      expect(posts[0]?.status).toBe("succeeded");
+    }, { timeout: 180_000, interval: 1_000 });
 
     expect(["codex", "claude", "copilot", "opencode", "antigravity"]).toContain(initialRow.agent_provider);
   }, 300_000);
