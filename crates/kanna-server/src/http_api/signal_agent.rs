@@ -50,6 +50,13 @@ pub(super) async fn find_local_singletons(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((remote_url_hash, agent)): axum::extract::Path<(String, String)>,
 ) -> Result<Json<SingletonLookupResponse>, (axum::http::StatusCode, String)> {
+    // A successful native lookup must not leave a stale cloud owner behind for
+    // the subsequent fenced claim. Offline desktops cannot attest a close.
+    if state.desktop_routing_available() {
+        state.publish_task_snapshot_now().await.map_err(|error| {
+            singleton_lookup_uncertain(&remote_url_hash, &agent, &state.config.desktop_id, error)
+        })?;
+    }
     let tasks = super::blocking::run_handler_blocking("local singleton lookup", move || {
         let db =
             Db::open(&state.config.db_path).map_err(|error| db_write_error("db error", error))?;
@@ -393,6 +400,68 @@ async fn resolve_pending_merge_handoff(
     .await
 }
 
+/// A task may close before its first cloud publication, while its claim is
+/// still reserved. Only its own closing desktop can release that reservation;
+/// the relay additionally checks the creator-process fence and task identity.
+pub(super) async fn release_closed_singleton_reservation(
+    state: &AppState,
+    task_id: &str,
+) -> Result<bool, String> {
+    if state.config.desktop_secret.is_none() {
+        return Ok(false);
+    }
+    let identity = (|| {
+        let db = Db::open(&state.config.db_path).map_err(|error| error.to_string())?;
+        let Some(task) = db
+            .get_pipeline_item(task_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        if task.closed_at.is_none() {
+            return Ok(None);
+        }
+        let Some(agent) = task
+            .pipeline
+            .as_deref()
+            .and_then(|name| name.strip_prefix("singleton-"))
+        else {
+            return Ok(None);
+        };
+        let repo = db
+            .get_repo(&task.repo_id)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>(
+            repo.and_then(|repo| repo.remote_url_hash)
+                .map(|hash| (hash, agent.to_string())),
+        )
+    })()?;
+    let Some((hash, agent)) = identity else {
+        return Ok(false);
+    };
+    state
+        .release_relay_repo_singleton_reservation(hash, agent, task_id.to_string())
+        .await
+}
+
+/// Internal desktop-to-desktop recovery: the owner attests its own committed
+/// close and releases only its own process-fenced reservation.
+pub(super) async fn release_closed_singleton(
+    _access: PrivilegedTaskAccess,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<bool>, (axum::http::StatusCode, String)> {
+    release_closed_singleton_reservation(&state, &task_id)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("cannot release closed singleton reservation {task_id}: {error}"),
+            )
+        })
+}
+
 pub(super) async fn signal_agent_request(
     state: Arc<AppState>,
     repo_id: String,
@@ -482,6 +551,74 @@ pub(super) async fn signal_agent_request(
                 return Err((axum::http::StatusCode::CONFLICT, reason));
             }
             "reserved" => {
+                let released = if claim.machine_id == state.config.desktop_id {
+                    release_closed_singleton_reservation(&state, &claim.task_id)
+                        .await
+                        .map_err(|error| {
+                            (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                format!(
+                                    "cannot release closed singleton reservation {}: {error}",
+                                    claim.task_id
+                                ),
+                            )
+                        })?
+                } else {
+                    let response = state
+                        .invoke_relay_desktop(
+                            claim.machine_id.clone(),
+                            "POST".to_string(),
+                            format!(
+                                "/v1/tasks/{}/actions/release-closed-singleton-reservation",
+                                encode_path_segment(&claim.task_id)
+                            ),
+                            serde_json::Value::Null,
+                        )
+                        .await
+                        .map_err(|error| {
+                            singleton_lookup_uncertain(
+                                &repo_id,
+                                &agent,
+                                &claim.machine_id,
+                                format!(
+                                    "reservation {} cannot be verified: {error}",
+                                    claim.task_id
+                                ),
+                            )
+                        })?;
+                    if response.status != axum::http::StatusCode::OK.as_u16() {
+                        return Err(singleton_lookup_uncertain(
+                            &repo_id,
+                            &agent,
+                            &claim.machine_id,
+                            response.error.unwrap_or_else(|| {
+                                format!(
+                                    "reservation verification returned HTTP {}",
+                                    response.status
+                                )
+                            }),
+                        ));
+                    }
+                    response
+                        .body
+                        .and_then(|body| body.as_bool())
+                        .ok_or_else(|| {
+                            singleton_lookup_uncertain(
+                                &repo_id,
+                                &agent,
+                                &claim.machine_id,
+                                "invalid closed-reservation proof",
+                            )
+                        })?
+                };
+                if released {
+                    // This is a state transition (closed reservation -> unowned),
+                    // not a timer/retry loop. A competing creator remains fenced.
+                    return Box::pin(signal_agent_request(
+                        state, repo_id, agent, message, overrides,
+                    ))
+                    .await;
+                }
                 let reason = format!(
                     "singleton task {} is being created by machine {}; no replacement was created",
                     claim.task_id, claim.machine_id
@@ -649,6 +786,10 @@ async fn resolve_singleton_owner(
         return unique_singleton_owner(state, repo_id, agent, local_tasks, Vec::new())
             .map(|owner| (owner, None));
     }
+    state.publish_task_snapshot_now().await.map_err(|error| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE,
+         format!("cannot publish local singleton ownership for repo {repo_id}: {error}; no singleton was created"))
+    })?;
     let directory_owners = state
         .list_relay_repo_singletons(remote_url_hash.clone(), agent.to_string())
         .await
@@ -786,7 +927,7 @@ fn remote_singleton_unreachable(
     error: impl std::fmt::Display,
 ) -> (axum::http::StatusCode, String) {
     let reason = format!(
-        "singleton task {task_id} is owned by unreachable machine {machine_id}: {error}; no replacement was created"
+        "singleton task {task_id} remains recorded open on unreachable owner machine {machine_id}: {error}; no replacement was created"
     );
     log::error!("{reason}");
     (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason)

@@ -98,6 +98,10 @@ pub(crate) struct MobileNotificationRequest {
 }
 
 pub(crate) enum DesktopRelayRequest {
+    PublishTaskSnapshot {
+        generation: u64,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     ListActive {
         generation: u64,
         response: oneshot::Sender<Result<Vec<String>, String>>,
@@ -553,6 +557,24 @@ impl AppState {
             .send(request)
             .await
             .map_err(|_| self.desktop_routing_unavailable_reason())
+    }
+
+    /// An acknowledgement barrier, not a second publisher or retry loop.
+    /// Singleton arbitration must see closes already committed by this desktop.
+    pub(crate) async fn publish_task_snapshot_now(&self) -> Result<(), String> {
+        let (response, result) = oneshot::channel();
+        let generation = self
+            .relay_desktop_routing_generation
+            .load(Ordering::Acquire);
+        self.send_desktop_relay_request(DesktopRelayRequest::PublishTaskSnapshot {
+            generation,
+            response,
+        })
+        .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(30), result)
+            .await
+            .map_err(|_| "singleton close publication acknowledgement timed out".to_string())?
+            .map_err(|_| "desktop relay disconnected before singleton publication".to_string())?
     }
 
     pub(crate) async fn list_active_relay_desktops(&self) -> Result<Vec<String>, String> {

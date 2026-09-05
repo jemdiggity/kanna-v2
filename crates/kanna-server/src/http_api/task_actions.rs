@@ -665,6 +665,13 @@ pub(super) async fn close_task(
     );
     state.preview_sessions.revoke_task(&pipeline_item_id).await;
     start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await;
+    if let Err(error) =
+        super::signal_agent::release_closed_singleton_reservation(&state, &pipeline_item_id).await
+    {
+        log::warn!(
+            "closed task {pipeline_item_id}, but singleton reservation release failed: {error}"
+        );
+    }
     state.publish_state_changed(StateChangeScope::Tasks);
     state.publish_state_changed(StateChangeScope::Blockers);
 
@@ -830,6 +837,11 @@ async fn close_task_after_final_stage(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await;
+    if let Err(error) =
+        super::signal_agent::release_closed_singleton_reservation(state, &task_id).await
+    {
+        log::warn!("closed task {task_id}, but singleton reservation release failed: {error}");
+    }
     state.publish_state_changed(StateChangeScope::Tasks);
     state.publish_state_changed(StateChangeScope::Blockers);
     Ok(Json(crate::mobile_api::TaskActionResponse {

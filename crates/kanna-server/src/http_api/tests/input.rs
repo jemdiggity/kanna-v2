@@ -246,6 +246,70 @@ fn seed_remote_singleton(db: &Db, repo_id: &str, task_id: &str, agent: &str) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn sibling_reservation_recovery_requires_a_committed_close() {
+    let state = test_state_with_seed("desktop-owner", "Owner", |db| {
+        seed_remote_singleton(db, "repo-owner", "reserved-master", "merge");
+        db.update_test_pipeline_item_stage_context(
+            "reserved-master",
+            "reserved-master",
+            "singleton-merge",
+            None,
+            "claude",
+        )
+        .unwrap();
+    });
+    let path = "/v1/tasks/reserved-master/actions/release-closed-singleton-reservation";
+    let response = super::router(Arc::clone(&state))
+        .oneshot(Request::post(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"false"
+    );
+    Db::open(&state.config.db_path)
+        .unwrap()
+        .close_pipeline_item("reserved-master")
+        .unwrap();
+    let mut requests = state.take_desktop_relay_requests().unwrap();
+    state.set_desktop_routing_available(true);
+    let release = tokio::spawn(async move {
+        match requests.recv().await.unwrap() {
+            crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                remote_url_hash,
+                agent,
+                task_id,
+                response,
+                ..
+            } => {
+                assert_eq!(remote_url_hash, "shared-remote-hash");
+                assert_eq!(agent, "merge");
+                assert_eq!(task_id, "reserved-master");
+                let _ = response.send(Ok(true));
+            }
+            _ => panic!("closed proof must use the existing fenced release"),
+        }
+    });
+    let response = super::router(Arc::clone(&state))
+        .oneshot(Request::post(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"true"
+    );
+    release.await.unwrap();
+}
+
 fn connect_singleton_relay_peer(
     source: &Arc<AppState>,
     peer: Arc<AppState>,
@@ -258,6 +322,9 @@ fn connect_singleton_relay_peer(
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
             match request {
+                crate::http_api::DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let machine_ids = if fail_input_delivery {
                         Vec::new()
@@ -396,6 +463,10 @@ async fn signal_agent_refuses_persisted_owner_that_is_already_unreachable() {
     let message = String::from_utf8(body.to_vec()).unwrap();
     assert!(message.contains("task-merge-owner"), "{message}");
     assert!(message.contains("desktop-sleeping"), "{message}");
+    assert!(
+        message.contains("remains recorded open on unreachable owner"),
+        "{message}"
+    );
     assert!(message.contains("no replacement was created"), "{message}");
     relay.abort();
 }
@@ -509,6 +580,11 @@ async fn signal_agent_concurrent_first_signal_creates_one_account_wide_task() {
         relay_tasks.push(tokio::spawn(async move {
             while let Some(request) = requests.recv().await {
                 match request {
+                    crate::http_api::DesktopRelayRequest::PublishTaskSnapshot {
+                        response, ..
+                    } => {
+                        let _ = response.send(Ok(()));
+                    }
                     crate::http_api::DesktopRelayRequest::ListRepoSingletons {
                         response, ..
                     } => {
@@ -788,6 +864,20 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
 
 #[tokio::test]
 async fn natural_language_merge_signal_creates_pinned_singleton_when_absent() {
+    assert_merge_signal_creates_singleton(false, false).await;
+}
+
+#[tokio::test]
+async fn merge_handoff_reclaims_after_the_only_merge_master_closes() {
+    assert_merge_signal_creates_singleton(true, false).await;
+}
+
+#[tokio::test]
+async fn merge_handoff_releases_a_closed_unpublished_reservation_before_reclaiming() {
+    assert_merge_signal_creates_singleton(true, true).await;
+}
+
+async fn assert_merge_signal_creates_singleton(close_previous: bool, stale_reservation: bool) {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -868,19 +958,149 @@ async fn natural_language_merge_signal_creates_pinned_singleton_when_absent() {
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
         .unwrap();
+    if close_previous {
+        db.patch_repo(
+            "repo-1",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some("closed-merge-hash")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "closed-master",
+            "repo-1",
+            "Merge",
+            Some("Merge Master"),
+            "in progress",
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "closed-master-run",
+            task_id: "closed-master",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("merge"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("closed-master"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            db.find_open_agent_tasks_by_remote_url_hash("closed-merge-hash", "merge")
+                .unwrap()
+                .len(),
+            1
+        );
+        db.update_test_pipeline_item_stage_context(
+            "closed-master",
+            "closed-master",
+            "singleton-merge",
+            None,
+            "claude",
+        )
+        .unwrap();
+        db.close_pipeline_item("closed-master").unwrap();
+        // A different connection observes close and loss of local ownership together.
+        let reader = Db::open(&config.db_path).unwrap();
+        assert!(reader
+            .get_pipeline_item("closed-master")
+            .unwrap()
+            .unwrap()
+            .closed_at
+            .is_some());
+        assert!(reader
+            .find_open_agent_tasks_by_remote_url_hash("closed-merge-hash", "merge")
+            .unwrap()
+            .is_empty());
+        seed_approvable_source(&db, "handoff-source", "handoff-run", 123);
+    }
     drop(db);
 
     let state = Arc::new(super::AppState::new(config.clone()));
+    let claimed_owner = Arc::new(std::sync::Mutex::new(None::<(String, String)>));
+    let relay = if close_previous {
+        let mut requests = state.take_desktop_relay_requests().unwrap();
+        state.set_desktop_routing_available(true);
+        let owner = Arc::clone(&claimed_owner);
+        let desktop_id = config.desktop_id.clone();
+        Some(tokio::spawn(async move {
+            let mut published = false;
+            let mut reserved = stale_reservation;
+            while let Some(request) = requests.recv().await {
+                match request {
+                    crate::http_api::DesktopRelayRequest::PublishTaskSnapshot {
+                        response, ..
+                    } => {
+                        published = true;
+                        let _ = response.send(Ok(()));
+                    }
+                    crate::http_api::DesktopRelayRequest::ListRepoSingletons {
+                        response, ..
+                    } => {
+                        assert!(published, "close must publish before directory discovery");
+                        let _ = response.send(Ok(Vec::new()));
+                    }
+                    crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                        let _ = response.send(Ok(Vec::new()));
+                    }
+                    crate::http_api::DesktopRelayRequest::ClaimRepoSingleton {
+                        task_id,
+                        response,
+                        ..
+                    } => {
+                        if reserved {
+                            let _ = response.send(Ok(crate::http_api::RemoteSingletonClaim {
+                                status: "reserved".into(),
+                                machine_id: desktop_id.clone(),
+                                task_id: "closed-master".into(),
+                                owners: Vec::new(),
+                            }));
+                            continue;
+                        }
+                        *owner.lock().unwrap() = Some((desktop_id.clone(), task_id.clone()));
+                        let _ = response.send(Ok(crate::http_api::RemoteSingletonClaim {
+                            status: "acquired".into(),
+                            machine_id: desktop_id.clone(),
+                            task_id,
+                            owners: Vec::new(),
+                        }));
+                    }
+                    crate::http_api::DesktopRelayRequest::ReleaseRepoSingletonReservation {
+                        task_id,
+                        response,
+                        ..
+                    } => {
+                        assert_eq!(task_id, "closed-master");
+                        assert!(reserved);
+                        reserved = false;
+                        let _ = response.send(Ok(true));
+                    }
+                    _ => panic!("unexpected relay request during reclaim"),
+                }
+            }
+        }))
+    } else {
+        None
+    };
     let mut state_changes = state.subscribe_state_changes();
     let app = super::router(Arc::clone(&state));
     let response = app
         .oneshot(
-            Request::post("/v1/repos/repo-1/agents/merge/signal")
+            Request::post(if close_previous { "/v1/tasks/handoff-source/actions/signal-merge-handoff" } else { "/v1/repos/repo-1/agents/merge/signal" })
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({
-                        "message": "Assess PR 123"
-                    })
+                    (if close_previous {
+                        serde_json::json!({"branch": "feature", "target": "main", "summary": "Assess PR 123"})
+                    } else { serde_json::json!({"message": "Assess PR 123"}) })
                     .to_string(),
                 ))
                 .unwrap(),
@@ -901,7 +1121,14 @@ async fn natural_language_merge_signal_creates_pinned_singleton_when_absent() {
     let db = Db::open(&config.db_path).unwrap();
     let task = db.get_pipeline_item(task_id).unwrap().unwrap();
     assert_eq!(task.repo_id, "repo-1");
-    assert_eq!(task.prompt.as_deref(), Some("Assess PR 123"));
+    assert!(task.prompt.as_deref().unwrap().contains("Assess PR 123"));
+    if close_previous {
+        assert_ne!(task_id, "closed-master");
+        assert_eq!(
+            *claimed_owner.lock().unwrap(),
+            Some((config.desktop_id.clone(), task_id.to_string()))
+        );
+    }
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(task.pinned, Some(1));
     assert_eq!(task.pin_order, Some(0));
@@ -917,6 +1144,9 @@ async fn natural_language_merge_signal_creates_pinned_singleton_when_absent() {
     assert_eq!(runs[0].agent.as_deref(), Some("merge"));
     assert_eq!(runs[0].status, "running");
 
+    if let Some(relay) = relay {
+        relay.abort();
+    }
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
     let _ = std::fs::remove_dir_all(repo_root);

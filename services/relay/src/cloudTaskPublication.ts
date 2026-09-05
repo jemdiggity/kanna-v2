@@ -4,7 +4,8 @@ import { getFirebaseServices } from "./firebase.js";
 
 export const MAX_TASK_SNAPSHOT_BYTES = 512 * 1024;
 const MAX_TASKS = 250;
-const MAX_BATCH_OPERATIONS = 400;
+// Each task removal may also release one singleton claim (Firestore: 500 writes).
+const MAX_BATCH_OPERATIONS = 200;
 const ACCOUNT_DELETIONS_COLLECTION = "accountDeletions";
 
 export type CloudTaskDocument = Record<string, unknown> & {
@@ -66,6 +67,7 @@ export interface CloudTaskPublicationSessionStore extends CloudTaskPublicationSt
 
 export interface CloudTaskPublicationFaultInjection {
   afterGenerationClaim?(generation: CloudTaskPublicationGeneration): Promise<void>;
+  afterTaskBatch?(): Promise<void>;
   onTaskCollectionRead?(): void;
   onTaskDocumentWrite?(kind: "set" | "delete", id: string): void;
 }
@@ -400,9 +402,13 @@ export async function listRepoSingletonOwners(input: {
   remoteUrlHash: string;
   agent: string;
   db?: Firestore;
+  transaction?: FirebaseFirestore.Transaction;
 }): Promise<RepoSingletonOwner[]> {
   const db = input.db ?? getFirebaseServices().db;
-  const desktops = await db.collection(`users/${input.userId}/desktops`).get();
+  const desktopsRef = db.collection(`users/${input.userId}/desktops`);
+  const desktops = input.transaction
+    ? await input.transaction.get(desktopsRef)
+    : await desktopsRef.get();
   // Ignore renderer-era duplicate desktop documents. Server publication owns
   // the deterministic id and reconciles those old subtrees separately.
   const canonicalDesktops = desktops.docs.filter((desktop) => {
@@ -420,7 +426,9 @@ export async function listRepoSingletonOwners(input: {
     }
   }
   const taskSnapshots = await Promise.all(
-    canonicalDesktops.map(async (desktop) => await desktop.ref.collection("tasks").get()),
+    canonicalDesktops.map(async (desktop) => input.transaction
+      ? await input.transaction.get(desktop.ref.collection("tasks"))
+      : await desktop.ref.collection("tasks").get()),
   );
   const owners: RepoSingletonOwner[] = [];
   for (const snapshot of taskSnapshots) {
@@ -463,15 +471,35 @@ export async function claimRepoSingleton(input: {
   afterAbsenceDiscovery?: () => Promise<void>;
 }): Promise<RepoSingletonClaim> {
   const db = input.db ?? getFirebaseServices().db;
-  const owners = await listRepoSingletonOwners(input);
-  if (owners.length > 1) {
-    return { status: "duplicate", machineId: owners[0]!.machineId, taskId: owners[0]!.taskId, owners };
+  // The test barrier models callers that discovered absence simultaneously.
+  // Re-read inside the transaction: a publication/close can race discovery.
+  if (input.afterAbsenceDiscovery) {
+    if ((await listRepoSingletonOwners(input)).length === 0) await input.afterAbsenceDiscovery();
   }
-  if (owners.length === 0) await input.afterAbsenceDiscovery?.();
   const claimRef = repoSingletonClaimRef(db, input.userId, input.remoteUrlHash, input.agent);
   return await db.runTransaction(async (transaction) => {
+    const owners = await listRepoSingletonOwners({ ...input, db, transaction });
+    if (owners.length > 1) {
+      const first = owners[0];
+      if (!first) throw new Error("singleton owners disappeared");
+      return { status: "duplicate", ...first, owners };
+    }
     const snapshot = await transaction.get(claimRef);
-    const stored = parseStoredRepoSingletonClaim(snapshot.data());
+    let stored = parseStoredRepoSingletonClaim(snapshot.data());
+    const raw = snapshot.data();
+    if (!stored && typeof raw?.machineId === "string" && raw.machineId.trim().length > 0) {
+      throw new Error(`singleton claim names owner ${raw.machineId} but has invalid task or fencing state`);
+    }
+    if (stored?.state === "owned" && !owners.some((owner) =>
+      owner.machineId === stored?.machineId && owner.taskId === stored?.taskId)) {
+      // Only a complete authoritative publication can prove an old task gone.
+      // An offline owner with a published open task remains owned indefinitely.
+      const desktop = await transaction.get(db.doc(
+        `users/${input.userId}/desktops/${cloudDesktopDocumentId(stored.machineId)}`,
+      ));
+      if (desktop.data()?.desktopId === stored.machineId
+        && desktop.data()?.singletonDirectoryVersion === 1) stored = null;
+    }
     const published = owners[0];
     if (published) {
       if (stored && (stored.machineId !== published.machineId || stored.taskId !== published.taskId)) {
@@ -491,7 +519,7 @@ export async function claimRepoSingleton(input: {
     }
     if (stored) return { status: stored.state, machineId: stored.machineId, taskId: stored.taskId };
     const owner = { machineId: input.machineId, taskId: input.taskId };
-    transaction.create(
+    transaction.set(
       claimRef,
       storedRepoSingletonClaim(
         input.remoteUrlHash,
@@ -554,7 +582,8 @@ function parseStoredRepoSingletonClaim(value: unknown): StoredRepoSingletonClaim
   if (!isRecord(value)) return null;
   if ((value.state !== "reserved" && value.state !== "owned")
     || typeof value.remoteUrlHash !== "string" || typeof value.agent !== "string"
-    || typeof value.machineId !== "string" || typeof value.taskId !== "string") return null;
+    || typeof value.machineId !== "string" || value.machineId.trim().length === 0
+    || typeof value.taskId !== "string" || value.taskId.trim().length === 0) return null;
   return {
     state: value.state,
     remoteUrlHash: value.remoteUrlHash,
@@ -801,13 +830,32 @@ export function createFirestoreCloudTaskPublicationStore(
         for (let offset = 0; offset < operations.length; offset += MAX_BATCH_OPERATIONS) {
           await db.runTransaction(async (transaction) => {
             await requireCurrentPublication(transaction, deletionRef, desktopRef, generation);
-            for (const operation of operations.slice(offset, offset + MAX_BATCH_OPERATIONS)) {
+            const batch = operations.slice(offset, offset + MAX_BATCH_OPERATIONS);
+            // Read claims before any writes. Release ownership in the same
+            // transaction that removes the closed task from the directory.
+            const releases: FirebaseFirestore.DocumentReference[] = [];
+            for (const operation of batch) {
+              if (operation.kind !== "delete") continue;
+              const previous = existing.find((document) => document.id === operation.id);
+              const claims = singletonClaimsForDesktopTasks([previous?.data], desktopId);
+              for (const [key, owner] of claims) {
+                const [remoteUrlHash, agent] = key.split("\0") as [string, string];
+                const ref = repoSingletonClaimRef(db, userId, remoteUrlHash, agent);
+                const stored = parseStoredRepoSingletonClaim((await transaction.get(ref)).data());
+                if (stored?.machineId === owner.machineId && stored.taskId === owner.taskId) {
+                  releases.push(ref);
+                }
+              }
+            }
+            for (const ref of releases) transaction.delete(ref);
+            for (const operation of batch) {
               const ref = tasksRef.doc(operation.id);
               if (operation.kind === "set") transaction.set(ref, operation.data);
               else transaction.delete(ref);
               faultInjection?.onTaskDocumentWrite?.(operation.kind, operation.id);
             }
           });
+          await faultInjection?.afterTaskBatch?.();
         }
         await reconcileRepoSingletonClaims({
           db,

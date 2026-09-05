@@ -80,6 +80,9 @@ fn connect_test_relay_peer(
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
             match request {
+                crate::http_api::DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let machine_ids = if connected.load(Ordering::SeqCst) {
                         vec![peer.config().desktop_id.clone()]
@@ -137,6 +140,9 @@ fn connect_test_relay_peer_with_long_poll_budget(
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
             match request {
+                crate::http_api::DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
                 }
@@ -197,6 +203,9 @@ fn connect_test_relay_peer_with_invoke_gate(
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
             match request {
+                crate::http_api::DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
                 }
@@ -249,6 +258,9 @@ fn connect_test_relay_peer_with_invoke_events(
         let mut invocation = 0;
         while let Some(request) = requests.recv().await {
             match request {
+                crate::http_api::DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
                 }
@@ -299,6 +311,9 @@ fn connect_unresponsive_listed_peer(
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
             match request {
+                crate::http_api::DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
                 crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
                     let _ = response.send(Ok(vec![machine_id.clone()]));
                 }

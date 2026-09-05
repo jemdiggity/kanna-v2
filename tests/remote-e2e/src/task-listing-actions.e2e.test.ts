@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -91,6 +92,21 @@ describe("remote task listing, creation, and actions E2E", () => {
 
   beforeAll(async () => {
     harness = await startRemoteHarness();
+    const desktopSecret = createHash("sha256").update(`${harness.desktopId}:singleton-e2e`).digest("hex");
+    const credential = await fetch(`${firestoreBaseUrl(harness)}/desktopCredentials/${harness.desktopId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${await harness.getIdToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ fields: {
+        desktopId: { stringValue: harness.desktopId },
+        displayName: { stringValue: "Singleton E2E Desktop" },
+        desktopSecretHash: { stringValue: createHash("sha256").update(desktopSecret).digest("hex") },
+        revokedAt: { nullValue: null }, uid: { stringValue: BUFFY_UID },
+        updatedAt: { stringValue: new Date().toISOString() },
+      } }),
+    });
+    if (!credential.ok) throw new Error(`credential fixture failed: ${credential.status} ${await credential.text()}`);
+    await harness.restartServerWithIdentity({ desktopId: harness.desktopId, desktopSecret });
+    await harness.waitForDesktop();
   }, 240_000);
 
   afterAll(async () => {
@@ -464,6 +480,10 @@ describe("remote task listing, creation, and actions E2E", () => {
       ])
     );
 
+    const remoteUrlHash = createHash("sha256").update(`singleton-e2e:${advanceTask.repoId}`).digest("hex");
+    await invokeDesktop(harness, "PATCH", `/v1/repos/${advanceTask.repoId}`, { remoteUrlHash });
+    const claimKey = createHash("sha256").update(remoteUrlHash).update("\0merge").digest("hex");
+    const claimUrl = `${firestoreBaseUrl(harness)}/users/${BUFFY_UID}/repoSingletonClaims/${claimKey}`;
     const mergeResponse = asActionResponse(await invokeDesktop(
       harness,
       "POST",
@@ -479,6 +499,37 @@ describe("remote task listing, creation, and actions E2E", () => {
       );
       return rows[0]?.display_name === "Merge Master" && rows[0]?.pipeline === "singleton-merge";
     }, 10_000, "merge agent task was not recorded");
+
+    // Closing idle singletons is ordinary cleanup. The explicit handoff must
+    // recover through account ownership arbitration, including publication.
+    await invokeDesktop(harness, "POST", `/v1/tasks/${mergeResponse.taskId}/actions/close`, null);
+    const replacement = asActionResponse(await invokeDesktop(
+      harness, "POST", `/v1/tasks/${advanceTask.taskId}/actions/signal-merge-handoff`,
+      { branch: "feature/reclaim", target: "main", summary: "Reclaim closed Merge Master" }
+    ));
+    expect(replacement.taskId).not.toBe(mergeResponse.taskId);
+    await waitForCondition(async () => {
+      const rows = await querySql(harness,
+        "SELECT id FROM pipeline_item WHERE pipeline = 'singleton-merge' AND closed_at IS NULL"
+      );
+      return rows.length === 1 && rows[0]?.id === replacement.taskId;
+    }, 30_000, "handoff did not recreate exactly one Merge Master");
+    await waitForCondition(async () => {
+      const response = await fetch(claimUrl, { headers: { Authorization: "Bearer owner" } });
+      if (response.status === 404) return false;
+      if (!response.ok) throw new Error(`claim read failed: ${response.status}`);
+      const document = asRecord(await response.json());
+      const fields = asRecord(document.fields);
+      return asRecord(fields.machineId).stringValue === harness.desktopId
+        && asRecord(fields.taskId).stringValue === replacement.taskId;
+    }, 30_000, "replacement owner was not published to the account claim");
+    await invokeDesktop(harness, "POST", `/v1/tasks/${replacement.taskId}/actions/close`, null);
+    await waitForCondition(async () => {
+      const response = await fetch(claimUrl, { headers: { Authorization: "Bearer owner" } });
+      if (response.status === 404) return true;
+      if (!response.ok) throw new Error(`claim read failed: ${response.status}`);
+      return false;
+    }, 30_000, "closing the replacement did not release the cloud claim");
 
     const closeTask = await createScriptedTask(harness, {
       displayName: "Remote close task"
@@ -518,7 +569,7 @@ describe("remote task listing, creation, and actions E2E", () => {
 
 async function invokeDesktop(
   harness: RemoteHarness,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PATCH",
   path: string,
   body: unknown
 ): Promise<unknown> {
@@ -813,4 +864,8 @@ function getOptionalString(record: JsonRecord, key: string): string | null {
     throw new Error(`expected optional string field ${key} in ${JSON.stringify(record)}`);
   }
   return value;
+}
+
+function firestoreBaseUrl(harness: RemoteHarness): string {
+  return `http://127.0.0.1:${harness.ports.firestore}/v1/projects/kanna-local/databases/(default)/documents`;
 }

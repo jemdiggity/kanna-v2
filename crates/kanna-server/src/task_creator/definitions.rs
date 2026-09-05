@@ -543,8 +543,16 @@ impl RepoDefinitions {
     }
 
     pub(super) fn workflow(&self, name: &str) -> Result<WorkflowDefinition, String> {
-        self.workflow_optional(name)?
-            .ok_or_else(|| format!("compiled resource not found: .kanna/workflows/{name}.json"))
+        self.workflow_optional(name)?.ok_or_else(|| {
+            if let Some(agent) = name.strip_prefix("singleton-") {
+                return format!(
+                    "{name} is a synthetic singleton workflow; create or recover it with \
+                     kanna_signal_agent (agent: {agent}) or, for merge, kanna_signal_merge_handoff; \
+                     these operations atomically claim account-wide ownership"
+                );
+            }
+            format!("compiled resource not found: .kanna/workflows/{name}.json")
+        })
     }
 
     pub(super) fn workflow_optional(
