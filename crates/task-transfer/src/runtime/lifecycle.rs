@@ -328,6 +328,12 @@ impl TransferRuntime {
                 None,
             ),
         };
+        #[cfg(test)]
+        let discovery = config
+            .mdns_fixture
+            .as_ref()
+            .map(|state| PeerDiscovery::MdnsFixture(Arc::clone(state)))
+            .unwrap_or(discovery);
         let (incoming_sender, incoming_receiver) =
             runtime_event_channel_with_capacity(config.max_lifecycle_events.max(1));
         let (receipt_sender, receipt_receiver) =

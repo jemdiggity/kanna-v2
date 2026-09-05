@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   cleanupProcessInventory,
   processIdentity,
@@ -81,29 +81,78 @@ describe("kd process inventory", () => {
   });
 
   it("serializes concurrent writers without losing resources", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "kanna-inventory-concurrent-"));
+    const root = resolve("../../.tmp");
+    mkdirSync(root, { recursive: true });
+    const directory = mkdtempSync(join(root, "inventory-interleaving-"));
     const path = join(directory, "inventory.json");
-    const modulePath = resolve("src/runtime/process-inventory.ts");
-    const childEnv: NodeJS.ProcessEnv = {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      TMPDIR: process.env.TMPDIR,
-    };
-    const children = Array.from({ length: 8 }, (_, index) => spawn(
-      process.execPath,
-      ["--experimental-strip-types", "-e", `import { recordInventoryResource } from ${JSON.stringify(modulePath)}; recordInventoryResource(${JSON.stringify(path)}, { kind: 'tmux-server', socket: 'socket-${index}' });`],
-      { stdio: ["ignore", "ignore", "pipe"], env: childEnv }
-    ));
-    await Promise.all(children.map((child) => new Promise<void>((resolveExit, reject) => {
+    // Seed a readable inventory so the fixture can gate after the read but
+    // before the mutation is written, inside the writer's critical section.
+    recordInventoryResource(path, { kind: "tmux-server", socket: "seed" });
+    interface Writer {
+      child: ReturnType<typeof spawn>;
+      exited: Promise<number | null>;
+      release: () => void;
+      wait: (event: string) => Promise<void>;
+    }
+    const writers: Writer[] = [];
+    function startWriter(socket: string, gateAt: "inventory" | "owner"): Writer {
+      const child = spawn(process.execPath, [
+        "--experimental-strip-types", resolve("tests/fixtures/inventory-writer.mjs"),
+        resolve("src/runtime/process-inventory.ts"), path, socket, gateAt,
+      ], { stdio: ["ignore", "pipe", "pipe"], env: {
+        PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
+      } });
+      let output = "";
       let stderr = "";
-      child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-      child.once("error", reject);
-      child.once("exit", (code) => code === 0 ? resolveExit() : reject(new Error(`writer exited ${code}: ${stderr}`)));
-    })));
-    expect(readProcessInventory(path).map((resource) => resource.kind === "tmux-server" ? resource.socket : "").sort())
-      .toEqual(Array.from({ length: 8 }, (_, index) => `socket-${index}`).sort());
-    expect(readFileSync(path, "utf8")).toContain('"version": 1');
-  }, 20_000);
+      child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      const exited = new Promise<number | null>((resolveExit, reject) => {
+        child.once("error", reject);
+        child.once("exit", resolveExit);
+      });
+      const writer = {
+        child, exited,
+        release: () => writeFileSync(`${path}.${socket}.release`, ""),
+        wait: async (event: string) => {
+          await vi.waitUntil(() => {
+            if (output.includes(`${event}\n`)) return true;
+            if (child.exitCode !== null) throw new Error(`writer ${socket} exited before ${event}: ${output} ${stderr}`);
+            return false;
+          });
+        },
+      };
+      writers.push(writer);
+      return writer;
+    }
+    try {
+      const first = startWriter("first", "inventory");
+      await first.wait("gated");
+      const contender = startWriter("contender", "owner");
+      await contender.wait("gated");
+      first.release();
+      expect(await first.exited).toBe(0);
+
+      const replacement = startWriter("replacement", "inventory");
+      await replacement.wait("gated");
+      // The contender holds first's metadata, but first has exited and the
+      // lock now belongs to replacement. Recovery must preserve that lock.
+      contender.release();
+      await contender.wait("contended-again");
+      expect(existsSync(`${path}.lock`)).toBe(true);
+      replacement.release();
+      expect(await replacement.exited).toBe(0);
+      expect(await contender.exited).toBe(0);
+      expect(readProcessInventory(path).map((resource) => resource.kind === "tmux-server" ? resource.socket : "").sort())
+        .toEqual(["contender", "first", "replacement", "seed"]);
+      expect(readFileSync(path, "utf8")).toContain('"version": 1');
+    } finally {
+      for (const writer of writers) {
+        writer.release();
+        if (writer.child.exitCode === null) writer.child.kill("SIGKILL");
+      }
+      await Promise.all(writers.map((writer) => writer.exited));
+    }
+  });
 
   it("publishes owner metadata atomically with the inventory lock", async () => {
     const directory = mkdtempSync(join(tmpdir(), "kanna-inventory-publication-"));

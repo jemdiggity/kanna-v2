@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { CommandRunner } from "./process";
 
@@ -173,17 +173,17 @@ async function waitForIdentityToDisappear(
 
 function mutateInventory(path: string, mutation: (resources: InventoryResource[]) => InventoryResource[]): void {
   const lock = `${path}.lock`;
-  const lockOwner = join(lock, "owner.json");
+  const ownerName = `owner-${process.pid}-${Math.random().toString(16).slice(2)}.json`;
   mkdirSync(dirname(path), { recursive: true });
   const deadline = Date.now() + 5_000;
   while (true) {
     const candidate = `${lock}.pending-${process.pid}-${Math.random().toString(16).slice(2)}`;
     try {
       mkdirSync(candidate);
-      writeFileSync(join(candidate, "owner.json"), JSON.stringify({
-        pid: process.pid,
-        identity: processIdentity(process.pid)
-      }));
+      const owner = JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid) });
+      writeFileSync(join(candidate, ownerName), owner);
+      // Keep metadata readable by an older desktop/daemon during an upgrade.
+      writeFileSync(join(candidate, "owner.json"), owner);
       const publishDelay = Number(process.env.KANNA_TEST_INVENTORY_LOCK_PUBLISH_DELAY_MS ?? 0);
       if (publishDelay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, publishDelay);
       renameSync(candidate, lock);
@@ -191,44 +191,58 @@ function mutateInventory(path: string, mutation: (resources: InventoryResource[]
     } catch (error) {
       rmSync(candidate, { recursive: true, force: true });
       if (!isAlreadyExists(error) || Date.now() >= deadline) throw error;
-      if (isAbandonedLock(lock, lockOwner)) {
-        const abandoned = `${lock}.abandoned-${process.pid}-${Math.random().toString(16).slice(2)}`;
-        try {
-          renameSync(lock, abandoned);
-          rmSync(abandoned, { recursive: true, force: true });
-        } catch {
-          // Another writer recovered or replaced it first; retry acquisition.
-        }
-      }
+      const abandonedOwner = abandonedLockOwner(lock);
+      if (abandonedOwner) removeLockOwner(lock, abandonedOwner);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }
   }
   try {
     writeInventory(path, mutation(readProcessInventory(path)));
   } finally {
-    const released = `${lock}.released-${process.pid}-${Math.random().toString(16).slice(2)}`;
-    try {
-      renameSync(lock, released);
-      rmSync(released, { recursive: true, force: true });
-    } catch {
-      // A failed release must never remove a lock subsequently acquired by
-      // another writer. Its owner metadata allows ordinary crash recovery.
-    }
+    removeLockOwner(lock, join(lock, ownerName));
   }
 }
 
-function isAbandonedLock(lock: string, ownerPath: string): boolean {
+function removeLockOwner(lock: string, ownerPath: string): void {
+  // Never rename/remove the lock directory based on a stale ownership read.
+  // Only this generation's unique marker may be unlinked. rmdir is atomic
+  // and refuses a replacement generation, whose marker makes it nonempty.
+  try {
+    unlinkSync(ownerPath);
+    if (ownerPath !== join(lock, "owner.json")) rmSync(join(lock, "owner.json"), { force: true });
+  } catch (error) {
+    if (!isRecord(error) || error.code !== "ENOENT") throw error;
+  }
+  try {
+    rmdirSync(lock);
+  } catch (error) {
+    if (!isRecord(error) || !["ENOENT", "ENOTEMPTY", "EEXIST"].includes(String(error.code))) throw error;
+  }
+}
+
+function abandonedLockOwner(lock: string): string | undefined {
+  let ownerPath: string;
+  try {
+    const entries = readdirSync(lock);
+    const marker = entries.find((entry) => entry.startsWith("owner-") && entry.endsWith(".json"));
+    if (!marker && !entries.includes("owner.json")) return undefined;
+    ownerPath = join(lock, marker ?? "owner.json");
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
   try {
     const owner: unknown = JSON.parse(readFileSync(ownerPath, "utf8"));
-    if (!isRecord(owner) || !Number.isInteger(owner.pid) || typeof owner.identity !== "string") return false;
-    return processIdentity(Number(owner.pid)) !== owner.identity;
+    if (!isRecord(owner) || !Number.isInteger(owner.pid) || typeof owner.identity !== "string") return undefined;
+    return processIdentity(Number(owner.pid)) !== owner.identity ? ownerPath : undefined;
   } catch {
-    // mkdir and owner metadata are separate syscalls. Only recover an empty or
-    // damaged directory after allowing an in-flight owner time to publish it.
+    // Retain legacy damaged-metadata recovery, but remove only the exact
+    // marker inspected, never a subsequently published directory.
     try {
-      return Date.now() - statSync(lock).mtimeMs >= 1_000;
-    } catch {
-      return false;
+      return Date.now() - statSync(ownerPath).mtimeMs >= 1_000 ? ownerPath : undefined;
+    } catch (error) {
+      if (isRecord(error) && error.code === "ENOENT") return undefined;
+      throw error;
     }
   }
 }
