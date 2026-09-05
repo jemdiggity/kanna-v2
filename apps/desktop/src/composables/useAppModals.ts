@@ -24,7 +24,6 @@ import {
   MARKDOWN_PREVIEW_MODE_SETTING_KEY,
   type MarkdownPreviewMode,
 } from "../stores/markdownPreviewMode";
-import type { PendingReviewComment } from "../utils/reviewComments";
 import type {
   DiffTearOffContext,
   ModalTearOffContext,
@@ -50,8 +49,6 @@ export interface DiffViewState {
   scope?: DiffScope;
   scrollPositions?: DiffScrollPositions;
   branchInclude?: BranchInclude;
-  reviewComments?: PendingReviewComment[];
-  reviewHeadCommit?: string;
 }
 
 interface FilePreviewRecallState {
@@ -272,10 +269,6 @@ export function useAppModals({
           : {}),
         ...(context.initialBranchInclude
           ? { branchInclude: context.initialBranchInclude }
-          : {}),
-        ...(context.reviewComments ? { reviewComments: context.reviewComments } : {}),
-        ...(context.reviewHeadCommit
-          ? { reviewHeadCommit: context.reviewHeadCommit }
           : {}),
       };
     }

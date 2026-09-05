@@ -1568,8 +1568,7 @@ final stage, goes `unread`, and emits `task.merge_handoff_missing`. A watcher
 must read that as a failed approval, never as a finished workflow.
 
 A workflow whose final stage declares no `approve` post promised no merge side
-effect, and nothing is enforced on its behalf — the same rule the desktop's
-approval UI uses (`pinnedApproveMergePost`).
+effect, and nothing is enforced on its behalf.
 
 New merge sessions accept ordinary terminal input. On startup and after daemon
 replacement, kanna-server clears the retired native-terminal-only

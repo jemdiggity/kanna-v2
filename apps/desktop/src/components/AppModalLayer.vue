@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import type { ComponentPublicInstance } from "vue";
-import { computed } from "vue";
 
 import NewTaskModal from "./NewTaskModal.vue";
 import AddRepoModal from "./AddRepoModal.vue";
@@ -25,8 +24,6 @@ import type {
   DiffScope,
   DiffScrollPositions,
 } from "../composables/useAppModals";
-import type { PendingReviewComment } from "../utils/reviewComments";
-import { pinnedApproveMergePost } from "../utils/pinnedStage";
 import type { AppModalLayerController } from "./AppModalLayer.types";
 
 const props = defineProps<{
@@ -36,21 +33,6 @@ const props = defineProps<{
 const c = props.controller;
 const m = c.appModals;
 const preferences = c.appPreferences.preferences;
-
-// Approval capability comes from the durable task's pinned pipeline_def:
-// only a pinned current stage with the merge-signaling approve post may
-// present approval as a merge.
-const diffApproveSignalsMerge = computed(() => {
-  if (m.transferredDiffContext.value?.approveSignalsMerge !== undefined) {
-    return m.transferredDiffContext.value.approveSignalsMerge;
-  }
-  const item = m.activeTask.value;
-  return item ? pinnedApproveMergePost(item) : false;
-});
-const diffHasRunningPost = computed(() =>
-  m.transferredDiffContext.value?.hasRunningPost
-    ?? Boolean(m.activeTask.value?.has_running_post)
-);
 
 function setShellModalRef(component: Element | ComponentPublicInstance | null) {
   m.shellModalRef.value = component as InstanceType<typeof ShellModal> | null;
@@ -154,12 +136,6 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :base-ref="m.transferredDiffContext.value?.baseRef ?? m.activeTask.value?.base_ref ?? undefined"
     :view-key="m.currentDiffViewKey.value"
     :maximized="m.maximizedModal.value === 'diff'"
-    :task-id="m.transferredDiffContext.value?.taskId ?? m.activeTask.value?.id"
-    :review-stage="m.transferredDiffContext.value?.reviewStage ?? m.activeTask.value?.stage ?? undefined"
-    :review-comments="m.currentDiffViewState.value?.reviewComments"
-    :review-head-commit="m.currentDiffViewState.value?.reviewHeadCommit"
-    :approve-signals-merge="diffApproveSignalsMerge"
-    :has-running-post="diffHasRunningPost"
     :remote-diff-loader="m.activeTaskViewIsRemote.value ? m.readRemoteTaskDiff : undefined"
     :remote-desktop-id="m.activeRemoteTaskRoute.value?.desktopId"
     :remote-task-id="m.activeRemoteTaskRoute.value?.taskId"
@@ -167,8 +143,6 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     @scope-change="(scope: DiffScope) => m.updateCurrentDiffViewState({ scope })"
     @scroll-state-change="(scrollPositions: DiffScrollPositions) => m.updateCurrentDiffViewState({ scrollPositions })"
     @branch-include-change="(branchInclude: BranchInclude) => m.updateCurrentDiffViewState({ branchInclude })"
-    @review-head-change="(reviewHeadCommit: string) => m.updateCurrentDiffViewState({ reviewHeadCommit })"
-    @review-comments-change="(reviewComments: PendingReviewComment[]) => m.updateCurrentDiffViewState({ reviewComments })"
     @close="m.closeDiffModal"
   />
   <CommitGraphModal

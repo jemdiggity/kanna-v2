@@ -20,10 +20,10 @@ semantics, and the MCP task-management rule — stay in the repo-root
 
 **Review and merge:**
 1. Agent finishes → task marked as unread (bold in sidebar)
-2. User selects task, presses Cmd+D → diff modal shows all branch changes
+2. User selects task, presses Cmd+D → the general-purpose diff modal shows all branch changes
 3. Optionally Cmd+P → file picker → preview, Cmd+O → open in IDE, or Cmd+J → shell in worktree
 4. Cmd+S → advance the workflow (commit post runs in-session; the pr-stage agent creates the GitHub PR and reports its URL)
-5. Human reviews the PR, then Cmd+S (or the diff modal's approve button) advances the pr stage: when the task's pinned workflow ships the `approve` post, the button reads "Approve & Merge" and the post signals the merge master, which merges it; pinned workflows without the post get a plain "Approve" that only advances. Approval is single-flight: while the post runs the button is disabled and repeated Cmd+S is ignored — only the post's completion closes the task. Shift+Cmd+S in the diff modal sends the task back to `in progress` for revisions instead.
+5. Human reviews the PR through its preserved PR link, then uses the ordinary task stage-advance action. When the task's pinned workflow ships the `approve` post, that post hands approved work to the merge queue/master; pinned workflows without the post only advance. The workflow's existing single-flight and completion semantics remain unchanged.
 
 **Revisions.** Sending a task back for revision follows these contracts
 (engine code: `crates/kanna-server/src/task_creator/{stages,resume}.rs`):
@@ -133,14 +133,13 @@ Tasks can be pinned to the top of their repo's task list by dragging above the p
 | ⇧⌘N | New task |
 | ⌘N / ⌘W | New window / close window |
 | ⌘D | Diff modal |
-| ⇧⌘S | Request changes (diff modal — send back for revision) |
 | ⌘J | Shell modal |
 | ⇧⌘J | Shell at repo root |
 | ⌘P | File picker |
 | ⌥⌘P | Toggle file preview |
 | ⌘O | Open in IDE |
 | ⌘L | Open latest file link |
-| ⌘S | Advance stage / approve (runs the stage's post first; blocked while a post is running) |
+| ⌘S | Advance stage (runs the stage's post first; blocked while a post is running) |
 | ⇧⌘⌫ | Close task |
 | ⌥⌘↑/↓ | Navigate tasks |
 | ⇧⌘↑/↓ | Navigate repos |

@@ -236,10 +236,6 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       await invoke("run_script", { script: `${store.ideCommand} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch((e) => console.error("[openInIDE] failed:", e));
     },
     advanceStage: () => {
-      if (showDiffModal.value) {
-        void diffModalRef.value?.approveReview();
-        return;
-      }
       const workspaceTask = selectedWorkspaceTask.value;
       if (workspaceTask) {
         if (selectedWorkspaceTaskBlocked.value) {
@@ -260,9 +256,6 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (!item) return;
       if (store.selectedTaskId && item.id !== store.selectedTaskId) return;
       void store.advanceStage(item.id);
-    },
-    requestChanges: () => {
-      diffModalRef.value?.requestChanges();
     },
     closeTask: async () => {
       await closeSelectedWorkspaceTask();
@@ -294,10 +287,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       // Shell before diff: let Escape reach the shell terminal (vim, etc.)
       if (showShellModal.value) { return; }
       if (showDiffModal.value) {
-        const shouldCloseDiff = diffModalRef.value?.dismiss() ?? true;
-        if (shouldCloseDiff) {
-          closeDiffModal();
-        }
+        closeDiffModal();
         return true;
       }
       if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return true; }

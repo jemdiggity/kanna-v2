@@ -1156,10 +1156,8 @@ pub(crate) fn resolve_revision_budget(
 const MERGE_APPROVE_POST: &str = "approve";
 
 /// True when the task's pinned stage declares the merge-signaling `approve`
-/// post. Mirrors `pinnedApproveMergePost` in the desktop
-/// (`apps/desktop/src/utils/pinnedStage.ts`): pre-change snapshots and custom
-/// workflows without that post promise no merge side effect, so nothing may
-/// be enforced on their behalf.
+/// post. Pre-change snapshots and custom workflows without that post promise
+/// no merge side effect, so nothing may be enforced on their behalf.
 pub(crate) fn stage_declares_merge_approve_post(
     repo: &Repo,
     workflow_name: &str,

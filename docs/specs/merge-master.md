@@ -31,9 +31,10 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 1. Task walks the workflow to `pr` (manual). The pr agent published the
    branch per the user's forge convention (draft PR, or plain push) and
    reported the final `pr_url` after any reuse or retargeting.
-2. Human reviews **in Kanna**: ⌘D branch diff. Verdicts are stage actions:
-   - request changes → `request-revision` with feedback (exists);
-   - approve → ⌘S, which dispatches the pr stage's **approve post**. The post
+2. Human reviews through the PR link (the general-purpose ⌘D branch diff and
+   file viewers remain available for inspection). Kanna currently exposes no
+   dedicated in-app PR review surface. Verdicts are stage actions:
+   - approval → ⌘S, which dispatches the pr stage's **approve post**. The post
      resolves the live PR and signals the merge master through the dedicated
      handoff route. Post success at the final stage closes the task.
 3. The merge master folds the request into its picture, merges when safe
@@ -59,11 +60,9 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   left alive, so it cannot be the only thing standing between a finished PR and
   the merge master. See
   [kanna-server-boundary.md](../kanna-server-boundary.md#merge-handoff).
-- Later: a verdict UI on tasks parked at `pr` (request-changes composer →
-  request-revision; approve button → advance). Forge-blind — it fires
-  stage actions. Line-anchored diff feedback is a follow-up (needs an
-  @pierre/diffs annotation spike) — now specced in
-  [native-review.md](./native-review.md).
+- A replacement review experience is intentionally out of scope here and is
+  being designed separately in task 231ad8fc. The merge-stage behavior above
+  remains the supported approval path.
 
 ## User-space work (reference implementations, all `.kanna/` files)
 

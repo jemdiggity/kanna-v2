@@ -58,7 +58,6 @@ function createHarness(options: {
   workspaceTask?: WorkspaceTask | null;
   workspaceTaskBlocked?: boolean;
   diffOpen?: boolean;
-  approveReview?: () => Promise<void>;
 } = {}) {
   const openWindow = vi.fn(async () => {});
   const advanceStage = vi.fn(async () => {});
@@ -82,7 +81,7 @@ function createHarness(options: {
     selectedWorkspaceTaskBlocked: computed(() => options.workspaceTaskBlocked ?? false),
     advanceSelectedRemoteWorkspaceTask,
     showDiffModal: ref(options.diffOpen ?? false),
-    diffModalRef: ref(options.approveReview ? { approveReview: options.approveReview } : null),
+    diffModalRef: ref(null),
     currentShortcutContext: computed(() => "main"),
     showShortcutsModal: ref(false),
     navigateBack,
@@ -143,18 +142,15 @@ describe("useAppKeyboardActions durable selection", () => {
     expect(advanceStage).toHaveBeenCalledWith("task-durable");
   });
 
-  it("routes the diff-context approval shortcut through the modal approval flow", () => {
-    const approveReview = vi.fn(async () => {});
+  it("advances a selected task while its diff modal is open", () => {
     const { keyboardActions, advanceStage } = createHarness({
       diffOpen: true,
-      approveReview,
       currentItem: item("task-durable"),
     });
 
     keyboardActions.advanceStage();
 
-    expect(approveReview).toHaveBeenCalledOnce();
-    expect(advanceStage).not.toHaveBeenCalled();
+    expect(advanceStage).toHaveBeenCalledWith("task-durable");
   });
 
   it("does not advance a selected remote task while its blocker is unresolved", () => {
