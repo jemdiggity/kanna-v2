@@ -1,5 +1,3 @@
-import type { PendingReviewComment } from "./utils/reviewComments";
-
 export type RemoteTaskViewTransport = "lan" | "cloud";
 
 export interface TreeExplorerTearOffContext {
@@ -21,12 +19,6 @@ export interface DiffTearOffContext {
   initialBranchInclude?: "none" | "staged" | "all";
   baseRef?: string;
   viewKey?: string;
-  taskId?: string;
-  reviewStage?: string;
-  reviewComments?: PendingReviewComment[];
-  reviewHeadCommit?: string;
-  approveSignalsMerge?: boolean;
-  hasRunningPost?: boolean;
   remoteDesktopId?: string;
   remoteTaskId?: string;
   remoteTransport?: RemoteTaskViewTransport;

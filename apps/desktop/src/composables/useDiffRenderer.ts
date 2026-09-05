@@ -3,9 +3,7 @@ import {
   FileDiff,
   parsePatchFiles,
   setLanguageOverride,
-  type AnnotationSide,
   type FileDiffMetadata,
-  type SelectedLineRange,
 } from "@pierre/diffs";
 import {
   getOrCreateWorkerPoolSingleton,
@@ -24,14 +22,6 @@ export interface DiffRenderContext {
   loadId: number;
   loadStartedAt: number;
   allLines: boolean;
-}
-
-export interface DiffReviewAnchor {
-  filePath: string;
-  startLine: number;
-  endLine: number;
-  excerpt: string;
-  overlayTop?: number;
 }
 
 interface DiffFilePathMetadata {
@@ -79,8 +69,6 @@ interface UseDiffRendererOptions {
   finishPendingScrollRestore: (context: DiffRenderContext) => void;
   applySearchHighlights: () => void;
   setNoDiff: (noDiff: boolean) => void;
-  reviewEnabled: Readonly<Ref<boolean>>;
-  onReviewAnchor?: (anchor: DiffReviewAnchor) => void;
 }
 
 const DIFF_RENDER_BATCH_SIZE = 12;
@@ -230,77 +218,6 @@ function resolveRenderableFileMeta(
   );
 }
 
-function getContentLineNumber(
-  hunk: FileDiffMetadata["hunks"][number],
-  content: FileDiffMetadata["hunks"][number]["hunkContent"][number],
-  side: AnnotationSide,
-): number {
-  if (side === "additions") {
-    return hunk.additionStart + (content.additionLineIndex - hunk.additionLineIndex);
-  }
-  return hunk.deletionStart + (content.deletionLineIndex - hunk.deletionLineIndex);
-}
-
-function getContentLineIndex(
-  content: FileDiffMetadata["hunks"][number]["hunkContent"][number],
-  side: AnnotationSide,
-): number {
-  return side === "additions" ? content.additionLineIndex : content.deletionLineIndex;
-}
-
-function getContentLineCount(
-  content: FileDiffMetadata["hunks"][number]["hunkContent"][number],
-  side: AnnotationSide,
-): number {
-  if (content.type === "context") return content.lines;
-  return side === "additions" ? content.additions : content.deletions;
-}
-
-function findLineText(
-  fileMeta: FileDiffMetadata,
-  side: AnnotationSide,
-  lineNumber: number,
-): string | null {
-  const lines = side === "additions" ? fileMeta.additionLines : fileMeta.deletionLines;
-  for (const hunk of fileMeta.hunks) {
-    for (const content of hunk.hunkContent) {
-      const contentLineCount = getContentLineCount(content, side);
-      if (contentLineCount <= 0) continue;
-      const contentStartLine = getContentLineNumber(hunk, content, side);
-      const offset = lineNumber - contentStartLine;
-      if (offset >= 0 && offset < contentLineCount) {
-        return lines[getContentLineIndex(content, side) + offset] ?? null;
-      }
-    }
-  }
-  return null;
-}
-
-function collectExcerpt(
-  fileMeta: FileDiffMetadata,
-  side: AnnotationSide,
-  startLine: number,
-  endLine: number,
-): string {
-  const firstLine = Math.min(startLine, endLine);
-  const lastLine = Math.max(startLine, endLine);
-  const excerptLines: string[] = [];
-  for (let lineNumber = firstLine; lineNumber <= lastLine; lineNumber += 1) {
-    const lineText = findLineText(fileMeta, side, lineNumber);
-    if (lineText != null) {
-      excerptLines.push(lineText);
-    }
-  }
-  return excerptLines.join("\n");
-}
-
-function getOverlayTop(container: HTMLElement | null, lineElement?: HTMLElement): number | undefined {
-  if (!container || !lineElement) return undefined;
-  const containerRect = container.getBoundingClientRect();
-  const lineRect = lineElement.getBoundingClientRect();
-  return Math.max(0, lineRect.top - containerRect.top + container.scrollTop);
-}
-
 export function useDiffRenderer(options: UseDiffRendererOptions) {
   const renderedFiles = ref<DiffSearchFile[]>([]);
   let workerPool: WorkerPoolManager | null = null;
@@ -371,22 +288,6 @@ export function useDiffRenderer(options: UseDiffRendererOptions) {
     let didLogPostRender = false;
     const fileMeta = resolveRenderableFileMeta(entry.rawFileMeta, entry.displayPath);
 
-    function openReviewAnchor(
-      side: AnnotationSide,
-      startLine: number,
-      endLine: number,
-      lineElement?: HTMLElement,
-    ): void {
-      if (!options.reviewEnabled.value) return;
-      options.onReviewAnchor?.({
-        filePath: entry.displayPath,
-        startLine: Math.min(startLine, endLine),
-        endLine: Math.max(startLine, endLine),
-        excerpt: collectExcerpt(fileMeta, side, startLine, endLine),
-        overlayTop: getOverlayTop(options.containerRef.value, lineElement),
-      });
-    }
-
     const instance = new FileDiff(
       {
         theme: options.diffTheme.value,
@@ -394,21 +295,6 @@ export function useDiffRenderer(options: UseDiffRendererOptions) {
         diffIndicators: "classic",
         disableFileHeader: true,
         expandUnchanged: context.allLines,
-        lineHoverHighlight: "number",
-        enableLineSelection: true,
-        onLineNumberClick: (props) => {
-          openReviewAnchor(
-            props.annotationSide,
-            props.lineNumber,
-            props.lineNumber,
-            props.lineElement,
-          );
-        },
-        onLineSelected: (range: SelectedLineRange | null) => {
-          if (!range || range.start === range.end) return;
-          if (range.side && range.endSide && range.side !== range.endSide) return;
-          openReviewAnchor(range.side ?? "additions", range.start, range.end);
-        },
         onPostRender: () => {
           if (didLogPostRender || !options.isActiveDiffLoad(context.loadId)) return;
           didLogPostRender = true;

@@ -5,9 +5,10 @@ Related: [native-review.md](./native-review.md), [merge-master.md](./merge-maste
 [task-graph-stages.md](./task-graph-stages.md)
 
 The path from single-operator Kanna to large, multi-contributor projects —
-without a forge. Builds on native-review (review in-app) and merge-master
-(merge git-first) by answering the remaining question: where does *shared*
-state live when there are N operators and no GitHub?
+without a forge. The former native-review surface is retired; merge-master
+still provides the git-first merge path. This spec answers the remaining
+question: where does *shared* state live when there are N operators and no
+GitHub?
 
 **Parked behind a decision gate.** Native-review's rethink removed the
 review data model this spec was going to inherit: review feedback in Kanna
@@ -281,9 +282,8 @@ bypass visible after the fact.
 
 ## Staging
 
-1. **Native review** ([native-review.md](./native-review.md)) — the
-   review loop in ⌘D; composed messages, no review storage. No
-   dependency on this spec.
+1. **Native review** ([native-review.md](./native-review.md)) — retired. No
+   current dedicated review surface or dependency on this spec.
 2. **Merge without the forge** ([merge-master.md](./merge-master.md)) —
    merge master, git-first agents, CAS push.
 3. **Shared metadata** *(gated — see the decision gate above)* — the

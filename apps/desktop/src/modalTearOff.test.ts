@@ -16,18 +16,9 @@ describe("modal tear-off context", () => {
       initialScrollPositions: { branch: 412, working: 18 },
       initialBranchInclude: "staged",
       baseRef: "origin/main",
-      taskId: "task-1",
       remoteDesktopId: "desktop-owner",
       remoteTaskId: "owner-task-1",
       remoteTransport: "lan",
-      reviewComments: [{
-        id: "comment-1",
-        filePath: "src/日本語.ts",
-        startLine: 4,
-        endLine: 5,
-        excerpt: "const answer = 42;",
-        note: "Keep this state",
-      }],
     };
 
     expect(parseModalTearOffContext(buildModalTearOffUrl(context).slice(1))).toEqual(context);

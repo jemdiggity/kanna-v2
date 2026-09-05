@@ -63,7 +63,6 @@ describe("getShortcutGroups", () => {
       "shortcuts.newTask",
       "shortcuts.focusSearch",
       "shortcuts.advanceStage",
-      "shortcuts.requestChanges",
       "shortcuts.closeReject",
     ]);
 
@@ -205,7 +204,6 @@ describe("useKeyboardShortcuts", () => {
     "openLatestFileLink",
     "toggleFilePreview",
     "advanceStage",
-    "requestChanges",
     "closeTask",
     "undoClose",
     "navigateUp",
@@ -314,7 +312,7 @@ describe("useKeyboardShortcuts", () => {
     wrapper.unmount();
   });
 
-  it("allows approving and requesting changes from the diff modal context", () => {
+  it("does not expose stage approval shortcuts from the diff modal context", () => {
     const actions = buildActions();
     const wrapper = mountShortcutHarness(actions, () => "diff");
 
@@ -332,8 +330,7 @@ describe("useKeyboardShortcuts", () => {
       cancelable: true,
     }));
 
-    expect(actions.advanceStage).toHaveBeenCalledTimes(1);
-    expect(actions.requestChanges).toHaveBeenCalledTimes(1);
+    expect(actions.advanceStage).toHaveBeenCalledTimes(0);
     wrapper.unmount();
   });
 

@@ -5,14 +5,11 @@ import { useLessScroll } from "../composables/useLessScroll";
 import { invoke } from "../invoke";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { useDiffRenderer, type DiffRenderContext } from "../composables/useDiffRenderer";
-import type { DiffReviewAnchor } from "../composables/useDiffRenderer";
 import { useDiffSearch, type DiffSearchBarHandle } from "../composables/useDiffSearch";
 import { useDiffBranchBaseRef } from "../composables/useDiffBranchBaseRef";
 import { getDiffTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { debugLog } from "../utils/debugLog";
-import type { GraphResult } from "../utils/commitGraph";
-import { formatReviewAnchor, type PendingReviewComment } from "../utils/reviewComments";
 import DiffContentPane from "./DiffContentPane.vue";
 import DiffToolbar from "./DiffToolbar.vue";
 import DiffSearchBar from "./DiffSearchBar.vue";
@@ -36,10 +33,6 @@ registerContextShortcuts("diff", [
   { label: t('diffView.shortcutScopeNext'), display: "⇧⌘]", groupKey: "shortcuts.groupViews" },
   { label: t('diffView.shortcutScopePrev'), display: "⇧⌘[", groupKey: "shortcuts.groupViews" },
   { label: t('diffView.shortcutCycleFilter'), display: "s", groupKey: "shortcuts.groupViews" },
-  { label: t('diffView.shortcutToggleComments'), display: "c", groupKey: "shortcuts.groupViews" },
-  { label: t('diffView.shortcutSubmitComment'), display: "⌘Enter", groupKey: "shortcuts.groupActions" },
-  { label: t('diffView.shortcutRequestChanges'), display: "⇧⌘S", groupKey: "shortcuts.groupActions" },
-  { label: t('diffView.shortcutApprove'), display: "⌘S", groupKey: "shortcuts.groupActions" },
   { label: t('diffView.shortcutToggleContext'), display: "a", groupKey: "shortcuts.groupViews" },
   { label: t('diffView.shortcutClose'), display: "q", groupKey: "shortcuts.groupActions" },
 ]);
@@ -78,21 +71,14 @@ const props = defineProps<{
   initialBranchInclude?: BranchInclude;
   baseRef?: string;
   viewKey?: string;
-  reviewEnabled?: boolean;
-  reviewComments?: PendingReviewComment[];
-  reviewHeadCommit?: string;
   remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
 }>();
 const baseRef = computed(() => props.baseRef);
-const reviewEnabled = computed(() => Boolean(props.reviewEnabled) && scope.value === "branch");
-const reviewComments = computed(() => props.reviewComments ?? []);
 
 const emit = defineEmits<{
   (e: "scope-change", scope: DiffScope): void;
   (e: "scroll-state-change", positions: DiffScrollPositions): void;
   (e: "branch-include-change", include: BranchInclude): void;
-  (e: "review-head-change", headCommit: string): void;
-  (e: "review-comments-change", comments: PendingReviewComment[]): void;
   (e: "close"): void;
 }>();
 
@@ -110,10 +96,6 @@ const branchInclude = ref<BranchInclude>(normalizeBranchInclude(props.initialBra
 const scope = ref<DiffScope>(props.initialScope === "branch" ? "branch" : "working");
 const contextMode = ref<DiffContextMode>("compact");
 const scrollPositions = ref<DiffScrollPositions>(cloneScrollPositions(props.initialScrollPositions));
-const commentDrawerOpen = ref(false);
-const composerNote = ref("");
-const activeComposer = ref<DiffReviewAnchor | null>(null);
-const composerDrafts = new Map<string, string>();
 
 const workingFilterLabel = computed(() => {
   const labels: Record<WorkingFilter, string> = {
@@ -161,10 +143,6 @@ const {
   },
   setNoDiff(nextNoDiff) {
     noDiff.value = nextNoDiff;
-  },
-  reviewEnabled,
-  onReviewAnchor(anchor) {
-    openReviewComposer(anchor);
   },
 });
 
@@ -223,77 +201,6 @@ function syncContainerRef() {
 
 function emitScrollStateChange() {
   emit("scroll-state-change", { ...scrollPositions.value });
-}
-
-function buildComposerKey(anchor: DiffReviewAnchor): string {
-  return `${anchor.filePath}:${anchor.startLine}-${anchor.endLine}`;
-}
-
-function newCommentId(): string {
-  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function openReviewComposer(anchor: DiffReviewAnchor) {
-  if (!reviewEnabled.value) return;
-  const key = buildComposerKey(anchor);
-  activeComposer.value = anchor;
-  composerNote.value = composerDrafts.get(key) ?? "";
-  nextTick(() => {
-    const textarea = diffViewRef.value?.querySelector<HTMLTextAreaElement>(".review-composer textarea");
-    textarea?.focus();
-  });
-}
-
-function closeReviewComposer() {
-  if (!activeComposer.value) return;
-  composerDrafts.set(buildComposerKey(activeComposer.value), composerNote.value);
-  activeComposer.value = null;
-}
-
-function submitReviewComposer() {
-  const anchor = activeComposer.value;
-  if (!anchor) return;
-  const note = composerNote.value.trim();
-  if (!note) return;
-  const nextComments: PendingReviewComment[] = [
-    ...reviewComments.value,
-    {
-      id: newCommentId(),
-      filePath: anchor.filePath,
-      startLine: anchor.startLine,
-      endLine: anchor.endLine,
-      excerpt: anchor.excerpt,
-      note,
-      headCommit: props.reviewHeadCommit ?? "HEAD",
-      overlayTop: anchor.overlayTop,
-    },
-  ];
-  composerDrafts.delete(buildComposerKey(anchor));
-  activeComposer.value = null;
-  composerNote.value = "";
-  commentDrawerOpen.value = true;
-  emit("review-comments-change", nextComments);
-}
-
-function updateReviewComment(commentId: string, note: string) {
-  emit("review-comments-change", reviewComments.value.map((comment) =>
-    comment.id === commentId ? { ...comment, note } : comment,
-  ));
-}
-
-function deleteReviewComment(commentId: string) {
-  emit("review-comments-change", reviewComments.value.filter((comment) => comment.id !== commentId));
-}
-
-function isStaleComment(comment: PendingReviewComment): boolean {
-  return Boolean(props.reviewHeadCommit) && comment.headCommit !== props.reviewHeadCommit;
-}
-
-function shortSha(sha: string): string {
-  return sha.slice(0, 8);
 }
 
 function getDiffFilePath(wrapper: HTMLElement): string {
@@ -357,76 +264,6 @@ function findAnchoredLine(activeAnchor: ActiveDiffScrollAnchor): HTMLElement | n
   ) ?? null;
   activeAnchor.lineElement = line;
   return line;
-}
-
-function getElementOverlayTop(element: HTMLElement): number | null {
-  const container = containerRef.value;
-  if (!container) return null;
-  const containerRect = container.getBoundingClientRect();
-  const elementRect = element.getBoundingClientRect();
-  return Math.max(0, elementRect.top - containerRect.top + container.scrollTop);
-}
-
-function findRenderedLineTop(anchor: { filePath: string; startLine: number }): number | null {
-  const wrapper = getFileWrapper(anchor.filePath);
-  if (!wrapper) return null;
-  const lineSelector = `[data-line="${anchor.startLine}"]`;
-  const lineNumberText = String(anchor.startLine);
-  const diffContainers = Array.from(wrapper.querySelectorAll<HTMLElement>("diffs-container"));
-  for (const diffContainer of diffContainers) {
-    const root = diffContainer.shadowRoot;
-    if (!root) continue;
-    const line = root.querySelector<HTMLElement>(lineSelector);
-    const lineTop = line ? getElementOverlayTop(line) : null;
-    if (lineTop != null) return lineTop;
-
-    const lineNumber = Array.from(root.querySelectorAll<HTMLElement>("[data-line-number-content]"))
-      .find((candidate) => candidate.textContent?.trim() === lineNumberText);
-    const lineNumberTop = lineNumber ? getElementOverlayTop(lineNumber) : null;
-    if (lineNumberTop != null) return lineNumberTop;
-  }
-  return null;
-}
-
-function scrollToReviewTop(top: number) {
-  const container = containerRef.value;
-  if (!container) return;
-  container.scrollTo({ top: Math.max(0, top - 12), behavior: "smooth" });
-}
-
-function jumpToReviewAnchor(anchor: { filePath: string; startLine: number; overlayTop?: number }) {
-  if (scope.value !== "branch") {
-    void setScope("branch").then(() => jumpToReviewAnchor(anchor));
-    return;
-  }
-  nextTick(() => {
-    const container = containerRef.value;
-    if (!container) return;
-    if (anchor.overlayTop != null && Number.isFinite(anchor.overlayTop)) {
-      scrollToReviewTop(anchor.overlayTop);
-      return;
-    }
-    const renderedLineTop = findRenderedLineTop(anchor);
-    if (renderedLineTop != null) {
-      scrollToReviewTop(renderedLineTop);
-      return;
-    }
-    const wrapper = getFileWrapper(anchor.filePath);
-    if (!wrapper) return;
-    scrollToReviewTop(wrapper.offsetTop);
-  });
-}
-
-function dismissReviewLayer(): boolean {
-  if (activeComposer.value) {
-    closeReviewComposer();
-    return false;
-  }
-  if (commentDrawerOpen.value) {
-    commentDrawerOpen.value = false;
-    return false;
-  }
-  return true;
 }
 
 function updateScrollPosition(scopeName: DiffScope, top: number) {
@@ -560,7 +397,6 @@ async function loadDiff(options: LoadDiffOptions = {}) {
       });
     } else {
       // "branch" scope — diff from merge base
-      void resolveHeadCommit(path);
       const baseRefStartedAt = performance.now();
       const resolvedBase = await resolveBranchBaseRef(path);
       logDiffPerf(loadId, "base_ref:done", {
@@ -648,21 +484,6 @@ async function loadDiff(options: LoadDiffOptions = {}) {
     if (isActiveDiffLoad(loadId)) {
       loading.value = false;
     }
-  }
-}
-
-async function resolveHeadCommit(path: string) {
-  try {
-    const result = await invoke<GraphResult>("git_graph", {
-      repoPath: path,
-      maxCount: 1,
-      fromRef: "HEAD",
-    });
-    if (result.head_commit) {
-      emit("review-head-change", result.head_commit);
-    }
-  } catch (error) {
-    console.debug("[DiffView] failed to resolve review head commit:", error);
   }
 }
 
@@ -763,12 +584,6 @@ useLessScroll(containerRef, {
       return true;
     }
 
-    if (e.key === "c" && noMods) {
-      e.preventDefault();
-      commentDrawerOpen.value = !commentDrawerOpen.value;
-      return true;
-    }
-
     if (e.key === "N" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && isSearching.value) {
       e.preventDefault();
       prevMatch();
@@ -821,7 +636,7 @@ onUnmounted(() => {
   cleanupInstance();
 });
 
-defineExpose({ refresh: loadDiff, dismissReviewLayer, jumpToReviewAnchor });
+defineExpose({ refresh: loadDiff });
 </script>
 
 <template>
@@ -852,47 +667,6 @@ defineExpose({ refresh: loadDiff, dismissReviewLayer, jumpToReviewAnchor });
       :loading="loading"
       @scroll="handleScroll"
     />
-    <div
-      v-if="activeComposer && reviewEnabled"
-      class="review-composer"
-      :style="{ top: `${activeComposer.overlayTop ?? 48}px` }"
-    >
-      <div class="review-composer-anchor">{{ formatReviewAnchor(activeComposer) }}</div>
-      <pre class="review-composer-excerpt">{{ activeComposer.excerpt }}</pre>
-      <textarea
-        v-model="composerNote"
-        :placeholder="$t('diffView.commentPlaceholder')"
-        @keydown.meta.enter.prevent="submitReviewComposer"
-      />
-      <div class="review-composer-actions">
-        <button type="button" @click="closeReviewComposer">{{ $t('actions.cancel') }}</button>
-        <button type="button" class="primary" :disabled="!composerNote.trim()" @click="submitReviewComposer">{{ $t('diffView.addComment') }}</button>
-      </div>
-    </div>
-    <aside v-if="commentDrawerOpen" class="comment-drawer">
-      <header>
-        <strong>{{ $t('diffView.commentsTitle') }}</strong>
-        <button type="button" @click="commentDrawerOpen = false">{{ $t('actions.close') }}</button>
-      </header>
-      <div v-if="reviewComments.length === 0" class="comment-empty">{{ $t('diffView.noComments') }}</div>
-      <div v-for="comment in reviewComments" :key="comment.id" class="comment-card">
-        <button type="button" class="comment-anchor" @click="jumpToReviewAnchor(comment)">
-          {{ formatReviewAnchor(comment) }}
-        </button>
-        <div v-if="isStaleComment(comment)" class="comment-stale">
-          {{ $t('diffView.staleComment', { sha: shortSha(comment.headCommit) }) }}
-        </div>
-        <pre>{{ comment.excerpt }}</pre>
-        <textarea
-          :value="comment.note"
-          @input="event => updateReviewComment(comment.id, (event.target as HTMLTextAreaElement).value)"
-        />
-        <div class="comment-actions">
-          <button type="button" @click="jumpToReviewAnchor(comment)">{{ $t('diffView.jumpToComment') }}</button>
-          <button type="button" @click="deleteReviewComment(comment.id)">{{ $t('actions.delete') }}</button>
-        </div>
-      </div>
-    </aside>
     <DiffSearchBar
       v-if="isSearching"
       ref="searchBarRef"
@@ -927,129 +701,4 @@ defineExpose({ refresh: loadDiff, dismissReviewLayer, jumpToReviewAnchor });
   letter-spacing: 0.01em;
 }
 
-.review-composer {
-  position: absolute;
-  left: 72px;
-  right: 340px;
-  z-index: 5;
-  max-width: 720px;
-  padding: 10px;
-  background: var(--kn-bg-panel);
-  border: 1px solid var(--kn-border-strong);
-  border-radius: 6px;
-  box-shadow: var(--kn-shadow-modal);
-}
-
-.review-composer-anchor,
-.comment-anchor {
-  font-family: "SF Mono", Menlo, monospace;
-  font-size: 12px;
-}
-
-.review-composer-excerpt,
-.comment-card pre {
-  max-height: 120px;
-  overflow: auto;
-  margin: 8px 0;
-  padding: 8px;
-  background: var(--kn-bg-app);
-  border: 1px solid var(--kn-border-default);
-  border-radius: 4px;
-  color: var(--kn-text-muted);
-  font-family: "SF Mono", Menlo, monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-}
-
-.review-composer textarea,
-.comment-card textarea {
-  width: 100%;
-  min-height: 76px;
-  resize: vertical;
-  box-sizing: border-box;
-  background: var(--kn-bg-input);
-  border: 1px solid var(--kn-border-strong);
-  border-radius: 4px;
-  color: var(--kn-text-primary);
-  font: inherit;
-  padding: 8px;
-}
-
-.review-composer-actions,
-.comment-actions,
-.comment-drawer header {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.review-composer-actions button,
-.comment-actions button,
-.comment-drawer header button {
-  padding: 4px 10px;
-  border: 1px solid var(--kn-border-strong);
-  border-radius: 4px;
-  background: var(--kn-bg-panel-raised);
-  color: var(--kn-text-primary);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.review-composer-actions .primary {
-  background: var(--kn-accent);
-  border-color: var(--kn-accent-hover);
-  color: var(--kn-text-inverse);
-}
-
-.review-composer-actions button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.comment-drawer {
-  position: absolute;
-  top: 38px;
-  right: 0;
-  bottom: 0;
-  z-index: 4;
-  width: min(360px, 42vw);
-  overflow: auto;
-  background: var(--kn-bg-panel);
-  border-left: 1px solid var(--kn-border-strong);
-  box-shadow: var(--kn-shadow-modal);
-}
-
-.comment-drawer header {
-  position: sticky;
-  top: 0;
-  justify-content: space-between;
-  padding: 10px;
-  background: var(--kn-bg-panel);
-  border-bottom: 1px solid var(--kn-border-default);
-}
-
-.comment-empty {
-  padding: 14px;
-  color: var(--kn-text-muted);
-}
-
-.comment-card {
-  padding: 10px;
-  border-bottom: 1px solid var(--kn-border-default);
-}
-
-.comment-anchor {
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--kn-accent);
-  cursor: pointer;
-}
-
-.comment-stale {
-  margin-top: 4px;
-  color: var(--kn-warning);
-  font-size: 12px;
-}
 </style>
