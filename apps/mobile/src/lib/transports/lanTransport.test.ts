@@ -321,7 +321,7 @@ describe("createLanTransport", () => {
 
     await expect(
       transport.readTaskFile("task/read", "docs/spec one.md")
-    ).rejects.toThrow(/authenticated relay/i);
+    ).rejects.toThrow(/paired device|authenticated relay/i);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -333,8 +333,75 @@ describe("createLanTransport", () => {
       transport.resolveTaskFileMentions("task/read", [
         { path: "TaskScreen.tsx", line: 42 }
       ])
-    ).rejects.toThrow(/authenticated relay/i);
+    ).rejects.toThrow(/paired device|authenticated relay/i);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("reads task file content over LAN with paired device credentials", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ path: "docs/spec one.md", content: "# Spec" })
+    });
+    const transport = createLanTransport(
+      "http://192.168.1.20:48120",
+      fetchImpl,
+      undefined,
+      { deviceCredentials: { deviceId: "phone-1", deviceSecret: "lan-secret" } }
+    );
+
+    await expect(
+      transport.readTaskFile("task/read", "docs/spec one.md")
+    ).resolves.toEqual({ path: "docs/spec one.md", content: "# Spec" });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://192.168.1.20:48120/v1/tasks/task%2Fread/files/content?path=docs%2Fspec%20one.md",
+      {
+        headers: {
+          "X-Kanna-Device-Id": "phone-1",
+          "X-Kanna-Device-Secret": "lan-secret"
+        }
+      }
+    );
+  });
+
+  it("resolves task file mentions over LAN with paired device credentials", async () => {
+    const resolution = {
+      mentions: [{
+        path: "TaskScreen.tsx",
+        line: 42,
+        matches: [{ path: "apps/mobile/src/screens/TaskScreen.tsx" }],
+        truncated: false
+      }]
+    };
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => resolution
+    });
+    const transport = createLanTransport(
+      "http://192.168.1.20:48120",
+      fetchImpl,
+      undefined,
+      { deviceCredentials: { deviceId: "phone-1", deviceSecret: "lan-secret" } }
+    );
+
+    await expect(
+      transport.resolveTaskFileMentions("task/read", [
+        { path: "TaskScreen.tsx", line: 42 }
+      ])
+    ).resolves.toEqual(resolution);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://192.168.1.20:48120/v1/tasks/task%2Fread/files/resolve-mentions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Kanna-Device-Id": "phone-1",
+          "X-Kanna-Device-Secret": "lan-secret"
+        },
+        body: JSON.stringify({ mentions: [{ path: "TaskScreen.tsx", line: 42 }] })
+      }
+    );
   });
 
   it("fails closed instead of requesting the task diff without device credentials", async () => {

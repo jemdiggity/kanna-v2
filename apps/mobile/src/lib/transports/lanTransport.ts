@@ -286,17 +286,34 @@ export function createLanTransport(
       const status = await request<MobileServerStatus>("/v1/status");
       return typeof status.taskInputAttachmentVersion === "number";
     },
-    readTaskFile: async (_taskId: string, _path: string): Promise<TaskFileContent> => {
-      throw new Error("Task file preview requires an authenticated relay connection.");
+    readTaskFile: async (taskId: string, path: string): Promise<TaskFileContent> => {
+      if (!deviceCredentials) {
+        throw new Error(
+          "Task file preview requires a paired device or an authenticated relay connection."
+        );
+      }
+      return request<TaskFileContent>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/files/content?path=${encodeURIComponent(path)}`
+      );
     },
     listTaskDirectory: (taskId, path, showAllFiles = false, offset = 0, filter = "") => request<RepoDirectoryListing>(`/v1/tasks/${encodeURIComponent(taskId)}/browse?path=${encodeURIComponent(path)}&showAllFiles=${showAllFiles}&offset=${offset}&limit=60&filter=${encodeURIComponent(filter)}`),
     readTaskFileRange: (taskId, path, startLine, lineCount, metadataOnly = false, startByte = 0) => request<RepoFileRange>(`/v1/tasks/${encodeURIComponent(taskId)}/browse/content?path=${encodeURIComponent(path)}&startLine=${startLine}&startByte=${startByte}&lineCount=${lineCount}&metadataOnly=${metadataOnly}`),
     resolveTaskFileMentions: async (
-      _taskId: string,
-      _mentions: readonly TaskFileMentionInput[]
+      taskId: string,
+      mentions: readonly TaskFileMentionInput[]
     ): Promise<TaskFileMentionResolution> => {
-      throw new Error(
-        "Task file resolution requires an authenticated relay connection."
+      if (!deviceCredentials) {
+        throw new Error(
+          "Task file resolution requires a paired device or an authenticated relay connection."
+        );
+      }
+      return request<TaskFileMentionResolution>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/files/resolve-mentions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mentions })
+        }
       );
     },
     readTaskDiff: (
