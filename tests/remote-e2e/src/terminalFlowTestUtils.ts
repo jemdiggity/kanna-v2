@@ -106,6 +106,7 @@ export async function createScriptedTask(
   harness: RemoteHarness,
   options: {
     displayName: string;
+    inputTraceFile?: string;
     prompt?: string;
     repoName?: string;
     redactInput?: boolean;
@@ -114,6 +115,7 @@ export async function createScriptedTask(
     terminalPasteSemantics?: boolean;
     terminalCols?: number;
     terminalRows?: number;
+    terminalKeyTraceFile?: string;
     tracePartialInput?: boolean;
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
@@ -124,10 +126,12 @@ export async function createScriptedTask(
     `scripted-repo-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
   await writeScriptedRepo(repoPath, {
+    inputTraceFile: options.inputTraceFile,
     redactInput: options.redactInput,
     setupCommands: options.setupCommands,
     snapshotHistory: options.snapshotHistory,
     terminalPasteSemantics: options.terminalPasteSemantics,
+    terminalKeyTraceFile: options.terminalKeyTraceFile,
     tracePartialInput: options.tracePartialInput,
   });
 

@@ -577,32 +577,46 @@ export async function verifyRelayComposerResetJourney(
   await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await send.click();
 
-  await ui.waitUntil(
-    async () => {
-      const value = await input.getAttribute("value").catch(() => null);
-      const label = value === null
-        ? await input.getAttribute("label").catch(() => null)
-        : null;
-      const resetHeight = (await input.getSize()).height;
-      const cleared =
-        value === "" ||
-        value === TASK_COMPOSER_PLACEHOLDER ||
-        label === TASK_COMPOSER_PLACEHOLDER;
+  let lastValue: string | null = null;
+  let lastLabel: string | null = null;
+  let lastResetHeight = expandedHeight;
+  let lastKeyboardShown = true;
+  try {
+    await ui.waitUntil(
+      async () => {
+        lastValue = await input.getAttribute("value").catch(() => null);
+        lastLabel = lastValue === null
+          ? await input.getAttribute("label").catch(() => null)
+          : null;
+        lastResetHeight = (await input.getSize()).height;
+        lastKeyboardShown = await ui.isKeyboardShown();
+        const cleared =
+          lastValue === "" ||
+          lastValue === TASK_COMPOSER_PLACEHOLDER ||
+          lastLabel === TASK_COMPOSER_PLACEHOLDER;
 
-      return (
-        cleared &&
-        resetHeight <= initialHeight &&
-        resetHeight < expandedHeight &&
-        !(await ui.isKeyboardShown())
-      );
-    },
-    {
-      interval: POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg:
-        "Expected Send to clear, return to one-line height, and hide the keyboard",
-    },
-  );
+        return (
+          cleared &&
+          lastResetHeight <= initialHeight &&
+          lastResetHeight < expandedHeight &&
+          !lastKeyboardShown
+        );
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg:
+          "Expected Send to clear, return to one-line height, and hide the keyboard",
+      },
+    );
+  } catch {
+    throw new Error(
+      "Expected Send to clear, return to one-line height, and hide the keyboard; " +
+        `value=${JSON.stringify(lastValue)}, label=${JSON.stringify(lastLabel)}, ` +
+        `height=${lastResetHeight} (initial=${initialHeight}, expanded=${expandedHeight}), ` +
+        `keyboardShown=${lastKeyboardShown}`,
+    );
+  }
 }
 
 export async function verifyRelayQuickReplyJourney(

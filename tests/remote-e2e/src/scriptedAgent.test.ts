@@ -111,6 +111,24 @@ describe("scripted remote E2E agent", () => {
     expect(source).toContain("stty -icanon min 1 time 0 -echo -icrnl");
   });
 
+  it("can durably acknowledge exact terminal keys outside the rendered window", () => {
+    const source = scriptedAgentSource({
+      terminalKeyTraceFile: ".kanna-e2e-terminal-keys",
+      traceTerminalKeys: true,
+    });
+
+    expect(source).toContain("printf 'ESC\\n' >> '.kanna-e2e-terminal-keys'");
+    expect(source).toContain("printf 'ENTER\\n' >> '.kanna-e2e-terminal-keys'");
+  });
+
+  it("can durably record multiline input outside the rendered window", () => {
+    const source = scriptedAgentSource({ inputTraceFile: ".kanna-e2e-inputs" });
+
+    expect(source).toContain(
+      `printf '%s\\000' "$line" >> '.kanna-e2e-inputs'`,
+    );
+  });
+
   it("keeps stdin open and exits deterministically on submitted scripted input", () => {
     const source = scriptedAgentSource();
 

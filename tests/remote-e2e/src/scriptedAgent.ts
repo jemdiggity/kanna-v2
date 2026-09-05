@@ -1,7 +1,9 @@
 import { chmod, writeFile } from "node:fs/promises";
 
 export interface ScriptedAgentOptions {
+  inputTraceFile?: string;
   redactInput?: boolean;
+  terminalKeyTraceFile?: string;
   terminalPasteSemantics?: boolean;
   tracePartialInput?: boolean;
   snapshotHistory?: {
@@ -74,9 +76,13 @@ done
 }
 
 export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string {
+  const inputTrace = options.inputTraceFile
+    ? `printf '%s\\000' "$line" >> ${shellSingleQuote(options.inputTraceFile)}`
+    : ":";
   const inputReport = options.redactInput
     ? "printf 'SCRIPT_REDACTED_INPUT\\n'"
-    : "printf 'SCRIPT_INPUT:%s\\n' \"$line\"";
+    : `${inputTrace}
+    printf 'SCRIPT_INPUT:%s\\n' "$line"`;
   const snapshotHistorySentinel =
     options.snapshotHistory?.sentinel ?? SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL;
   const snapshotHistoryTrigger = options.snapshotHistory
@@ -87,6 +93,21 @@ case "$*" in
 esac`;
   const partialInputTrace = options.tracePartialInput
     ? "printf 'SCRIPT_PARTIAL:%s\\n' \"$line\""
+    : ":";
+  const terminalKeyHandling = options.traceTerminalKeys
+    ? `if [ "$char" = "$escape" ]; then
+    printf 'SCRIPT_KEY:ESC\\n'
+    ${options.terminalKeyTraceFile
+      ? `printf 'ESC\\n' >> ${shellSingleQuote(options.terminalKeyTraceFile)}`
+      : ":"}
+    continue
+  fi`
+    : "";
+  const enterTrace = options.traceTerminalKeys
+    ? `printf 'SCRIPT_KEY:ENTER\\n'
+    ${options.terminalKeyTraceFile
+      ? `printf 'ENTER\\n' >> ${shellSingleQuote(options.terminalKeyTraceFile)}`
+      : ":"}`
     : ":";
   const bracketedPasteHandling = options.tracePartialInput || options.terminalPasteSemantics
     ? `if [ "$char" = "$escape" ]; then

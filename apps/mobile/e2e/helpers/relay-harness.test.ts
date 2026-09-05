@@ -34,6 +34,32 @@ describe("mobile relay harness helpers", () => {
     )).toBe("cloud:desktop:repo:local");
   });
 
+  it("counts durable child-PTY key acknowledgements independently by key", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-mobile-terminal-keys-"));
+    const tracePath = join(root, "keys");
+    try {
+      expect(relayHarness.terminalKeyTraceCount(tracePath, "ESC")).toBe(0);
+      await writeFile(tracePath, "ESC\nENTER\nESC\n", "utf8");
+      expect(relayHarness.terminalKeyTraceCount(tracePath, "ESC")).toBe(2);
+      expect(relayHarness.terminalKeyTraceCount(tracePath, "ENTER")).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("counts exact multiline child-PTY inputs in the NUL-delimited ledger", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-mobile-inputs-"));
+    const tracePath = join(root, "inputs");
+    try {
+      const input = "Persisted relay approval.\n\nPreserve the relay fixture.";
+      await writeFile(tracePath, `${input}\0other\0${input}\0`, "utf8");
+      expect(relayHarness.scriptedInputTraceCount(tracePath, input)).toBe(2);
+      expect(relayHarness.scriptedInputTraceCount(tracePath, "other")).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("describes unique, ambiguous, and Markdown mentions used by Appium", () => {
     expect(relayHarness.MOBILE_RELAY_FILE_PREVIEW_FIXTURE).toEqual({
       ambiguousBarePath: "shared.ts",
