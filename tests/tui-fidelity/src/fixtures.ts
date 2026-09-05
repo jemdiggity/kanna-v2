@@ -9,6 +9,10 @@ interface CapturedFixtureSpec {
   name: string;
   description: string;
   snapshotAt: number;
+  resnapshotAt?: number;
+  cols?: number;
+  rows?: number;
+  chunkPattern?: number[];
   allowFallback?: boolean;
 }
 
@@ -45,6 +49,7 @@ function buildSyntheticFixtures(): FixtureDefinition[] {
     wideChars(),
     boxDrawing(),
     colorBlocks(),
+    attributeBlocks(),
     altScreen(),
     scrollRegion(),
     cursorSaveRestore(),
@@ -63,6 +68,16 @@ function capturedFixtureSpecs(): CapturedFixtureSpec[] {
       description:
         "Captured Codex CLI TUI session with update notice, status/title spinner redraws, shell tool calls, and final settled answer.",
       snapshotAt: 4687
+    },
+    {
+      name: "codex-live-20260905",
+      description:
+        "Current interactive Codex CLI TUI probe with three user turns, long and multiline input, blank lines, and settled formatted replies.",
+      snapshotAt: 13000,
+      resnapshotAt: 21200,
+      cols: 120,
+      rows: 36,
+      chunkPattern: [4096]
     }
   ];
 }
@@ -125,6 +140,19 @@ function colorBlocks(): FixtureDefinition {
     description: "256-color and 24-bit truecolor foreground/background blocks.",
     bytes: bytes(`${text}\r\n`),
     snapshotAt: text.length
+  };
+}
+
+function attributeBlocks(): FixtureDefinition {
+  const text = [
+    "\x1b[2J\x1b[Hbold: \x1b[1mBOLD\x1b[22m dim: \x1b[2mDIM\x1b[22m inverse: \x1b[7mINVERSE\x1b[27m",
+    "fg/bg: \x1b[38;2;255;122;144mRED-FG\x1b[39m \x1b[48;2;30;64;175mBLUE-BG\x1b[49m"
+  ].join("\r\n");
+  return {
+    name: "attribute-blocks",
+    description: "Bold, dim, inverse, foreground, and background attributes.",
+    bytes: bytes(`${text}\r\n`),
+    snapshotAt: text.length + 2
   };
 }
 

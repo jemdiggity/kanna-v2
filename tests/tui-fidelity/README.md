@@ -57,6 +57,7 @@ Synthetic fixtures are defined in `src/fixtures.ts` and materialized as raw `.an
 - `wide-chars-emoji` - CJK, emoji, skin tone, ZWJ
 - `box-drawing-table` - Unicode table
 - `color-blocks` - 256-color and truecolor
+- `attribute-blocks` - bold, dim, inverse, foreground, and background attributes
 - `alt-screen` - alternate screen enter/exit
 - `scroll-region` - DECSTBM scroll region
 - `cursor-save-restore` - DECSC/DECRC
@@ -66,12 +67,13 @@ Synthetic fixtures are defined in `src/fixtures.ts` and materialized as raw `.an
 - `large-session-store-snapshot` - large snapshot and live output replayed through `sessionStore`
 - `status-redraw-stream-compaction` - Codex-like working timer with stable `esc to interrupt` text across retained-history compaction and a reconnect snapshot
 - `codex-pwd-tool` - captured Codex CLI TUI session with status/title spinner redraws, shell tool calls, and a final settled answer
+- `codex-live-20260905` - current interactive Codex CLI TUI session with three turns, long dictated-like input, multiline input with a blank line, and settled formatted output
 
 Each fixture sets `snapshotAt`. Bytes before that offset are fed through the real daemon `HeadlessTerminal` and serialized into the initial `term_snapshot`; bytes after that offset are emitted as chunked `term_output` frames.
 
 Fixtures may also set explicit `cols`/`rows`. When omitted, the legacy 220x48 grid is used. The mobile-path renderer and the oracle both use the emitted snapshot dimensions, so a dimension-plumbing regression shows up as cell divergence instead of being hidden by a fixed-size oracle.
 
-Captured fixtures are checked in under `fixtures/codex-*.ansi` and loaded by `src/fixtures.ts` without being regenerated. The current Codex fixture was captured from the interactive `codex` TUI, not `codex exec`, in a throwaway `/tmp/kanna-codex-fixture-root` workspace. The raw bytes were inspected for home paths and token-like strings before committing.
+Captured fixtures are checked in under `fixtures/codex-*.ansi` and loaded by `src/fixtures.ts` without being regenerated. The current Codex fixture was captured from the interactive `codex` TUI, not `codex exec`, in a task-local disposable workspace. The raw bytes were inspected for absolute home paths, auth strings, session ids, and token-like strings before committing.
 
 ## Current Report
 
@@ -82,6 +84,7 @@ PASS synthetic-basics: 0 divergent cells, fallback=false
 PASS wide-chars-emoji: 0 divergent cells, fallback=false
 PASS box-drawing-table: 0 divergent cells, fallback=false
 PASS color-blocks: 0 divergent cells, fallback=false
+PASS attribute-blocks: 0 divergent cells, fallback=false
 PASS alt-screen: 0 divergent cells, fallback=false
 PASS scroll-region: 0 divergent cells, fallback=false
 PASS cursor-save-restore: 0 divergent cells, fallback=false
@@ -89,9 +92,11 @@ PASS spinner-redraw: 0 divergent cells, fallback=true
 PASS split-sensitive: 0 divergent cells, fallback=true
 PASS bottom-anchored-80x24: 0 divergent cells, fallback=false
 PASS large-session-store-snapshot: 0 divergent cells, fallback=false
-DIFF codex-pwd-tool: 59 divergent cells, fallback=false
+PASS status-redraw-stream-compaction: 0 divergent cells, fallback=false
+PASS codex-pwd-tool: 0 divergent cells, fallback=false
+PASS codex-live-20260905: 0 divergent cells, fallback=false
 ```
 
 The fallback cases are expected because those fixtures intentionally start from a blank snapshot and measure live chunk replay. Unexpected `visible_text_vt` fallback fails the run before golden comparison.
 
-For `codex-pwd-tool`, all observed divergent cells are SGR attribute-only losses: 47 cells of OSC-8 release-note URL underline and 12 cells of bold styling on the `OpenAI Codex` title. Text, width, color, scroll position, cursor positioning, spinner redraw replay, shell tool output, and final settled text match the xterm oracle in the generated PNGs.
+The current captured fixture emitted two daemon snapshots (initial attach and reconnect) plus eight live output frames, with no `visible_text_vt` fallback. Its path grid matched the direct xterm oracle at 0 divergent cells, including text, width, foreground/background, bold/dim/inverse flags, scroll position, blank lines, and prompt markers. The older `codex-pwd-tool` fixture also matches at 0 divergent cells in the current checkout; its previous 59-cell attribute-only report was stale.

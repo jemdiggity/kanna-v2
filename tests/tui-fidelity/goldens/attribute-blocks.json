@@ -1,0 +1,10 @@
+{
+  "name": "attribute-blocks",
+  "description": "Bold, dim, inverse, foreground, and background attributes.",
+  "snapshotAt": 141,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "bold: \u001b[1mBOLD\u001b[0m dim: \u001b[2mDIM\u001b[0m inverse: \u001b[7mINVERSE\r\n\u001b[0mfg/bg: \u001b[38;2;255;122;144mRED-FG\u001b[0m \u001b[48;2;30;64;175mBLUE-BG\u001b[0m\u001b[1B\u001b[21D",
+  "referenceSerialized": "bold: \u001b[1mBOLD\u001b[0m dim: \u001b[2mDIM\u001b[0m inverse: \u001b[7mINVERSE\r\n\u001b[0mfg/bg: \u001b[38;2;255;122;144mRED-FG\u001b[0m \u001b[48;2;30;64;175mBLUE-BG\u001b[0m\u001b[1B\u001b[21D"
+}
