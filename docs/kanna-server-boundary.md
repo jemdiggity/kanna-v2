@@ -210,6 +210,30 @@ the client falls back to a bounded snapshot.
 
 ## v1 LAN Surface
 
+HTTP authorization is enforced by default at the router, for every method
+(including GET/HEAD and OPTIONS). Direct loopback clients retain local access;
+LAN callers must present `X-Kanna-Device-Id` and `X-Kanna-Device-Secret` verified
+against the pairing store. Authenticated relay invokes retain their explicit
+internal authority; an unauthenticated tunnel cannot inherit its synthesized
+loopback peer. Existing desktop-only and file-specific restrictions still apply.
+Unpaired HTTP requests receive status 401 and the existing plain-text body
+`privileged control requires desktop loopback, a paired LAN device, or an authenticated relay`,
+without handler execution or requested values.
+
+The only public HTTP operations are GET/HEAD `/v1/status` (discovery/health)
+and POST `/v1/pairing/sessions/claim` (requires the desktop-issued pairing code).
+Starting a pairing session and removing trust remain desktop-only. WebSocket
+GET upgrades at `/v1/stream` and `/v2/stream` are authentication bootstrap:
+both require proof of pairing for non-loopback peers before any task data.
+The first KSP Auth frame verifies the device credential. Legacy v1 readers
+already verified through upgrade headers or the stream cookie retain their
+existing read-only empty-Auth behavior; unpaired empty-auth LAN reads are no
+longer admitted. Loopback empty-auth streams remain supported. KSP state-change
+broadcasts start only after successful Auth; an unauthenticated upgrade receives
+no task-state notifications. Existing paired clients use the same credential and refusal formats,
+so no protocol version changes. The complete route classification is recorded
+in `docs/task-specs/c9f5721b.md` and enforced by the router authorization tests.
+
 - `GET /v1/status`
 - `GET /v1/stream` (KSP WebSocket for terminal, agent, and streamed task API frames)
 - `GET /v1/desktops`
@@ -392,12 +416,12 @@ pairing store with mode 0600; task sessions receive only its path through
 `KANNA_TASK_EVENTS_TOKEN_PATH`, and Kanna MCP/CLI plus the documented Node
 watcher read it and attach `Authorization: Bearer ...` to the local request.
 Loopback peer addresses and browser metadata grant no account-wide authority:
-an unauthenticated request, including one arriving through DNS rebinding,
+an unauthenticated loopback request, including one arriving through DNS rebinding,
 receives only the native local feed. When desktop relay routing is available
 and `localOnly` is absent, the server starts one native wait for itself and
 every active sibling desktop returned by the existing authenticated relay
-session. An unpaired LAN caller receives only the native local feed; it cannot
-spend the desktop's relay authority or read sibling task metadata. Tunneled
+session. An unpaired LAN caller is refused by the HTTP guard and receives no local or
+sibling task metadata. Tunneled
 peer waits are marked by the HTTP dispatcher and stay
 native, so aggregation cannot recurse. Every aggregated event gains
 `machineId`; the `ks1.` cursor binds the scope and connected desktop identity

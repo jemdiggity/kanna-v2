@@ -8,7 +8,7 @@ use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::{ksp_stream, legacy_ksp_stream};
-use super::lan_trust::{attach_trusted_lan_device, require_privileged_task_access};
+use super::lan_trust::{attach_trusted_lan_device, require_http_access};
 use super::mobile_notifications::{mobile_push_registration, notify_mobile};
 use super::operator_events::post_operator_events;
 use super::pairing::{
@@ -401,7 +401,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(log_error_responses))
-        .layer(axum::middleware::from_fn(require_privileged_task_access))
+        .layer(axum::middleware::from_fn(require_http_access))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             attach_trusted_lan_device,

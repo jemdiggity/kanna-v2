@@ -9,7 +9,7 @@ pub(super) use super::test_support::{
     test_router_with_task_input_sender, test_state_with_daemon_dir, test_state_with_seed,
     test_state_with_seed_and_task_input_sender, test_state_with_task_input_sender,
 };
-pub(super) use super::{dispatch_http_invoke, handle_task_terminal_state, router, AppState};
+pub(super) use super::{handle_task_terminal_state, router, AppState};
 use crate::config::Config;
 use crate::db::Db;
 use crate::mobile_api::{CreateTaskResponse, MobileServerStatus, TaskActionResponse};

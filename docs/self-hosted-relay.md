@@ -6,7 +6,7 @@ Kanna's mobile and desktop clients can use `services/relay` at an operator-owned
 
 ## Authentication and subscription boundary
 
-The relay authenticates a phone with its Firebase ID token and a desktop with the `desktopCredentials/{desktopId}` secret-hash record. Both identities must resolve to the same Firebase uid before the relay routes traffic. A custom endpoint does not disable or replace either check.
+The relay authenticates a phone with its Firebase ID token and a desktop with the `desktopCredentials/{desktopId}` secret-hash record. Both identities must resolve to the same Firebase uid before the relay routes traffic. A custom endpoint does not disable or replace either check. Direct LAN access separately requires desktop pairing for all data routes; only status discovery and pairing/authentication bootstrap are public. Loopback desktop access is unchanged.
 
 The separate `KANNA_RELAY_ENTITLEMENT_ENFORCEMENT` setting gates subscriptions. It defaults to `off`; keep it off for self-hosted service so authenticated accounts work whether or not they subscribe to Kanna Cloud. Kanna's hosted deployments control their own value for this setting, and choosing a custom URL on a phone cannot change hosted-relay policy.
 

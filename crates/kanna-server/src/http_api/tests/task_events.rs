@@ -2382,16 +2382,11 @@ async fn unpaired_non_loopback_lan_wait_never_uses_the_account_relay_feed() {
         ))));
 
     let response = app.oneshot(request).await.expect("response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body"),
-    )
-    .expect("json body");
-    assert_eq!(event_pairs(&body), Vec::new());
-    assert!(!cursor_of(&body).starts_with("ks1."));
-    assert!(body.get("machineErrors").is_none());
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(&body[..], b"privileged control requires desktop loopback, a paired LAN device, or an authenticated relay");
 
     relay.abort();
 }

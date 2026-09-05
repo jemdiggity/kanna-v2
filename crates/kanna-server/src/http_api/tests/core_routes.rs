@@ -104,7 +104,7 @@ async fn privileged_settings_and_reconnect_reject_real_unauthenticated_non_loopb
                 .send()
                 .await
                 .unwrap(),
-            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::UNAUTHORIZED,
         ),
         (
             client
@@ -112,7 +112,7 @@ async fn privileged_settings_and_reconnect_reject_real_unauthenticated_non_loopb
                 .send()
                 .await
                 .unwrap(),
-            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::UNAUTHORIZED,
         ),
         (
             client
@@ -5618,7 +5618,7 @@ async fn http_invoke_dispatches_shared_mobile_get_routes() {
         .unwrap();
     });
 
-    let repos = super::dispatch_http_invoke(
+    let repos = crate::http_api::dispatch_authenticated_http_invoke(
         Arc::clone(&state),
         "GET",
         "/v1/repos",
@@ -5638,7 +5638,7 @@ async fn http_invoke_dispatches_shared_mobile_get_routes() {
     );
     assert_eq!(repos.error, None);
 
-    let recent = super::dispatch_http_invoke(
+    let recent = crate::http_api::dispatch_authenticated_http_invoke(
         Arc::clone(&state),
         "GET",
         "/v1/tasks/recent",
@@ -5735,7 +5735,7 @@ async fn create_pairing_session_route_rejects_lan_clients() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -6224,4 +6224,556 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
     }
     server.abort();
     let _ = std::fs::remove_file(pairing_path);
+}
+
+const LAN_AUTH_REFUSAL: &str =
+    "privileged control requires desktop loopback, a paired LAN device, or an authenticated relay";
+
+// Read the actual registrations, rather than maintaining a second route list
+// that could silently miss a newly mounted endpoint. Exercise every method,
+// including implicit HEAD and preflight, through the production router.
+#[tokio::test]
+async fn every_registered_http_route_denies_unpaired_lan_by_default() {
+    let app = super::test_router("desktop-route-audit", "Route Audit");
+    let source = include_str!("../router.rs");
+    for mount in [".merge(", ".nest(", ".nest_service(", ".route_service("] {
+        assert!(
+            !source.contains(mount),
+            "extend the route audit to enumerate {mount} mounts"
+        );
+    }
+    let spec = include_str!("../../../../../docs/task-specs/c9f5721b.md");
+    let mut count = 0;
+    for registration in source.split(".route(").skip(1) {
+        let pattern = registration.split('"').nth(1).expect("literal route path");
+        assert!(
+            spec.contains(&format!("`{pattern}`")),
+            "unaudited route {pattern}"
+        );
+        let mut path = pattern.to_string();
+        while let Some(start) = path.find('{') {
+            let end = path[start..].find('}').unwrap() + start;
+            path.replace_range(start..=end, "auth-audit-missing");
+        }
+        for method in ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] {
+            if matches!(
+                (method, pattern),
+                ("GET" | "HEAD", "/v1/status" | "/v1/stream" | "/v2/stream")
+                    | ("POST", "/v1/pairing/sessions/claim")
+            ) {
+                continue;
+            }
+            for secret in [None, Some("invalid-secret")] {
+                let mut request = direct_lan_request(method.parse().unwrap(), &path);
+                if let Some(secret) = secret {
+                    request
+                        .headers_mut()
+                        .insert("x-kanna-device-id", "phone".parse().unwrap());
+                    request
+                        .headers_mut()
+                        .insert("x-kanna-device-secret", secret.parse().unwrap());
+                }
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {pattern}"
+                );
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                if method == "HEAD" {
+                    assert!(body.is_empty());
+                } else {
+                    assert_eq!(&body[..], LAN_AUTH_REFUSAL.as_bytes(), "{method} {pattern}");
+                }
+            }
+        }
+        count += 1;
+    }
+    assert!(
+        count > 90,
+        "route enumeration unexpectedly empty/incomplete"
+    );
+}
+
+#[tokio::test]
+async fn lan_settings_and_repository_data_require_pairing_and_preserve_loopback() {
+    let state = super::test_state_with_seed("desktop-data-auth", "Data Auth", |db| {
+        db.insert_test_repo("repo-auth", "Private Repository")
+            .unwrap();
+        db.set_setting("private-setting", "private-value").unwrap();
+    });
+    let pairing_path = PathBuf::from(&state.config().pairing_store_path);
+    let mut store = crate::pairing::PairingStore::default();
+    store.add_trusted_device(
+        &state.config().desktop_id,
+        "phone",
+        "Phone",
+        &crate::pairing::hash_device_secret("secret"),
+    );
+    store.save(&pairing_path).unwrap();
+    let app = crate::http_api::router(Arc::clone(&state));
+    for (method, path, payload) in [
+        ("GET", "/v1/settings/private-setting", "{}"),
+        (
+            "PUT",
+            "/v1/settings/private-setting",
+            r#"{"value":"private-value"}"#,
+        ),
+        ("DELETE", "/v1/settings/delete-me", "{}"),
+        ("GET", "/v1/repos", "{}"),
+        (
+            "PATCH",
+            "/v1/repos/repo-auth",
+            r#"{"name":"Private Repository"}"#,
+        ),
+        (
+            "POST",
+            "/v1/repos/actions/reorder",
+            r#"{"orderedIds":["repo-auth"]}"#,
+        ),
+        ("GET", "/v1/repos/repo-auth/tasks", "{}"),
+        ("GET", "/v1/repos/repo-auth/recent-workflows", "{}"),
+        ("GET", "/v1/repos/repo-auth/recent-pipelines", "{}"),
+        ("GET", "/v1/snapshot", "{}"),
+        ("GET", "/v1/desktops", "{}"),
+        ("GET", "/v1/analytics/repos/repo-auth", "{}"),
+        ("GET", "/v1/tasks/recent", "{}"),
+        ("GET", "/v1/tasks/search?query=private", "{}"),
+        ("GET", "/v1/tasks/closed-identities", "{}"),
+        (
+            "GET",
+            "/v1/task-events?repoId=repo-auth&timeoutSecs=0&localOnly=true",
+            "{}",
+        ),
+        ("POST", "/v1/operator-events", r#"{"events":[]}"#),
+    ] {
+        for caller in ["unpaired", "paired", "loopback"] {
+            let mut request = direct_lan_request(method.parse().unwrap(), path);
+            *request.body_mut() = Body::from(payload);
+            if caller == "paired" {
+                request
+                    .headers_mut()
+                    .insert("x-kanna-device-id", "phone".parse().unwrap());
+                request
+                    .headers_mut()
+                    .insert("x-kanna-device-secret", "secret".parse().unwrap());
+            } else if caller == "loopback" {
+                request.extensions_mut().insert(axum::extract::ConnectInfo(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 49152)),
+                ));
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if caller == "unpaired" {
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+                assert_eq!(&body[..], LAN_AUTH_REFUSAL.as_bytes());
+            } else {
+                assert!(
+                    status.is_success(),
+                    "{caller} {method} {path}: {status} {}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+        }
+        let unauthenticated = crate::http_api::dispatch_http_invoke(
+            Arc::clone(&state),
+            method,
+            path,
+            serde_json::from_str(payload).unwrap(),
+        )
+        .await;
+        assert_eq!(
+            unauthenticated.status, 401,
+            "untrusted tunnel {method} {path}"
+        );
+        let authenticated = crate::http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&state),
+            method,
+            path,
+            serde_json::from_str(payload).unwrap(),
+        )
+        .await;
+        assert!(
+            (200..300).contains(&authenticated.status),
+            "trusted tunnel {method} {path}: {authenticated:?}"
+        );
+    }
+    std::fs::remove_file(pairing_path).unwrap();
+}
+
+#[tokio::test]
+async fn real_lan_http_and_both_stream_versions_require_pairing() {
+    use futures_util::{SinkExt, StreamExt};
+    use kanna_agent_protocol::{ClientFrame, ServerFrame};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let state = super::test_state_with_seed("desktop-wire-auth", "Wire Auth", |db| {
+        db.set_setting("canary", "secret-setting").unwrap();
+        db.insert_test_repo("repo-canary", "Secret Repo").unwrap();
+    });
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let lan_ip = if_addrs::get_if_addrs()
+        .unwrap()
+        .into_iter()
+        .map(|interface| interface.ip())
+        .find(|ip| ip.is_ipv4() && !ip.is_loopback())
+        .expect("non-loopback test interface");
+    let app = crate::http_api::router(Arc::clone(&state));
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://{lan_ip}:{port}");
+    let pairing: serde_json::Value = client
+        .post(format!("http://127.0.0.1:{port}/v1/pairing/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for path in ["/v1/settings/canary", "/v1/repos"] {
+        let response = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.text().await.unwrap(), LAN_AUTH_REFUSAL);
+    }
+    let claim: serde_json::Value = client.post(format!("{base}/v1/pairing/sessions/claim"))
+        .json(&serde_json::json!({"code": pairing["code"], "deviceId": "wire-phone", "deviceName": "Phone"}))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let secret = claim["deviceSecret"].as_str().unwrap();
+    for path in ["/v1/settings/canary", "/v1/repos"] {
+        let response = client
+            .get(format!("{base}{path}"))
+            .header("x-kanna-device-id", "wire-phone")
+            .header("x-kanna-device-secret", secret)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = response.text().await.unwrap();
+        assert!(body.contains(if path.contains("settings") {
+            "secret-setting"
+        } else {
+            "Secret Repo"
+        }));
+    }
+    for version in ["v1", "v2"] {
+        for credential in [
+            None,
+            Some("invalid".to_string()),
+            Some(serde_json::json!({"deviceId":"wire-phone", "deviceSecret":secret}).to_string()),
+        ] {
+            let paired = credential
+                .as_ref()
+                .is_some_and(|value| value.starts_with('{'));
+            let (mut socket, _) =
+                tokio_tungstenite::connect_async(format!("ws://{lan_ip}:{port}/{version}/stream"))
+                    .await
+                    .unwrap();
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&ClientFrame::Auth {
+                        credential,
+                        capabilities: vec![],
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(30), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame: ServerFrame = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if paired {
+                assert!(
+                    matches!(frame, ServerFrame::AuthOk { .. }),
+                    "{version}: {frame:?}"
+                );
+                socket.close(None).await.unwrap();
+            } else {
+                assert!(
+                    matches!(frame, ServerFrame::Error { ref code, .. } if code == "unauthorized"),
+                    "{version}: {frame:?}"
+                );
+            }
+        }
+    }
+    // Older paired v1 readers may authenticate only the HTTP upgrade. Keep
+    // their established read-only access without reopening empty-auth LAN.
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let paired_status = client
+        .get(format!("{base}/v1/status"))
+        .header("x-kanna-device-id", "wire-phone")
+        .header("x-kanna-device-secret", secret)
+        .send()
+        .await
+        .unwrap();
+    let cookie = paired_status.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    for use_cookie in [false, true] {
+        let mut upgrade = format!("ws://{lan_ip}:{port}/v1/stream")
+            .into_client_request()
+            .unwrap();
+        if use_cookie {
+            upgrade
+                .headers_mut()
+                .insert("cookie", cookie.parse().unwrap());
+        } else {
+            upgrade
+                .headers_mut()
+                .insert("x-kanna-device-id", "wire-phone".parse().unwrap());
+            upgrade
+                .headers_mut()
+                .insert("x-kanna-device-secret", secret.parse().unwrap());
+        }
+        let (mut socket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+        for (frame, expected) in [
+            (
+                ClientFrame::Auth {
+                    credential: None,
+                    capabilities: vec![],
+                },
+                "auth_ok",
+            ),
+            (
+                ClientFrame::Request {
+                    id: 1,
+                    method: "PUT".into(),
+                    path: "/v1/settings/canary".into(),
+                    body: Some(serde_json::json!({"value":"forged"})),
+                },
+                "error",
+            ),
+        ] {
+            socket
+                .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(30), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let response: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(response["type"], expected);
+            if expected == "error" {
+                assert_eq!(response["code"], "unauthorized");
+            }
+        }
+        socket.close(None).await.unwrap();
+    }
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_file(&state.config().pairing_store_path).unwrap();
+}
+
+#[tokio::test]
+async fn lan_repository_filesystem_and_definition_routes_require_pairing() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.tmp");
+    std::fs::create_dir_all(&root).unwrap();
+    let temp = tempfile::tempdir_in(root).unwrap();
+    let repo = temp.path().join("repo");
+    init_test_git_repo(&repo);
+    let agent_dir = repo.join(".kanna/agents/auth-fixture");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nname: auth-fixture\ndescription: Authorization fixture\n---\nFixture agent\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["commit", "-m", "agent fixture"],
+        vec!["remote", "add", "origin", repo.to_str().unwrap()],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    publish_test_origin_main(&repo);
+    let mut state = super::test_state_with_seed("desktop-repo-auth", "Repo Auth", |db| {
+        db.insert_test_repo_with_path("repo-auth", repo.to_str().unwrap(), "Repo Auth")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-auth",
+            "repo-auth",
+            "Auth fixture",
+            Some("Auth"),
+            "in progress",
+            "2026-09-05 00:00:00",
+        )
+        .unwrap();
+    });
+    Db::open(&state.config().db_path)
+        .unwrap()
+        .update_test_pipeline_item_branch("task-auth", "main")
+        .unwrap();
+    let mutable = Arc::get_mut(&mut state).unwrap();
+    mutable.repo_checkout_root = temp.path().join("checkouts");
+    mutable.task_creator = Some(Arc::new(|request| {
+        Ok(CreateTaskResponse {
+            task_id: "created-auth-command".into(),
+            repo_id: request.repo_id,
+            title: "Auth command".into(),
+            prompt: request.prompt,
+            stage: "in progress".into(),
+            agent_type: "pty".into(),
+            worktree_path: None,
+        })
+    }));
+    let mut store = crate::pairing::PairingStore::default();
+    store.add_trusted_device(
+        &state.config().desktop_id,
+        "phone",
+        "Phone",
+        &crate::pairing::hash_device_secret("secret"),
+    );
+    store
+        .save(Path::new(&state.config().pairing_store_path))
+        .unwrap();
+    let app = crate::http_api::router(Arc::clone(&state));
+    async fn check(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut value = serde_json::Value::Null;
+        for paired in [false, true] {
+            let mut request = direct_lan_request(method.parse().unwrap(), path);
+            *request.body_mut() = Body::from(payload.to_string());
+            if paired {
+                request
+                    .headers_mut()
+                    .insert("x-kanna-device-id", "phone".parse().unwrap());
+                request
+                    .headers_mut()
+                    .insert("x-kanna-device-secret", "secret".parse().unwrap());
+            }
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            if paired {
+                assert!(
+                    status.is_success(),
+                    "{method} {path}: {status} {}",
+                    String::from_utf8_lossy(&body)
+                );
+                value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            } else {
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+                assert_eq!(&body[..], LAN_AUTH_REFUSAL.as_bytes());
+            }
+        }
+        value
+    }
+    for path in [
+        "/v1/repos/repo-auth/agents",
+        "/v1/repos/repo-auth/agent-providers",
+        "/v1/repos/repo-auth/kanna-definitions",
+        "/v1/repos/repo-auth/kanna-definitions/workflows/test-provider-neutral",
+        "/v1/repos/repo-auth/kanna-definitions/pipelines/test-provider-neutral",
+        "/v1/repos/repo-auth/kanna-definitions/agents/auth-fixture",
+        "/v1/tasks/task-auth",
+        "/v1/tasks/task-auth/children",
+        "/v1/tasks/task-auth/inputs",
+        "/v1/tasks/task-auth/logs",
+        "/v1/tasks/task-auth/dependent-tasks-exist",
+        "/v1/repo-singletons/no-such-remote/auth-fixture",
+    ] {
+        check(&app, "GET", path, serde_json::json!({})).await;
+    }
+    check(
+        &app,
+        "GET",
+        &format!("/v1/repos/by-path?path={}", repo.display()),
+        serde_json::json!({}),
+    )
+    .await;
+    check(
+        &app,
+        "POST",
+        "/v1/repos/repo-auth/reconcile-metadata",
+        serde_json::json!({"apply":false}),
+    )
+    .await;
+    check(
+        &app,
+        "POST",
+        "/v1/repos/repo-auth/fetch-origin",
+        serde_json::json!({}),
+    )
+    .await;
+    check(
+        &app,
+        "POST",
+        "/v1/window-workspace/mutations",
+        serde_json::json!({"operation":"remove","windowId":"absent"}),
+    )
+    .await;
+    check(&app, "POST", "/v1/backup", serde_json::json!({})).await;
+    let catalog = check(
+        &app,
+        "GET",
+        "/v1/repos/repo-auth/commands",
+        serde_json::json!({}),
+    )
+    .await;
+    check(
+        &app,
+        "POST",
+        "/v1/repos/repo-auth/commands/factory:create-agent/run",
+        serde_json::json!({"catalogRevision":catalog["revision"]}),
+    )
+    .await;
+    let added_repo = temp.path().join("added");
+    init_test_git_repo(&added_repo);
+    check(
+        &app,
+        "POST",
+        "/v1/repos",
+        serde_json::json!({"path":added_repo,"name":"Added"}),
+    )
+    .await;
+    use sha2::{Digest, Sha256};
+    let remote = format!("file://{}", repo.display());
+    let operation = check(&app, "POST", "/v1/repo-checkouts", serde_json::json!({"name":"checkout","remoteUrl":remote,"remoteUrlHash":format!("{:x}",Sha256::digest(remote.as_bytes()))})).await;
+    let operation_id = operation["id"].as_str().unwrap();
+    let completed = wait_for_repo_checkout(&app, operation_id).await;
+    assert_eq!(completed["state"], "done");
+    check(
+        &app,
+        "GET",
+        &format!("/v1/repo-checkouts/{operation_id}"),
+        serde_json::json!({}),
+    )
+    .await;
+    std::fs::remove_file(&state.config().pairing_store_path).unwrap();
 }
