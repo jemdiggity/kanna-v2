@@ -97,6 +97,14 @@ pub enum TaskEventKind {
     InputBlocked,
     /// A detached workspace teardown failed to start or exceeded its deadline.
     TeardownFailed,
+    /// A durable lifecycle operation intent (an accepted post, or a stage
+    /// spawn crossing the daemon socket) was dropped without being applied
+    /// because no server generation could ever reconcile it — its payload,
+    /// kind, or task no longer describes resolvable work. The intent is also
+    /// the task's pre-operation guard, so this is what says a task was
+    /// unblocked at the cost of that projection. `payload.reason` says why,
+    /// and `payload.operationId`/`kind`/`phase` identify what was retired.
+    LifecycleOperationRetired,
     /// A cross-machine transfer is shutting the task's agent down so its
     /// conversation can be shipped. `payload.phase` names the step —
     /// `wrap-up-sent`, `idle`, `quit-sent`, `exited`, `already-exited`, or
@@ -126,6 +134,7 @@ impl TaskEventKind {
             Self::InputDelivered => "task.input_delivered",
             Self::InputBlocked => "task.input_blocked",
             Self::TeardownFailed => "task.teardown_failed",
+            Self::LifecycleOperationRetired => "task.lifecycle_operation_retired",
             Self::TransferFinalizing => "task.transfer_finalizing",
         }
     }
@@ -149,6 +158,7 @@ impl TaskEventKind {
         Self::InputDelivered,
         Self::InputBlocked,
         Self::TeardownFailed,
+        Self::LifecycleOperationRetired,
         Self::TransferFinalizing,
     ];
 }

@@ -49,6 +49,22 @@ impl std::fmt::Display for SpawnDeliveryError {
     }
 }
 
+/// Where a `Spawn` request stands relative to the daemon socket.
+///
+/// A lifecycle operation's `submitted` phase must begin at this boundary and
+/// nowhere earlier: everything before the write is a *known* pre-submission
+/// failure the next server generation may safely fail, while a crash after it
+/// can no longer prove the daemon did not create the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpawnSubmission {
+    /// The serialized `Spawn` has been written and flushed to the socket.
+    Written,
+    /// The daemon answered `RetryOnSuccessor`, which is its proof that the
+    /// request had no side effects. The window closes until the replay
+    /// against the successor re-opens it.
+    WithdrawnBeforeSideEffects,
+}
+
 enum ProtectedInputNegotiationError {
     RetryOnSuccessor(String),
     Failed(String),
@@ -147,6 +163,22 @@ impl DaemonClient {
         &mut self,
         cmd: &Command,
     ) -> Result<Event, SpawnDeliveryError> {
+        self.send_spawn_command_marking_submission(cmd, &mut |_| {})
+            .await
+    }
+
+    /// Send a `Spawn` and report the exact socket boundary it crosses.
+    ///
+    /// `submission` is called with `Written` once the request has been
+    /// flushed to the daemon — the first instant at which a lost response
+    /// stops proving the session was never created — and with
+    /// `WithdrawnBeforeSideEffects` when the daemon answers
+    /// `RetryOnSuccessor`, which withdraws that write before the replay.
+    pub(crate) async fn send_spawn_command_marking_submission(
+        &mut self,
+        cmd: &Command,
+        submission: &mut (dyn FnMut(SpawnSubmission) + Send),
+    ) -> Result<Event, SpawnDeliveryError> {
         debug_assert!(matches!(cmd, Command::Spawn { .. }));
         let previous_pid = self.connected_pid;
         match self.negotiate_protected_input_once().await {
@@ -178,7 +210,7 @@ impl DaemonClient {
         }
 
         let first = self
-            .send_command(cmd)
+            .send_command_marking_submission(cmd, submission)
             .await
             .map_err(|error| SpawnDeliveryError::AfterSubmission(error.to_string()))?;
         if !matches!(
@@ -190,6 +222,7 @@ impl DaemonClient {
         ) {
             return Ok(first);
         }
+        submission(SpawnSubmission::WithdrawnBeforeSideEffects);
         let previous_pid = self.connected_pid;
         let mut successor = wait_for_successor(&self.daemon_dir, previous_pid)
             .await
@@ -206,9 +239,19 @@ impl DaemonClient {
                 })
             })?;
         *self = successor;
-        self.send_command(cmd)
+        self.send_command_marking_submission(cmd, submission)
             .await
             .map_err(|error| SpawnDeliveryError::AfterSubmission(error.to_string()))
+    }
+
+    async fn send_command_marking_submission(
+        &mut self,
+        cmd: &Command,
+        submission: &mut (dyn FnMut(SpawnSubmission) + Send),
+    ) -> Result<Event, Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(cmd)?;
+        self.send_serialized_command_marking_submission(&json, submission)
+            .await
     }
 
     /// Retry one daemon lifecycle command only when the daemon explicitly
@@ -246,6 +289,15 @@ impl DaemonClient {
         &mut self,
         json: &str,
     ) -> Result<Event, Box<dyn std::error::Error>> {
+        self.send_serialized_command_marking_submission(json, &mut |_| {})
+            .await
+    }
+
+    async fn send_serialized_command_marking_submission(
+        &mut self,
+        json: &str,
+        submission: &mut (dyn FnMut(SpawnSubmission) + Send),
+    ) -> Result<Event, Box<dyn std::error::Error>> {
         if self.poisoned {
             return Err(
                 "daemon connection unusable after an earlier command timeout; reconnect".into(),
@@ -255,6 +307,7 @@ impl DaemonClient {
             self.writer.write_all(json.as_bytes()).await?;
             self.writer.write_all(b"\n").await?;
             self.writer.flush().await?;
+            submission(SpawnSubmission::Written);
             let mut line = String::new();
             self.reader.read_line(&mut line).await?;
             let event: Event = serde_json::from_str(line.trim())?;

@@ -61,6 +61,14 @@ impl Db {
         rows.collect()
     }
 
+    pub fn has_lifecycle_operation(&self, id: &str) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM lifecycle_operation_intent WHERE id = ?)",
+            [id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn has_lifecycle_operation_for_task(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
             "SELECT EXISTS(

@@ -4,7 +4,7 @@ use super::types::{
     PreparedStageRerun, PreparedStageRunSpawn, PreparedTaskSpawn, PreparedWorkspaceTeardown,
 };
 use super::worktree::remove_prepared_worktree;
-use crate::daemon_client::{DaemonClient, SpawnDeliveryError};
+use crate::daemon_client::{DaemonClient, SpawnDeliveryError, SpawnSubmission};
 use crate::db::{Db, NewStageRun};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
@@ -50,9 +50,26 @@ async fn send_session_spawn_command(
     daemon: &mut DaemonClient,
     command: &DaemonCommand,
 ) -> Result<DaemonEvent, SpawnDeliveryError> {
+    send_session_spawn_command_marking_submission(daemon, command, &mut |_| {}).await
+}
+
+/// Send a session spawn and report when it crosses the daemon socket, so a
+/// caller holding a durable lifecycle intent can open its `submitted` phase
+/// at that boundary rather than before it.
+async fn send_session_spawn_command_marking_submission(
+    daemon: &mut DaemonClient,
+    command: &DaemonCommand,
+    submission: &mut (dyn FnMut(SpawnSubmission) + Send),
+) -> Result<DaemonEvent, SpawnDeliveryError> {
     if matches!(command, DaemonCommand::Spawn { .. }) {
-        daemon.send_spawn_command_retrying_successor(command).await
+        daemon
+            .send_spawn_command_marking_submission(command, submission)
+            .await
     } else {
+        // A headless `SpawnAgent` has no pre-submission classification: every
+        // failure on this path is already uncertain, so its submitted phase
+        // begins with the call itself.
+        submission(SpawnSubmission::Written);
         daemon
             .send_command_retrying_successor(command)
             .await
@@ -365,11 +382,19 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
     let session_id = prepared.session_id.clone();
-    if !release_lifecycle_operation_for_task(daemon, db_path, &task_id).await? {
-        return Err(rollback_prepared_stage_fork(
-            &prepared,
-            format!("task {task_id} already has a lifecycle operation awaiting reconciliation"),
-        ));
+    // The workspace is already forked at this point, so every way of leaving
+    // the guard without a spawn — a refusal *and* a database failure — has to
+    // roll it back, or the branch and worktree outlive the operation nobody
+    // started.
+    match release_lifecycle_operation_for_task(daemon, db_path, &task_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(rollback_prepared_stage_fork(
+                &prepared,
+                format!("task {task_id} already has a lifecycle operation awaiting reconciliation"),
+            ))
+        }
+        Err(error) => return Err(rollback_prepared_stage_fork(&prepared, error)),
     }
     let run_id = generate_stage_run_id(&task_id);
     let mut completion_context =
@@ -478,24 +503,43 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         prepared.session.clone(),
         prepared.stage_agent.as_deref() == Some("merge"),
     );
-    let event = match send_session_spawn_command(daemon, &command).await {
-        Ok(event) => event,
-        Err(SpawnDeliveryError::AfterSubmission(message)) => {
-            // Once Spawn has crossed the socket, response loss cannot prove
-            // that the daemon did not create the process. Keep the immutable
-            // completion identity available to any surviving child.
-            completion_context.persist();
-            return Err(format!("daemon spawn delivery is uncertain: {message}"));
-        }
-        Err(SpawnDeliveryError::BeforeSubmission(message)) => {
-            let error = format!("daemon spawn failed before submission: {message}");
-            fail_bound_stage_run(db_path, &task_id, &run_id, &error);
-            if let Err(abort_error) = abort_lifecycle_operation(db_path, &run_id) {
-                log::warn!("failed to clear rejected stage operation {run_id}: {abort_error}");
-            }
-            return Err(rollback_prepared_stage_fork(&prepared, error));
+    // The submitted phase starts at the socket, not at the run record above.
+    // Between the two the operation is still a known pre-submission failure,
+    // so a crash there fails the run instead of committing a stage move for
+    // an agent that provably never started.
+    let mut mark_submission = |submission: SpawnSubmission| {
+        let phase = match submission {
+            SpawnSubmission::Written => "submitted",
+            SpawnSubmission::WithdrawnBeforeSideEffects => "spawn_ready",
+        };
+        if let Err(error) = mark_stage_operation_phase(db_path, &run_id, phase) {
+            // The request is already on the wire; refusing the spawn now
+            // would be worse than an intent one phase behind, which startup
+            // resolves from live daemon session presence.
+            log::warn!("failed to mark stage operation {run_id} {phase}: {error}");
         }
     };
+    let event =
+        match send_session_spawn_command_marking_submission(daemon, &command, &mut mark_submission)
+            .await
+        {
+            Ok(event) => event,
+            Err(SpawnDeliveryError::AfterSubmission(message)) => {
+                // Once Spawn has crossed the socket, response loss cannot prove
+                // that the daemon did not create the process. Keep the immutable
+                // completion identity available to any surviving child.
+                completion_context.persist();
+                return Err(format!("daemon spawn delivery is uncertain: {message}"));
+            }
+            Err(SpawnDeliveryError::BeforeSubmission(message)) => {
+                let error = format!("daemon spawn failed before submission: {message}");
+                fail_bound_stage_run(db_path, &task_id, &run_id, &error);
+                if let Err(abort_error) = abort_lifecycle_operation(db_path, &run_id) {
+                    log::warn!("failed to clear rejected stage operation {run_id}: {abort_error}");
+                }
+                return Err(rollback_prepared_stage_fork(&prepared, error));
+            }
+        };
     match event {
         DaemonEvent::SessionCreated { .. } => {
             // SessionCreated is the daemon's commit point. All bookkeeping
@@ -571,7 +615,11 @@ fn record_stage_transition_run(
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
             db.set_stage_run_resume_fallback_reason(run_id, reason)?;
         }
-        if !db.update_lifecycle_operation_phase(run_id, "submitted")? {
+        // The intent deliberately stays `spawn_ready` here. The run row and
+        // its completion artifact must exist before Spawn can make the child
+        // observable, but recording them submits nothing: the phase advances
+        // at the daemon socket (see `send_session_spawn_command_marking_submission`).
+        if !db.has_lifecycle_operation(run_id)? {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         Ok(())
@@ -849,6 +897,12 @@ struct PostOperationPayload {
     cwd: Option<String>,
 }
 
+/// Everything reconciliation needs to finish, or refuse, one stage spawn.
+///
+/// Deliberately not the stage run's own columns: the run row is recorded
+/// before the spawn crosses the socket, so reconciliation resolves an
+/// existing row rather than reconstructing one. Fields stored by an older
+/// server that this no longer names (`run_kind`) are ignored on read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StageOperationPayload {
     version: u8,
@@ -857,7 +911,6 @@ struct StageOperationPayload {
     run_id: String,
     next_stage: String,
     run_stage: String,
-    run_kind: String,
     branch: Option<String>,
     worktree_path: Option<String>,
     cwd: String,
@@ -897,7 +950,6 @@ fn persist_stage_operation_intent(
         run_id: run_id.to_string(),
         next_stage: prepared.next_stage.clone(),
         run_stage: prepared.run_stage.clone(),
-        run_kind: prepared.run_kind.to_string(),
         branch,
         worktree_path,
         cwd: prepared.cwd.clone(),
@@ -1001,6 +1053,18 @@ fn finalize_post_operation(
     intent_id: &str,
     payload: &PostOperationPayload,
 ) -> Result<(), String> {
+    // The stored transition is a closed vocabulary the schema enforces.
+    // Binding the accepted post's run is what matters; an unreadable value
+    // records no transition rather than failing this operation on every boot.
+    let completion_transition = match payload.completion_transition.as_str() {
+        transition @ ("manual" | "auto") => Some(transition),
+        other => {
+            log::warn!(
+                "post operation {intent_id} carries unknown completion transition {other}; recording none"
+            );
+            None
+        }
+    };
     let db = Db::open(db_path).map_err(|error| format!("db error: {error}"))?;
     db.with_immediate_transaction(|db| -> rusqlite::Result<()> {
         if db.stage_run(&payload.run_id)?.is_none() {
@@ -1030,7 +1094,7 @@ fn finalize_post_operation(
                     cwd: payload.cwd.as_deref(),
                     resumed_from_run_id: None,
                 },
-                Some(&payload.completion_transition),
+                completion_transition,
                 true,
                 parse_stage_trigger(&payload.trigger),
             )?;
@@ -1043,9 +1107,12 @@ fn finalize_post_operation(
     .map_err(|error| format!("db error: {error}"))?;
 
     if let Some(inherited_run_id) = payload.inherited_run_id.as_deref() {
-        if let Err(error) =
-            advance_server_completion_context(daemon_dir, inherited_run_id, &payload.run_id)
-        {
+        if let Err(error) = advance_server_completion_context(
+            daemon_dir,
+            &payload.task_id,
+            inherited_run_id,
+            &payload.run_id,
+        ) {
             log::warn!(
                 "post operation {} committed but completion context rebind failed: {error}",
                 payload.run_id
@@ -1163,11 +1230,13 @@ fn reconcile_lifecycle_operation(
         "post" => match parse_operation_payload::<PostOperationPayload>(intent) {
             Ok(payload) => {
                 if payload.task_id != intent.task_id {
-                    log::error!(
-                        "lifecycle operation {} payload task {} disagrees with row task {}",
-                        intent.id,
-                        payload.task_id,
-                        intent.task_id
+                    retire_unreconcilable_lifecycle_operation(
+                        db_path,
+                        intent,
+                        &format!(
+                            "payload task {} disagrees with row task {}",
+                            payload.task_id, intent.task_id
+                        ),
                     );
                     return;
                 }
@@ -1177,16 +1246,29 @@ fn reconcile_lifecycle_operation(
                     log::error!("failed to reconcile post operation {}: {error}", intent.id);
                 }
             }
-            Err(error) => log::error!("{error}"),
+            Err(error) => retire_unreconcilable_lifecycle_operation(db_path, intent, &error),
         },
         "stage_spawn" => match parse_operation_payload::<StageOperationPayload>(intent) {
             Ok(payload) => {
                 if payload.task_id != intent.task_id {
-                    log::error!(
-                        "lifecycle operation {} payload task {} disagrees with row task {}",
-                        intent.id,
-                        payload.task_id,
-                        intent.task_id
+                    retire_unreconcilable_lifecycle_operation(
+                        db_path,
+                        intent,
+                        &format!(
+                            "payload task {} disagrees with row task {}",
+                            payload.task_id, intent.task_id
+                        ),
+                    );
+                    return;
+                }
+                if payload.branch.is_some() != payload.worktree_path.is_some() {
+                    // A workspace is a branch *and* a worktree, or neither.
+                    // Half of one names no workspace any projection could
+                    // land on, on this boot or any later one.
+                    retire_unreconcilable_lifecycle_operation(
+                        db_path,
+                        intent,
+                        "payload carries an incomplete workspace",
                     );
                     return;
                 }
@@ -1209,34 +1291,189 @@ fn reconcile_lifecycle_operation(
                         return;
                     }
                 };
+                let open = match db.get_pipeline_item(&payload.task_id) {
+                    Ok(item) => item.is_some_and(|item| item.closed_at.is_none()),
+                    Err(error) => {
+                        log::error!(
+                            "failed to read task {} for lifecycle operation {}: {error}",
+                            payload.task_id,
+                            intent.id
+                        );
+                        return;
+                    }
+                };
+                // A closed task has no stage projection left to land on.
+                // Terminate the operation rather than re-deriving the same
+                // missing task row on every boot while the guard refuses the
+                // task's next operation.
+                //
+                // Close never saw this fork: it was created after the guard
+                // released, and the stage/branch move never landed, so
+                // `pipeline_item.branch` still names the old workspace and no
+                // `worktree` row points here. That is exactly why a
+                // pre-submission intent removes it — nothing else will, and
+                // nothing ever ran in it. Once the Spawn crossed the socket
+                // that reasoning is gone: the daemon may have created the
+                // session, so an agent may have run and committed in this
+                // fork, and its branch is the only durable record of that
+                // work. Keep it, and name it where an operator can find it.
+                if !open {
+                    let submitted = intent.phase == "submitted";
+                    let workspace = if submitted {
+                        FailedStageWorkspace::Keep
+                    } else {
+                        FailedStageWorkspace::RollBackFreshFork
+                    };
+                    if let Err(error) = fail_lifecycle_operation(&db, intent, &payload, workspace) {
+                        log::error!(
+                            "failed to retire stage operation {} for a closed task: {error}",
+                            intent.id
+                        );
+                        return;
+                    }
+                    if submitted {
+                        let retained = payload.branch.as_deref().map(|branch| RetainedWorkspace {
+                            branch,
+                            worktree_path: payload.worktree_path.as_deref(),
+                        });
+                        let reason = match retained.as_ref() {
+                            Some(retained) => format!(
+                                "task was closed before the stage transition landed; the spawn had already crossed the daemon socket, so its workspace was kept and any work committed there is on branch {}",
+                                retained.branch
+                            ),
+                            None => "task was closed before the stage transition landed".to_string(),
+                        };
+                        record_lifecycle_operation_retirement(&db, intent, &reason, retained);
+                    }
+                    return;
+                }
                 // Once the intent is in `submitted`, the daemon command
                 // was the next operation. A missing SessionCreated (or a
                 // child that exited before this restart) is therefore an
                 // unknown acknowledgement, not proof that it was refused.
                 // Commit the same durable projection and never issue a
                 // second spawn. Only earlier phases are known to have
-                // stopped before submission.
-                let result = if intent.phase == "submitted" {
+                // stopped before submission — with one exception: the
+                // submitted phase is recorded just after the Spawn write, so
+                // a `spawn_ready` intent whose session is live in the run's
+                // own workspace is the same accepted spawn, one phase
+                // behind. The previous session was killed before that phase,
+                // so nothing else can be listening under that identity.
+                let submitted = intent.phase == "submitted"
+                    || (intent.phase == "spawn_ready" && session_matches);
+                let result = if submitted {
                     if !session_matches {
                         log::warn!(
                                 "lifecycle operation {} has no matching live daemon session; reconciling its submitted identity conservatively",
                                 intent.id
                             );
+                    } else if intent.phase != "submitted" {
+                        log::warn!(
+                            "lifecycle operation {} was interrupted between its Spawn write and its submitted phase; its live daemon session proves the spawn was accepted",
+                            intent.id
+                        );
                     }
                     reconcile_stage_operation_payload(&db, intent, &payload)
                 } else {
-                    fail_lifecycle_operation(&db, intent, &payload)
+                    fail_lifecycle_operation(
+                        &db,
+                        intent,
+                        &payload,
+                        FailedStageWorkspace::RollBackFreshFork,
+                    )
                 };
                 if let Err(error) = result {
                     log::error!("failed to reconcile stage operation {}: {error}", intent.id);
                 }
             }
-            Err(error) => log::error!("{error}"),
+            Err(error) => retire_unreconcilable_lifecycle_operation(db_path, intent, &error),
         },
-        kind => log::error!(
-            "cannot reconcile lifecycle operation {} with unknown kind {kind}",
-            intent.id
+        kind => retire_unreconcilable_lifecycle_operation(
+            db_path,
+            intent,
+            &format!("unknown lifecycle operation kind {kind}"),
         ),
+    }
+}
+
+/// Retire an intent no server generation can ever reconcile — an undecodable
+/// payload, an unknown kind, a payload naming another task.
+///
+/// The intent is also the task's pre-operation guard, so leaving one in place
+/// is not a conservative choice: it refuses every later post and stage spawn
+/// for that task forever while startup repeats the same error on every boot.
+/// Nothing here is ambiguous — an operation whose durable description cannot
+/// be read describes no in-flight work — so the row is dropped, the reason is
+/// logged once, and `task.lifecycle_operation_retired` puts it where an
+/// operator reads the task rather than only in a server log.
+fn retire_unreconcilable_lifecycle_operation(
+    db_path: &str,
+    intent: &crate::db::LifecycleOperationIntent,
+    reason: &str,
+) {
+    let db = match Db::open(db_path) {
+        Ok(db) => db,
+        Err(error) => {
+            log::error!(
+                "failed to open database to retire lifecycle operation {}: {error}",
+                intent.id
+            );
+            return;
+        }
+    };
+    if let Err(error) = db.delete_lifecycle_operation_intent(&intent.id) {
+        log::error!(
+            "failed to retire unreconcilable lifecycle operation {}: {error}",
+            intent.id
+        );
+        return;
+    }
+    record_lifecycle_operation_retirement(&db, intent, reason, None);
+}
+
+/// A workspace a retirement deliberately left on disk. Its branch may hold an
+/// agent's commits, and with the stage move dropped nothing else in the record
+/// names it, so the retirement itself has to.
+struct RetainedWorkspace<'a> {
+    branch: &'a str,
+    worktree_path: Option<&'a str>,
+}
+
+/// Announce a retirement on the task's own surfaces. Deliberately separate
+/// from the delete: unblocking the task is what must not fail, and an event
+/// that cannot be written is still worth the log line it leaves behind.
+fn record_lifecycle_operation_retirement(
+    db: &Db,
+    intent: &crate::db::LifecycleOperationIntent,
+    reason: &str,
+    retained: Option<RetainedWorkspace<'_>>,
+) {
+    log::error!(
+        "retired lifecycle operation {} (kind {}, phase {}) for task {}: {reason}",
+        intent.id,
+        intent.kind,
+        intent.phase,
+        intent.task_id
+    );
+    let recorded = db.append_task_event(
+        &intent.task_id,
+        crate::db::TaskEventKind::LifecycleOperationRetired,
+        serde_json::json!({
+            "operationId": intent.id,
+            "kind": intent.kind,
+            "phase": intent.phase,
+            "reason": reason,
+            "retainedBranch": retained.as_ref().map(|retained| retained.branch),
+            "retainedWorktreePath": retained
+                .as_ref()
+                .and_then(|retained| retained.worktree_path),
+        }),
+    );
+    if let Err(error) = recorded {
+        log::error!(
+            "failed to record retirement of lifecycle operation {}: {error}",
+            intent.id
+        );
     }
 }
 
@@ -1252,9 +1489,18 @@ fn reconcile_stage_operation_payload(
         {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        let trigger = parse_stage_trigger(&payload.trigger).ok_or(
-            rusqlite::Error::InvalidParameterName("invalid trigger".into()),
-        )?;
+        // The trigger is unauthenticated provenance, not authority: an
+        // unreadable one is exactly the "older or undeclared caller" the
+        // `unspecified` value already names. Refusing the whole projection
+        // over it would strand a live agent's stage move forever.
+        let trigger = parse_stage_trigger(&payload.trigger).unwrap_or_else(|| {
+            log::warn!(
+                "lifecycle operation {} carries unknown trigger {}; recording it as unspecified",
+                intent.id,
+                payload.trigger
+            );
+            crate::db::StageTrigger::Unspecified
+        });
         match (payload.branch.as_deref(), payload.worktree_path.as_deref()) {
             (Some(branch), Some(worktree_path)) => {
                 db.update_pipeline_item_stage_and_branch_with_trigger(
@@ -1294,10 +1540,24 @@ fn reconcile_stage_operation_payload(
     .map_err(|error| format!("db error: {error}"))
 }
 
+/// What becomes of a failed stage operation's workspace.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailedStageWorkspace {
+    /// The spawn provably stopped before submission, so a workspace this
+    /// operation forked itself never held an agent and is removed.
+    RollBackFreshFork,
+    /// The Spawn crossed the daemon socket. Nothing here can prove the
+    /// session was not created, so an agent may have run and committed in
+    /// this fork, and its branch is the only durable record of that work:
+    /// removing it would drop committed work at a boundary.
+    Keep,
+}
+
 fn fail_lifecycle_operation(
     db: &Db,
     intent: &crate::db::LifecycleOperationIntent,
     payload: &StageOperationPayload,
+    workspace: FailedStageWorkspace,
 ) -> Result<(), String> {
     let result = format!(
         "failed to start stage run {} after server restart",
@@ -1327,7 +1587,7 @@ fn fail_lifecycle_operation(
         Ok(())
     })
     .map_err(|error| format!("db error: {error}"))?;
-    if payload.rollback_on_failure {
+    if workspace == FailedStageWorkspace::RollBackFreshFork && payload.rollback_on_failure {
         if let (Some(worktree_path), Some(branch)) =
             (payload.worktree_path.as_deref(), payload.branch.as_deref())
         {
@@ -1417,6 +1677,22 @@ pub(crate) async fn dispatch_prepared_post_for_api(
         .map_err(|e| format!("db error: {e}"))?
         .latest_stage_run(&task_id)
         .map_err(|e| format!("db error: {e}"))?;
+    // An uncertain delivery is never retried, and the guard above is what
+    // makes that enforceable rather than advisory: reconciling the earlier
+    // intent has just committed the post it accepted. A caller that retries
+    // anyway is refused here, because a second dispatch would inject the
+    // same instruction twice into one live agent and leave two post runs
+    // where the workflow intends one. The stage-transition preparation
+    // applies the same rule to a post it can already see running; this
+    // catches the one that only became visible a moment ago.
+    if inherited.as_ref().is_some_and(|run| {
+        run.kind == "post" && run.status == "running" && run.stage == prepared.run_stage
+    }) {
+        return Err(format!(
+            "post is still running for task {task_id}: {}",
+            prepared.run_stage
+        ));
+    }
     if inherited
         .as_ref()
         .map(|run| run.id.as_str())
@@ -2353,6 +2629,7 @@ pub(crate) fn resolve_legacy_completion_retry_run(
 
 fn advance_server_completion_context(
     daemon_dir: &str,
+    task_id: &str,
     inherited_run_id: &str,
     new_run_id: &str,
 ) -> Result<(), String> {
@@ -2365,7 +2642,14 @@ fn advance_server_completion_context(
     } else if legacy_path.exists() {
         Some(legacy_path)
     } else {
-        None
+        // The artifact's filename is the run that *spawned* the session and
+        // never changes, while its content names the run currently answering
+        // for it. A second back-to-back post therefore inherits a post run
+        // that never had a file of its own: the live artifact is still the
+        // spawned run's, already advanced to the first post. Find it by that
+        // binding instead of by name, or the second post's completion would
+        // be credited to the finished first one.
+        completion_context_bound_to(daemon_dir, task_id, inherited_run_id)
     };
     let Some(path) = path else {
         // Older or manually-created runs may predate the server-owned
@@ -2390,6 +2674,41 @@ fn advance_server_completion_context(
         Ok(context)
     })
     .map(|_| ())
+}
+
+/// Locate this task's completion artifact whose content currently binds
+/// `run_id`, whatever spawned run it is named for.
+fn completion_context_bound_to(
+    daemon_dir: &std::path::Path,
+    task_id: &str,
+    run_id: &str,
+) -> Option<std::path::PathBuf> {
+    let owned = [format!("run-{task_id}-"), format!("task-{task_id}.")];
+    for directory in [
+        completion_directory(daemon_dir),
+        legacy_shared_completion_directory(daemon_dir),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            // Never read another task's artifact: this legacy directory is
+            // shared with other Kanna instances.
+            if !name.ends_with(".json") || !owned.iter().any(|prefix| name.starts_with(prefix)) {
+                continue;
+            }
+            if kanna_tool_catalog::read_completion_context(&path)
+                .is_ok_and(|context| context.run_id == run_id)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn uses_legacy_completion_context(daemon_dir: &str, task_id: &str, run_id: &str) -> bool {
@@ -2454,6 +2773,7 @@ mod successor_retry_tests {
         artifact.persist();
         let _ = advance_server_completion_context(
             &daemon_dir.to_string_lossy(),
+            "task-main",
             "run-main",
             "run-post",
         );
@@ -3011,10 +3331,137 @@ mod lifecycle_operation_tests {
         PostOperationPayload, StageOperationPayload,
     };
     use crate::daemon_client::DaemonClient;
-    use crate::db::{Db, NewStageRun};
-    use kanna_daemon::protocol::{Command, Event};
+    use crate::db::{Db, NewStageRun, TaskEventScope};
+    use kanna_daemon::protocol::{
+        Command, Event, SessionInfo, SessionKind, SessionState, SessionStatus,
+    };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    fn live_session(session_id: &str, cwd: &str) -> SessionInfo {
+        SessionInfo {
+            session_id: session_id.to_string(),
+            pid: 4242,
+            cwd: cwd.to_string(),
+            state: SessionState::Active,
+            idle_seconds: 0,
+            status: SessionStatus::Busy,
+            kind: SessionKind::Pty,
+            logical_input_blocked: false,
+            pending_logical_input_count: None,
+            composer_text: None,
+            composer_attestation: Default::default(),
+        }
+    }
+
+    /// Answer the single `List` startup reconciliation asks for. This is the
+    /// real socket boundary the restarted server uses: presence is the only
+    /// question it may put to the daemon, and it may ask it once.
+    async fn scripted_list_daemon(
+        daemon_dir: &std::path::Path,
+        sessions: Vec<SessionInfo>,
+    ) -> (DaemonClient, tokio::task::JoinHandle<()>) {
+        std::fs::create_dir_all(daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        std::fs::write(daemon_dir.join("daemon.pid"), "41\n").unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<Command>(&line).unwrap(),
+                Command::List
+            ));
+            write_half
+                .write_all(
+                    serde_json::to_string(&Event::SessionList { sessions })
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+        });
+        let mut daemon = DaemonClient::connect(daemon_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        daemon.set_connected_pid_for_test(41);
+        (daemon, server)
+    }
+
+    fn retirement_event(db: &Db, task_id: &str) -> Option<serde_json::Value> {
+        db.list_task_events(
+            &TaskEventScope::Tasks(vec![task_id.to_string()]),
+            0,
+            i64::MAX,
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "task.lifecycle_operation_retired")
+        .map(|event| event.payload)
+    }
+
+    fn retirement_reason(db: &Db, task_id: &str) -> Option<String> {
+        retirement_event(db, task_id)
+            .map(|payload| payload["reason"].as_str().unwrap_or_default().to_string())
+    }
+
+    fn stage_changed_trigger(db: &Db, task_id: &str) -> Option<String> {
+        db.list_task_events(
+            &TaskEventScope::Tasks(vec![task_id.to_string()]),
+            0,
+            i64::MAX,
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_type == "stage.changed")
+        .map(|event| {
+            event.payload["trigger"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    /// Commit a file on the fork's own branch, standing in for the work an
+    /// agent the daemon may have started could have left there.
+    fn commit_in_worktree(worktree: &std::path::Path, name: &str) {
+        std::fs::write(worktree.join(name), "agent work\n").unwrap();
+        for args in [vec!["add", name], vec!["commit", "-m", name]] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(worktree)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+    }
+
+    fn branch_contains_file(root: &std::path::Path, branch: &str, name: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["cat-file", "-e", &format!("{branch}:{name}")])
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    fn daemon_dir_for(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kanna-lifecycle-{label}-daemon-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
 
     fn fixture(name: &str, task_id: &str) -> (String, Db) {
         let db_path = Db::test_db_path(&format!("lifecycle-operation-{name}"));
@@ -3066,7 +3513,6 @@ mod lifecycle_operation_tests {
             run_id: run_id.to_string(),
             next_stage: "review".to_string(),
             run_stage: "review".to_string(),
-            run_kind: "main".to_string(),
             branch: branch.map(str::to_string),
             worktree_path: worktree_path.map(str::to_string),
             cwd: worktree_path.unwrap_or("/work/review").to_string(),
@@ -3286,7 +3732,6 @@ mod lifecycle_operation_tests {
             run_id: "run-review".to_string(),
             next_stage: "review".to_string(),
             run_stage: "review".to_string(),
-            run_kind: "main".to_string(),
             branch: Some("task-stage-restart-2".to_string()),
             worktree_path: Some("/work/review".to_string()),
             cwd: "/work/review".to_string(),
@@ -3379,7 +3824,13 @@ mod lifecycle_operation_tests {
                 )
                 .unwrap();
 
-                super::fail_lifecycle_operation(&db, &intent, &payload).unwrap();
+                super::fail_lifecycle_operation(
+                    &db,
+                    &intent,
+                    &payload,
+                    super::FailedStageWorkspace::RollBackFreshFork,
+                )
+                .unwrap();
 
                 if rollback_on_failure {
                     assert!(!worktree.exists());
@@ -3403,6 +3854,408 @@ mod lifecycle_operation_tests {
                 let _ = std::fs::remove_file(db_path);
             }
         }
+    }
+
+    /// The completion artifact's filename is the run that spawned the
+    /// session; only its content moves. A second back-to-back post therefore
+    /// inherits a post run that never had a file of its own, and resolving by
+    /// name would silently leave the live artifact bound to the finished
+    /// first post — crediting the second post's completion to it.
+    #[test]
+    fn back_to_back_posts_rebind_the_artifact_of_the_spawned_run() {
+        let task_id = "task-back-to-back";
+        let daemon_dir = daemon_dir_for("back-to-back");
+        let mut env = std::collections::HashMap::new();
+        let spawned_run = format!("run-{task_id}-1");
+        let first_post = format!("run-{task_id}-2");
+        let second_post = format!("run-{task_id}-3");
+        let mut artifact = initialize_completion_context(
+            &mut env,
+            task_id,
+            &spawned_run,
+            &daemon_dir.to_string_lossy(),
+        )
+        .unwrap();
+        artifact.persist();
+
+        super::advance_server_completion_context(
+            &daemon_dir.to_string_lossy(),
+            task_id,
+            &spawned_run,
+            &first_post,
+        )
+        .unwrap();
+        super::advance_server_completion_context(
+            &daemon_dir.to_string_lossy(),
+            task_id,
+            &first_post,
+            &second_post,
+        )
+        .unwrap();
+
+        let path = daemon_dir
+            .join("runtime/completion")
+            .join(format!("{spawned_run}.json"));
+        assert_eq!(
+            kanna_tool_catalog::read_completion_context(&path)
+                .unwrap()
+                .run_id,
+            second_post
+        );
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// An intent nobody can decode is not an uncertain in-flight operation:
+    /// it describes nothing. Left in place it is a permanent guard against
+    /// every later post and stage spawn for the task, so reconciliation
+    /// retires it, once, where an operator can see why.
+    #[tokio::test]
+    async fn restart_retires_an_undecodable_intent_and_unblocks_the_task() {
+        let task_id = "task-undecodable-intent";
+        let (db_path, db) = fixture("undecodable", task_id);
+        db.insert_lifecycle_operation_intent(
+            "run-undecodable",
+            task_id,
+            "stage_spawn",
+            "submitted",
+            "{ this is not a payload",
+        )
+        .unwrap();
+        let daemon_dir = daemon_dir_for("undecodable");
+        let (mut daemon, server) = scripted_list_daemon(&daemon_dir, Vec::new()).await;
+
+        reconcile_lifecycle_operations_on_startup(&mut daemon, &db_path, &db).await;
+        server.await.unwrap();
+
+        assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+        assert!(!db.has_lifecycle_operation_for_task(task_id).unwrap());
+        let reason = retirement_reason(&db, task_id).expect("retirement must reach the event feed");
+        assert!(reason.contains("payload"), "unexpected reason: {reason}");
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// A payload naming another task cannot be applied to the row that owns
+    /// it, and no later boot will make it applicable.
+    #[tokio::test]
+    async fn restart_retires_an_intent_whose_payload_names_another_task() {
+        let task_id = "task-mismatched-intent";
+        let (db_path, db) = fixture("mismatched", task_id);
+        let payload = stage_payload("some-other-task", "run-mismatched", None, None, false);
+        db.insert_lifecycle_operation_intent(
+            "run-mismatched",
+            task_id,
+            "stage_spawn",
+            "submitted",
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+        let daemon_dir = daemon_dir_for("mismatched");
+        let (mut daemon, server) = scripted_list_daemon(&daemon_dir, Vec::new()).await;
+
+        reconcile_lifecycle_operations_on_startup(&mut daemon, &db_path, &db).await;
+        server.await.unwrap();
+
+        assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+        let reason = retirement_reason(&db, task_id).expect("retirement must reach the event feed");
+        assert!(reason.contains("disagrees"), "unexpected reason: {reason}");
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// The uncertain-delivery-then-close shape: the stage projection has no
+    /// task left to land on, so reconciling it can only ever fail. Retire it
+    /// instead of blocking the task's record and re-logging the same error
+    /// forever — but what happens to the fork depends on what the phase
+    /// proves. Close never saw this workspace and the stage move never
+    /// landed, so nothing else names it; a pre-submission intent removes it
+    /// because nothing ever ran there, while a submitted one keeps its
+    /// branch, because the daemon may have created the session and the branch
+    /// is then the only record of what the agent committed.
+    async fn reconcile_closed_task_stage_intent(phase: &str) {
+        let submitted = phase == "submitted";
+        let task_id = &format!("task-closed-intent-{phase}");
+        let branch = &format!("task-closed-intent-{phase}-2");
+        let (repo_root, worktree) = git_workspace("closed", branch);
+        let (db_path, db) = fixture(&format!("closed-task-{phase}"), task_id);
+        let worktree_path = worktree.to_str().unwrap().to_string();
+        commit_in_worktree(&worktree, "agent-commit.txt");
+        assert!(branch_contains_file(&repo_root, branch, "agent-commit.txt"));
+        db.insert_stage_run(main_run("run-closed", task_id, &worktree_path))
+            .unwrap();
+        let payload = stage_payload(
+            task_id,
+            "run-closed",
+            Some(branch),
+            Some(&worktree_path),
+            true,
+        );
+        db.insert_lifecycle_operation_intent(
+            "run-closed",
+            task_id,
+            "stage_spawn",
+            phase,
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at(task_id, "2026-09-05T01:00:00Z")
+            .unwrap();
+        let daemon_dir = daemon_dir_for(&format!("closed-task-{phase}"));
+        let (mut daemon, server) = scripted_list_daemon(&daemon_dir, Vec::new()).await;
+
+        reconcile_lifecycle_operations_on_startup(&mut daemon, &db_path, &db).await;
+        server.await.unwrap();
+
+        assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+        let item = db.get_pipeline_item(task_id).unwrap().unwrap();
+        assert_eq!(item.stage.as_deref(), Some("in progress"));
+        assert_eq!(
+            db.stage_run("run-closed").unwrap().unwrap().status,
+            "failed"
+        );
+        if submitted {
+            // The agent's commits are the thing that must survive a boundary,
+            // and with the stage move dropped the branch is where they live.
+            assert!(git_branch_exists(&repo_root, branch));
+            assert!(branch_contains_file(&repo_root, branch, "agent-commit.txt"));
+            let event =
+                retirement_event(&db, task_id).expect("retirement must reach the event feed");
+            let reason = event["reason"].as_str().unwrap_or_default();
+            assert!(reason.contains("closed"), "unexpected reason: {reason}");
+            assert!(
+                reason.contains(branch.as_str()),
+                "the retained branch must be named where an operator reads it: {reason}"
+            );
+            assert_eq!(event["retainedBranch"].as_str(), Some(branch.as_str()));
+            assert_eq!(
+                event["retainedWorktreePath"].as_str(),
+                Some(worktree_path.as_str())
+            );
+        } else {
+            // Nothing ever ran here, and nothing else will remove it.
+            assert!(!worktree.exists());
+            assert!(!git_branch_exists(&repo_root, branch));
+        }
+
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree)
+            .current_dir(&repo_root)
+            .output();
+        let _ = std::fs::remove_dir_all(repo_root);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn restart_retires_a_submitted_stage_intent_for_a_closed_task() {
+        reconcile_closed_task_stage_intent("submitted").await;
+    }
+
+    #[tokio::test]
+    async fn restart_rolls_back_a_pre_submission_stage_intent_for_a_closed_task() {
+        reconcile_closed_task_stage_intent("spawn_ready").await;
+    }
+
+    /// An unreadable trigger is unauthenticated provenance, not authority.
+    /// Before it degraded, reconciliation returned an error over it and the
+    /// intent survived every boot — one of the poisoned shapes that blocked a
+    /// task forever. The projection must land, with the trigger recorded as
+    /// the `unspecified` an undeclared caller already gets.
+    #[tokio::test]
+    async fn restart_commits_a_stage_intent_whose_trigger_is_unreadable() {
+        let task_id = "task-unreadable-trigger";
+        let branch = "task-unreadable-trigger-2";
+        let (repo_root, worktree) = git_workspace("unreadable-trigger", branch);
+        let (db_path, db) = fixture("unreadable-trigger", task_id);
+        let worktree_path = worktree.to_str().unwrap().to_string();
+        db.insert_stage_run(main_run("run-review", task_id, &worktree_path))
+            .unwrap();
+        let mut payload = stage_payload(
+            task_id,
+            "run-review",
+            Some(branch),
+            Some(&worktree_path),
+            true,
+        );
+        payload.trigger = "from-the-future".to_string();
+        db.insert_lifecycle_operation_intent(
+            "run-review",
+            task_id,
+            "stage_spawn",
+            "submitted",
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+        let daemon_dir = daemon_dir_for("unreadable-trigger");
+        let (mut daemon, server) = scripted_list_daemon(&daemon_dir, Vec::new()).await;
+
+        reconcile_lifecycle_operations_on_startup(&mut daemon, &db_path, &db).await;
+        server.await.unwrap();
+
+        assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+        let item = db.get_pipeline_item(task_id).unwrap().unwrap();
+        assert_eq!(item.stage.as_deref(), Some("review"));
+        assert_eq!(item.branch.as_deref(), Some(branch));
+        assert_eq!(
+            stage_changed_trigger(&db, task_id).as_deref(),
+            Some("unspecified")
+        );
+
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree)
+            .current_dir(&repo_root)
+            .output();
+        let _ = std::fs::remove_dir_all(repo_root);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// The same rule for a post's completion transition: the schema's closed
+    /// vocabulary would reject an unreadable one and fail this operation on
+    /// every boot. Binding the accepted post's run is what matters; the
+    /// transition is recorded as none.
+    #[tokio::test]
+    async fn restart_binds_a_post_whose_completion_transition_is_unreadable() {
+        let task_id = "task-unreadable-transition";
+        let (db_path, db) = fixture("unreadable-transition", task_id);
+        db.insert_stage_run(main_run("run-main", task_id, "/work/current"))
+            .unwrap();
+        let payload = PostOperationPayload {
+            version: 1,
+            task_id: task_id.to_string(),
+            session_id: task_id.to_string(),
+            message: "post instruction".to_string(),
+            run_id: "run-post".to_string(),
+            inherited_run_id: Some("run-main".to_string()),
+            run_stage: "commit".to_string(),
+            completion_transition: "from-the-future".to_string(),
+            trigger: "operator".to_string(),
+            agent: Some("implement".to_string()),
+            agent_provider: Some("codex".to_string()),
+            model: None,
+            effort: None,
+            provider_session_id: None,
+            cwd: Some("/work/current".to_string()),
+        };
+        db.insert_lifecycle_operation_intent(
+            "run-post",
+            task_id,
+            "post",
+            "submitted",
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+        let daemon_dir = daemon_dir_for("unreadable-transition");
+        let (mut daemon, server) = scripted_list_daemon(&daemon_dir, Vec::new()).await;
+
+        reconcile_lifecycle_operations_on_startup(&mut daemon, &db_path, &db).await;
+        server.await.unwrap();
+
+        assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+        let post = db
+            .stage_run("run-post")
+            .unwrap()
+            .expect("post run is bound");
+        assert_eq!(post.status, "running");
+        assert_eq!(post.completion_transition, None);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// The crash-between-record-and-write window. The run row and its
+    /// completion artifact are recorded before Spawn is written, but the
+    /// submitted phase only begins at the socket — so this state is a known
+    /// pre-submission failure and must never commit a stage move for an
+    /// agent that provably never started. When the daemon does list the run's
+    /// own session, that same state is the accepted spawn one phase behind
+    /// and commits exactly as `submitted` would.
+    async fn reconcile_stage_interrupted_at_the_spawn_write(spawn_landed: bool) {
+        let label = if spawn_landed { "landed" } else { "unwritten" };
+        let task_id = &format!("task-spawn-write-{label}");
+        let branch = &format!("task-spawn-write-{label}-2");
+        let (repo_root, worktree) = git_workspace("spawn-write", branch);
+        let (db_path, db) = fixture(&format!("spawn-write-{label}"), task_id);
+        let worktree_path = worktree.to_str().unwrap().to_string();
+        db.insert_stage_run(NewStageRun {
+            id: "run-review",
+            task_id,
+            stage: "review",
+            kind: "main",
+            agent: Some("review"),
+            agent_provider: Some("codex"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some(task_id),
+            provider_session_id: None,
+            cwd: Some(&worktree_path),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        let payload = stage_payload(
+            task_id,
+            "run-review",
+            Some(branch),
+            Some(&worktree_path),
+            true,
+        );
+        db.insert_lifecycle_operation_intent(
+            "run-review",
+            task_id,
+            "stage_spawn",
+            "spawn_ready",
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+        let daemon_dir = daemon_dir_for(&format!("spawn-write-{label}"));
+        let sessions = if spawn_landed {
+            vec![live_session(task_id, &worktree_path)]
+        } else {
+            Vec::new()
+        };
+        let (mut daemon, server) = scripted_list_daemon(&daemon_dir, sessions).await;
+
+        reconcile_lifecycle_operations_on_startup(&mut daemon, &db_path, &db).await;
+        server.await.unwrap();
+
+        assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+        let item = db.get_pipeline_item(task_id).unwrap().unwrap();
+        let run = db.stage_run("run-review").unwrap().unwrap();
+        if spawn_landed {
+            assert_eq!(item.stage.as_deref(), Some("review"));
+            assert_eq!(item.branch.as_deref(), Some(branch.as_str()));
+            assert_eq!(run.status, "running");
+            assert!(worktree.is_dir());
+            assert!(git_branch_exists(&repo_root, branch));
+        } else {
+            assert_eq!(item.stage.as_deref(), Some("in progress"));
+            assert_ne!(item.branch.as_deref(), Some(branch.as_str()));
+            assert_eq!(run.status, "failed");
+            assert!(!worktree.exists());
+            assert!(!git_branch_exists(&repo_root, branch));
+        }
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree)
+            .current_dir(&repo_root)
+            .output();
+        let _ = std::fs::remove_dir_all(repo_root);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn restart_fails_a_stage_interrupted_before_its_spawn_write() {
+        reconcile_stage_interrupted_at_the_spawn_write(false).await;
+    }
+
+    #[tokio::test]
+    async fn restart_commits_a_stage_whose_live_session_proves_the_spawn_landed() {
+        reconcile_stage_interrupted_at_the_spawn_write(true).await;
     }
 
     #[tokio::test]
