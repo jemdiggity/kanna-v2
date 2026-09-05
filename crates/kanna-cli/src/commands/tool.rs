@@ -380,14 +380,13 @@ async fn bind_request_to_spawned_run(
                 .to_string()
         })
         .or_else(|| env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV).ok());
-    let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) else {
-        return Ok(());
-    };
     let body = request
         .body
         .as_object_mut()
         .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
-    body.insert("runId".to_string(), Value::String(run_id.to_string()));
+    if let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) {
+        body.insert("runId".to_string(), Value::String(run_id));
+    }
     body.insert(
         "completionAttemptKey".to_string(),
         Value::String(attempt_key.clone()),

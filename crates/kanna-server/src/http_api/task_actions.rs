@@ -1480,6 +1480,26 @@ pub(super) async fn complete_stage(
                         format!("task not found: {}", task_id),
                     )
                 })?;
+            // Resolve retries before looking at live runs (or closed state).
+            // The task mutation guard serializes lookup, recording and transition.
+            let contextless_key = if payload_run_id.is_none() {
+                completion_attempt_key_for_record.as_deref()
+            } else {
+                None
+            };
+            if let Some(key) = contextless_key {
+                if let Some((original_run_id, original_result)) = db
+                    .contextless_completion_attempt(&task_id, key)
+                    .map_err(|e| db_write_error("db error", e))?
+                {
+                    if original_result != stage_result {
+                        return Err((axum::http::StatusCode::CONFLICT, format!(
+                            "completionAttemptKey already recorded a different verdict for run {original_run_id}"
+                        )));
+                    }
+                    return Ok((task_id, None, false, true));
+                }
+            }
             if db
                 .get_pipeline_item(&task_id)
                 .map_err(|e| db_write_error("db error", e))?
@@ -1522,6 +1542,10 @@ pub(super) async fn complete_stage(
                         && run.status == run_status
                         && run.result.as_deref() == Some(stage_result.as_str())
                 }) {
+                    if let Some(key) = contextless_key {
+                        db.record_contextless_completion_attempt(key, &payload_run_id, &stage_result)
+                            .map_err(|e| db_write_error("db error", e))?;
+                    }
                     return Ok((task_id, None, false, true));
                 }
                 return Err((
@@ -1535,6 +1559,10 @@ pub(super) async fn complete_stage(
             if current_run.status == run_status
                 && current_run.result.as_deref() == Some(stage_result.as_str())
             {
+                if let Some(key) = contextless_key {
+                    db.record_contextless_completion_attempt(key, &payload_run_id, &stage_result)
+                        .map_err(|e| db_write_error("db error", e))?;
+                }
                 return Ok((task_id, None, false, true));
             }
             if !matches!(
@@ -1554,12 +1582,15 @@ pub(super) async fn complete_stage(
                 completion_transition: current_run.completion_transition,
                 trigger: current_run.trigger,
             });
-            db.finish_stage_run(
-                &payload_run_id,
-                run_status,
-                Some(&stage_result),
-                Some(&payload_summary),
-            )
+            if let Some(key) = contextless_key {
+                db.finish_contextless_stage_run(
+                    key, &payload_run_id, run_status, &stage_result, &payload_summary,
+                )
+            } else {
+                db.finish_stage_run(
+                    &payload_run_id, run_status, Some(&stage_result), Some(&payload_summary),
+                )
+            }
             .map_err(|e| db_write_error("db error", e))?;
             if payload_status == "success" {
                 if let Some(pr_url) =
@@ -2173,8 +2204,9 @@ fn resolve_action_run(
                 .map(|run| run.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let received = requested_run_id.unwrap_or("omitted");
             Err((axum::http::StatusCode::CONFLICT, format!(
-                "ambiguous stage action for task {task_id}: running runs are {ids}; supply runId matching one of them (received {requested_run_id:?})"
+                "ambiguous stage action for task {task_id}: running runs are {ids}; supply runId matching one of them (received {received})"
             )))
         }
     }

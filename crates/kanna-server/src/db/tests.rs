@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "061_stage_run_trigger");
+    assert_eq!(latest_migration, "062_contextless_completion_attempt");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -1722,6 +1722,75 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
     assert_eq!(runs[0].result.as_deref(), Some(result));
     assert_eq!(runs[0].feedback.as_deref(), Some("implemented"));
     assert!(runs[0].finished_at.is_some());
+}
+
+#[test]
+fn contextless_completion_binding_commits_atomically_with_verdict() {
+    let path = Db::test_db_path("contextless-completion-atomic");
+    let db = Db::open_for_tests(&path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Finish once",
+        None,
+        "in progress",
+        "2026-09-05 00:00:00",
+    )
+    .unwrap();
+    for id in ["run-original", "run-next"] {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: None,
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: None,
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    }
+    let result = r#"{"status":"success","summary":"done"}"#;
+    db.finish_contextless_stage_run("key", "run-original", "succeeded", result, "done")
+        .unwrap();
+    // A duplicate binding must roll back the run update and durable event.
+    let event_count: i64 = db
+        .conn
+        .query_row("SELECT COUNT(*) FROM task_event", [], |row| row.get(0))
+        .unwrap();
+    assert!(db
+        .finish_contextless_stage_run("key", "run-next", "succeeded", result, "done")
+        .is_err());
+    let next = db.stage_run("run-next").unwrap().unwrap();
+    assert_eq!(next.status, "running");
+    assert!(next.result.is_none());
+    assert_eq!(
+        db.conn
+            .query_row("SELECT COUNT(*) FROM task_event", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        event_count
+    );
+    drop(db);
+    let reopened = Db::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .contextless_completion_attempt("task-1", "key")
+            .unwrap(),
+        Some(("run-original".into(), result.into()))
+    );
+    assert!(reopened
+        .contextless_completion_attempt("another-task", "key")
+        .unwrap()
+        .is_none());
 }
 
 #[test]

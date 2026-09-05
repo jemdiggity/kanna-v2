@@ -152,3 +152,66 @@ fn assert_lost_response_retry(direct_stage_complete: bool) {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn contextless_completion_retries_always_send_the_same_key() {
+    for direct in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                bodies.push(read_json_request(&mut stream));
+                if attempt == 1 {
+                    let body = r#"{"taskId":"task-1"}"#;
+                    write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                }
+            }
+            bodies
+        });
+        for attempt in 0..2 {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-cli"));
+            if direct {
+                command.args([
+                    "stage-complete",
+                    "--task-id",
+                    "task-1",
+                    "--status",
+                    "success",
+                    "--summary",
+                    "completed once",
+                ]);
+            } else {
+                command.args([
+                    "tool",
+                    "call",
+                    "kanna_complete_stage",
+                    "--json",
+                    r#"{"task_id":"task-1","status":"success","summary":"completed once"}"#,
+                ]);
+            }
+            let output = command
+                .args(["--server-url", &format!("http://{address}")])
+                .env_remove(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV)
+                .env_remove(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                attempt == 1,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies[0], bodies[1]);
+        assert!(bodies[0]
+            .get("runId")
+            .is_none_or(serde_json::Value::is_null));
+        assert_eq!(
+            bodies[0]["completionAttemptKey"],
+            kanna_tool_catalog::completion_attempt_key(&bodies[0]).unwrap()
+        );
+    }
+}

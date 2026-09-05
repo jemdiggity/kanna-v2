@@ -302,6 +302,51 @@ impl Db {
         }
     }
 
+    /// Context-less keys belong to the task, not whichever run is live on retry.
+    pub(crate) fn contextless_completion_attempt(
+        &self,
+        task_id: &str,
+        attempt_key: &str,
+    ) -> Result<Option<(String, String)>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT run_id, result FROM contextless_completion_attempt
+             WHERE task_id = ? AND attempt_key = ?",
+                (task_id, attempt_key),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+    }
+
+    pub(crate) fn record_contextless_completion_attempt(
+        &self,
+        attempt_key: &str,
+        run_id: &str,
+        result: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO contextless_completion_attempt (task_id, attempt_key, run_id, result)
+             SELECT task_id, ?, id, ? FROM stage_run WHERE id = ?",
+            (attempt_key, result, run_id),
+        )?;
+        Ok(())
+    }
+
+    /// Commit the retry identity and verdict together, including run.finished.
+    pub(crate) fn finish_contextless_stage_run(
+        &self,
+        attempt_key: &str,
+        run_id: &str,
+        status: &str,
+        result: &str,
+        summary: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            db.finish_stage_run(run_id, status, Some(result), Some(summary))?;
+            db.record_contextless_completion_attempt(attempt_key, run_id, result)
+        })
+    }
+
     pub fn finish_stage_run(
         &self,
         id: &str,
