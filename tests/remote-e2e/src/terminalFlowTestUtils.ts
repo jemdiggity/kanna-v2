@@ -77,9 +77,11 @@ export interface TerminalEventCollector {
 }
 
 export interface TerminalSnapshotExpectation {
+  cols?: number;
   maxEncodedChars?: number;
   minEncodedChars: number;
   minRetainedScrollbackLines?: number;
+  rows?: number;
   sentinel: string;
 }
 
@@ -110,6 +112,8 @@ export async function createScriptedTask(
     setupCommands?: string[];
     snapshotHistory?: ScriptedAgentOptions["snapshotHistory"];
     terminalPasteSemantics?: boolean;
+    terminalCols?: number;
+    terminalRows?: number;
     tracePartialInput?: boolean;
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
@@ -151,7 +155,13 @@ export async function createScriptedTask(
       prompt: taskPrompt,
       displayName: options.displayName,
       agentProvider: options.agentProvider ?? "codex",
-      agentType: "pty"
+      agentType: "pty",
+      ...(options.terminalCols === undefined
+        ? {}
+        : { terminalCols: options.terminalCols }),
+      ...(options.terminalRows === undefined
+        ? {}
+        : { terminalRows: options.terminalRows })
     }
   }));
 
@@ -487,10 +497,17 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
           this.snapshotWaiters.splice(index, 1);
         }
         const lastEncodedChars = this.lastSnapshot?.dataB64.length ?? 0;
+        const lastDimensions = this.lastSnapshot
+          ? `${this.lastSnapshot.cols}x${this.lastSnapshot.rows}`
+          : "none";
         reject(new Error(
           `timed out waiting for terminal snapshot from ${this.taskId}; ` +
-            `last encoded length=${lastEncodedChars}, expected >` +
-            `${expectation.minEncodedChars} with ${expectation.sentinel}`,
+            `last encoded length=${lastEncodedChars}, dimensions=${lastDimensions}; ` +
+            `expected >${expectation.minEncodedChars} chars` +
+            `${expectation.cols === undefined || expectation.rows === undefined
+              ? ""
+              : ` at ${expectation.cols}x${expectation.rows}`} with ` +
+            expectation.sentinel,
         ));
       }, timeoutMs);
       this.snapshotWaiters.push({
@@ -636,6 +653,8 @@ function snapshotMatches(
   expectation: TerminalSnapshotExpectation,
 ): boolean {
   return (
+    (expectation.cols === undefined || snapshot.cols === expectation.cols) &&
+    (expectation.rows === undefined || snapshot.rows === expectation.rows) &&
     snapshot.dataB64.length > expectation.minEncodedChars &&
     (expectation.maxEncodedChars === undefined ||
       snapshot.dataB64.length < expectation.maxEncodedChars) &&

@@ -149,9 +149,11 @@ interface TerminalEventCollector {
   outputText(): string;
   waitForSnapshot(
     expectation: {
+      cols?: number;
       maxEncodedChars?: number;
       minEncodedChars: number;
       minRetainedScrollbackLines?: number;
+      rows?: number;
       sentinel: string;
     },
     timeoutMs?: number,
@@ -192,6 +194,8 @@ interface TerminalFlowModule {
       snapshotHistory?: {
         sentinel: string;
       };
+      terminalCols?: number;
+      terminalRows?: number;
       waitingPromptSnippet?: string;
     }
   ): Promise<ScriptedTask>;
@@ -254,6 +258,7 @@ export interface MobileRelayHarness {
     originalPromptSnippet: string;
     repoLabel: string;
     stage: string;
+    taskId: string;
     title: string;
     waitingPromptSnippet: string;
   };
@@ -403,6 +408,11 @@ export async function startMobileRelayHarness(
             snapshotHistory: {
               sentinel: MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
             },
+            // Start at the daemon default so the mobile detail's resize is
+            // observable, rather than inherited from fixture seeding.
+            terminalCols: 80,
+            terminalRows: 24,
+            traceTerminalKeys: true,
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
         : {}),
@@ -604,6 +614,7 @@ export async function startMobileRelayHarness(
         originalPromptSnippet: RELAY_ORIGINAL_PROMPT,
         repoLabel: RELAY_REPO_LABEL,
         stage: RELAY_TASK_STAGE,
+        taskId: localTask.taskId,
         title: RELAY_TASK_TITLE,
         waitingPromptSnippet: RELAY_WAITING_PROMPT,
       },
@@ -871,7 +882,7 @@ function cloudTaskIdFor(
 }
 
 export function publishedCloudTaskId(
-  fields: Pick<FirestoreFields, "cloudTaskId"> | undefined,
+  fields: Partial<Pick<FirestoreFields, "cloudTaskId">> | undefined,
   fallbackId: string,
 ): string {
   return fields?.cloudTaskId?.stringValue?.trim() || fallbackId;

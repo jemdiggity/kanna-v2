@@ -878,13 +878,15 @@ describe("relay quick reply transport observation", () => {
 const taskRowExpectation: RelayTaskRowExpectation = {
   title: "Relay card current title",
   stage: "in progress",
+  taskId: "task-local",
   waitingPromptSnippet: "Relay card current title",
   originalPromptSnippet: "Original relay request must stay hidden",
   repoLabel: "Relay fixture repository",
 };
 
 function expectedTaskRowLabel(): string {
-  return `${taskRowExpectation.title}. ${taskRowExpectation.stage}`;
+  return `${taskRowExpectation.title}. Task ID ${taskRowExpectation.taskId}. ` +
+    `${taskRowExpectation.stage}`;
 }
 
 function createTaskRow(label: string, calls: string[] = []) {
@@ -897,6 +899,9 @@ function createTaskRow(label: string, calls: string[] = []) {
       return label;
     }),
     getText: vi.fn(async () => label),
+    scrollIntoView: vi.fn(async () => {
+      calls.push("scrollIntoView");
+    }),
     waitForDisplayed: vi.fn(async () => {
       calls.push("waitForDisplayed");
     }),
@@ -1019,7 +1024,12 @@ describe("relay task row presentation", () => {
     );
 
     expect(ui.getTaskRowById).toHaveBeenCalledWith("cloud:desktop:repo:task");
-    expect(calls).toEqual(["waitForDisplayed", "getAttribute:label", "click"]);
+    expect(calls).toEqual([
+      "scrollIntoView",
+      "waitForDisplayed",
+      "getAttribute:label",
+      "click",
+    ]);
   });
 
   it("accepts a duplicated waiting preview rendered only once", async () => {
@@ -1060,7 +1070,8 @@ describe("relay task row presentation", () => {
 
 describe("recent task row repo label", () => {
   const expectedRecentRowLabel = () =>
-    `${taskRowExpectation.title}. ${taskRowExpectation.repoLabel}. ` +
+    `${taskRowExpectation.title}. Task ID ${taskRowExpectation.taskId}. ` +
+    `${taskRowExpectation.repoLabel}. ` +
     `${taskRowExpectation.stage}`;
 
   it("accepts a recent row that announces the repo after the title", async () => {
@@ -1109,6 +1120,7 @@ describe("recent task row repo label", () => {
     expect(ui.getTaskRowById).toHaveBeenCalledWith("cloud:desktop:repo:task");
     expect(calls).toEqual([
       "recentTab.click",
+      "scrollIntoView",
       "waitForDisplayed",
       "getAttribute:label",
       "tasksTab.click",

@@ -109,6 +109,7 @@ export interface RelayTaskRowExpectation {
   originalPromptSnippet: string;
   repoLabel: string;
   stage: string;
+  taskId: string;
   title: string;
   waitingPromptSnippet: string;
 }
@@ -120,6 +121,10 @@ interface RelayElement {
   getSize(): Promise<{ height: number; width: number }>;
   getText(): Promise<string>;
   isExisting(): Promise<boolean>;
+  scrollIntoView(options: {
+    direction: "down" | "up";
+    maxScrolls: number;
+  }): Promise<unknown>;
   setValue(value: string): Promise<unknown>;
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
@@ -1233,6 +1238,7 @@ export async function assertRelayTaskRowPresentation(
   const label = nativeLabel?.trim() || (await row.getText()).trim();
   const expectedLabel = [
     expected.title,
+    `Task ID ${expected.taskId}`,
     expected.stage,
     expected.waitingPromptSnippet === expected.title
       ? null
@@ -1260,6 +1266,7 @@ export async function assertRecentTaskRowShowsRepoLabel(
   const label = nativeLabel?.trim() || (await row.getText()).trim();
   const expectedLabel = [
     expected.title,
+    `Task ID ${expected.taskId}`,
     expected.repoLabel,
     expected.stage,
     expected.waitingPromptSnippet === expected.title
@@ -1282,6 +1289,7 @@ export async function verifyRecentTabShowsRepoLabel(
   const recentTab = await ui.getRecentTab();
   await recentTab.click();
   const row = await ui.getTaskRowById(taskId);
+  await row.scrollIntoView({ direction: "down", maxScrolls: 5 });
   await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await assertRecentTaskRowShowsRepoLabel(row, expected);
   const tasksTab = await ui.getTasksTab();
@@ -1295,12 +1303,14 @@ export async function openRelayFixtureTask(
 ): Promise<void> {
   if (expected) {
     const task = await ui.getTaskRowById(taskId);
+    await task.scrollIntoView({ direction: "down", maxScrolls: 5 });
     await task.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await assertRelayTaskRowPresentation(task, expected);
     await task.click();
     return;
   }
   const task = await ui.getTaskRowById(taskId);
+  await task.scrollIntoView({ direction: "down", maxScrolls: 5 });
   await task.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await task.click();
 }
@@ -1511,9 +1521,22 @@ export async function runRelayTaskFlow(
   await ensureTaskListVisible(ui);
   await verifyTasksTabNewestFirst(ui, options.taskOrdering);
   const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
-  await exactTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await exactTaskRow.scrollIntoView({ direction: "down", maxScrolls: 5 });
+  try {
+    await exactTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  } catch {
+    const renderedTaskIds = await renderedTaskRowIds(ui);
+    throw new Error(
+      `Expected relay task row ${options.fixture.taskId}; rendered task row ids were ` +
+        `${JSON.stringify(renderedTaskIds)}`,
+    );
+  }
   await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);
+  await options.setTaskActivity("unread");
+  await waitForTaskActivity(ui, options.fixture.taskId, "unread");
   await verifyRecentTabShowsRepoLabel(ui, options.fixture.taskId, options.taskRow);
+  await options.setTaskActivity("working");
+  await waitForTaskActivity(ui, options.fixture.taskId, "working");
   await verifyRelayTaskActivityTransitions(
     ui,
     options.fixture.taskId,
