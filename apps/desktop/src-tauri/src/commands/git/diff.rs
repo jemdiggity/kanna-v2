@@ -48,6 +48,25 @@ pub fn git_diff(
     diff_to_patch(diff)
 }
 
+/// Whether the worktree has anything uncommitted — staged, unstaged, or
+/// untracked. The diff view uses it to pick its opening scope: a task whose
+/// worktree is clean has nothing to show under "working", and its reviewer
+/// wants the branch diff. Untracked files count, because a file the agent
+/// just created is exactly the uncommitted work the working scope exists for.
+#[tauri::command]
+pub fn git_worktree_is_dirty(repo_path: String) -> Result<bool, String> {
+    let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
+    let mut options = git2::StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+    let statuses = repo
+        .statuses(Some(&mut options))
+        .map_err(|e| e.to_string())?;
+    Ok(!statuses.is_empty())
+}
+
 #[tauri::command]
 pub fn git_diff_range(repo_path: String, from: String, to: String) -> Result<String, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
@@ -140,7 +159,7 @@ pub fn git_merge_base(repo_path: String, ref_a: String, ref_b: String) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::git_diff_branch_range;
+    use super::{git_diff_branch_range, git_worktree_is_dirty};
     use crate::commands::git::test_support::{create_commit, TempRepo};
     use git2::{Repository, Signature};
     use std::{fs, path::Path};
@@ -215,6 +234,52 @@ mod tests {
         .expect("untracked fixture file should be written");
 
         (temp_repo, base_commit)
+    }
+
+    #[test]
+    fn git_worktree_is_dirty_reports_a_committed_worktree_as_clean() {
+        let temp_repo = TempRepo::new("worktree-clean");
+        let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
+        create_commit(&repo, &temp_repo.path);
+        // `create_commit` builds its tree without persisting the index, which
+        // a real checkout always has. Write it so the fixture matches HEAD;
+        // otherwise the seed file reads as staged for deletion.
+        let mut index = repo.index().expect("index should open");
+        index
+            .add_path(Path::new("README.md"))
+            .expect("seed file should be indexed");
+        index.write().expect("index should be written");
+
+        assert!(
+            !git_worktree_is_dirty(temp_repo.path.to_string_lossy().to_string()).unwrap(),
+            "a worktree with nothing uncommitted is clean"
+        );
+    }
+
+    #[test]
+    fn git_worktree_is_dirty_counts_staged_unstaged_and_untracked_changes() {
+        let (temp_repo, _base) = create_branch_diff_fixture("worktree-dirty");
+
+        assert!(
+            git_worktree_is_dirty(temp_repo.path.to_string_lossy().to_string()).unwrap(),
+            "staged, unstaged, and untracked changes all make a worktree dirty"
+        );
+    }
+
+    #[test]
+    fn git_worktree_is_dirty_counts_an_untracked_file_on_its_own() {
+        let temp_repo = TempRepo::new("worktree-untracked-only");
+        let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
+        create_commit(&repo, &temp_repo.path);
+        fs::write(temp_repo.path.join("new-file.txt"), "created by an agent\n")
+            .expect("untracked fixture file should be written");
+
+        // A file the agent just created is exactly the uncommitted work the
+        // working scope exists to show, so it must not read as clean.
+        assert!(
+            git_worktree_is_dirty(temp_repo.path.to_string_lossy().to_string()).unwrap(),
+            "an untracked file alone makes a worktree dirty"
+        );
     }
 
     #[test]

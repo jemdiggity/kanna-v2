@@ -346,6 +346,12 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         base_ref: Option<String>,
 
+        /// Ref the task's diffs compare against, when it differs from the
+        /// fork point (a PR review child forks from the PR head and diffs
+        /// against the PR base)
+        #[arg(long)]
+        diff_base_ref: Option<String>,
+
         /// Agent definition name to run the task's first stage with,
         /// overriding the workflow stage's own agent binding
         #[arg(long)]

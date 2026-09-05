@@ -122,6 +122,7 @@ const contextLabel = computed(() =>
 
 let nextDiffLoadId = 0;
 let activeDiffLoadId = 0;
+let openViewGeneration = 0;
 let scrollRestorePendingLoadId = 0;
 let activeDiffScrollAnchor: ActiveDiffScrollAnchor | null = null;
 let applySearchHighlightsFromSearch = () => {};
@@ -333,6 +334,59 @@ function syncViewStateFromProps() {
   branchInclude.value = normalizeBranchInclude(props.initialBranchInclude);
 }
 
+/**
+ * The scope a view opens in when it has no remembered one. A remembered scope
+ * always wins — this only decides the very first open, because loadDiff emits
+ * `scope-change` and the modal remembers it from then on.
+ *
+ * A clean worktree has nothing to show under "working", and a task whose work
+ * is committed is one somebody is about to read rather than write: a review
+ * child forked from a PR head is clean by construction, and opening it on an
+ * empty working diff hides the whole change. A dirty worktree keeps today's
+ * behavior, which is the case the working scope exists for.
+ *
+ * Remote task views keep "working": the worktree is on another machine and
+ * this probe cannot reach it.
+ */
+function rememberedScope(): DiffScope | null {
+  if (props.initialScope === "branch" || props.initialScope === "working") {
+    return props.initialScope;
+  }
+  return null;
+}
+
+async function resolveOpeningScope(): Promise<DiffScope> {
+  if (props.remoteDiffLoader) return "working";
+  try {
+    const dirty = await invoke<boolean>("git_worktree_is_dirty", {
+      repoPath: props.worktreePath || props.repoPath,
+    });
+    return dirty ? "working" : "branch";
+  } catch (error: unknown) {
+    console.debug("[DiffView] worktree status unavailable, opening working scope:", error);
+    return "working";
+  }
+}
+
+/**
+ * Open a view: resolve its scope, then load. A remembered scope loads without
+ * an intervening await, so only a first open pays for the probe. The
+ * generation guard drops a resolution whose view was replaced mid-probe.
+ */
+function openView(): Promise<void> {
+  const generation = ++openViewGeneration;
+  const remembered = rememberedScope();
+  if (remembered) {
+    scope.value = remembered;
+    return loadDiff({ preserveCurrentScroll: false });
+  }
+  return resolveOpeningScope().then((openingScope) => {
+    if (generation !== openViewGeneration) return;
+    scope.value = openingScope;
+    return loadDiff({ preserveCurrentScroll: false });
+  });
+}
+
 async function loadDiff(options: LoadDiffOptions = {}) {
   const scrollAnchor = options.scrollAnchor === undefined
     && options.preserveCurrentScroll !== false
@@ -493,8 +547,10 @@ watch(
     const viewChanged = previousValue !== undefined && nextValue[0] !== previousValue[0];
     if (viewChanged) {
       syncViewStateFromProps();
+      void openView();
+      return;
     }
-    void loadDiff({ preserveCurrentScroll: !viewChanged });
+    void loadDiff({ preserveCurrentScroll: true });
   },
   { immediate: false }
 );
@@ -623,12 +679,13 @@ useLessScroll(containerRef, {
 onMounted(() => {
   syncContainerRef();
   syncViewStateFromProps();
-  void loadDiff({ preserveCurrentScroll: false });
+  void openView();
   window.addEventListener("focus", refreshBranchDiffOnWindowFocus);
   nextTick(() => diffViewRef.value?.focus());
 });
 
 onUnmounted(() => {
+  openViewGeneration += 1;
   activeDiffLoadId = 0;
   scrollRestorePendingLoadId = 0;
   activeDiffScrollAnchor = null;

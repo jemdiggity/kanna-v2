@@ -778,6 +778,7 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         json!([
             "broken",
             "no-review",
+            "pr-review",
             "qa",
             "release.v2",
             "remote-qa",
@@ -949,7 +950,12 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     // `architect-consultation` for a bounded advisory child.
     assert_eq!(
         manifest["workflows"],
-        json!(["no-review", "single-reviewer", "specialized-reviewers"])
+        json!([
+            "no-review",
+            "pr-review",
+            "single-reviewer",
+            "specialized-reviewers"
+        ])
     );
 
     let (status, workflow) = json_response(

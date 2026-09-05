@@ -1,0 +1,15 @@
+{
+  "$schema": "./schema.json",
+  "name": "pr-review-single",
+  "description": "Single-stage workflow for one dispatched pull-request review child; the triage agent forks its worktree from the PR head",
+  "visibility": "internal",
+  "stages": [
+    {
+      "name": "review",
+      "description": "PR reviewer briefs the human on one pull request, then parks in the same session to answer their questions while they read the diff",
+      "agent": "pr-reviewer",
+      "prompt": "$TASK_PROMPT",
+      "policy": { "transition": "manual" }
+    }
+  ]
+}

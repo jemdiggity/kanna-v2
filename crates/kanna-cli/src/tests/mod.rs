@@ -232,6 +232,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("display_name", "display_name"),
                     ("workflow_name", "workflow_name"),
                     ("base_ref", "base_ref"),
+                    ("diff_base_ref", "diff_base_ref"),
                     ("agent", "agent"),
                     ("agent_provider", "agent_provider"),
                     ("agent_type", "agent_type"),

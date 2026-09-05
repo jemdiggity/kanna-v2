@@ -1,0 +1,14 @@
+{
+  "$schema": "./schema.json",
+  "name": "pr-review",
+  "description": "Review open pull requests in Kanna: a triage agent orders them and dispatches one child review task per PR",
+  "stages": [
+    {
+      "name": "triage",
+      "description": "Triage agent resolves the open PRs in scope, proposes a review order with reasons, and dispatches a child review task per PR the operator accepts, then stays available",
+      "agent": "pr-triage",
+      "prompt": "$TASK_PROMPT",
+      "policy": { "transition": "manual" }
+    }
+  ]
+}

@@ -1,6 +1,9 @@
 # Dispatched PR Review
 
-Status: **proposed — design assessment, awaiting owner decision. Nothing here is implemented.**
+Status: **phase 1 implemented; phases 2-4 proposed.** The definitions, the
+fork-point/diff-base split, and the diff view's opening scope are in the tree;
+the ordering heuristics, brief quality, and the change map are not yet
+exercised against real PRs.
 Related: [qa-dispatch-review.md](./qa-dispatch-review.md) (the pattern this follows),
 [task-graph-stages.md](./task-graph-stages.md), [merge-master.md](./merge-master.md),
 [native-review.md](./native-review.md) (the shipped in-task review loop, untouched here),
@@ -302,22 +305,27 @@ desktop fix below is hardening rather than a prerequisite.
 
 ## Engine changes required
 
-Two, both small. Everything else in this design is `.kanna/` files.
+Two, both small — **both implemented**. Everything else in this design is
+`.kanna/` files.
 
-**A. Expose the fork-point / diff-base split.** Add optional `diff_base_ref` to
-`POST /v1/tasks` and to `kanna_create_task`, plumbed to the existing
-`stored_base_ref`. Absent, behavior is identical to today (it already defaults
-to `base_ref`). This is a rename of an internal field into the public surface,
-not new machinery.
+**A. Expose the fork-point / diff-base split.** *(implemented)* Optional
+`diff_base_ref` on `POST /v1/tasks`, `kanna_create_task`, and
+`kanna-cli task create --diff-base-ref`, plumbed to the existing
+`stored_base_ref`. Absent, behavior is identical to before — it already
+defaulted to `base_ref`. This named an internal field on the public surface
+rather than adding machinery.
 
-**B. First open shows the branch diff.** `DiffView.vue` defaults its scope to
-`working` unless told otherwise, so ⌘D on a review child — whose worktree is
-clean — opens on an empty view. Rule: **default to `branch` scope when the
-task's worktree has no uncommitted changes, `working` when it does.** This
-delivers the owner's ask without the diff tool needing to know what a review
-task is, and it leaves implement tasks (which are dirty exactly when the
-default matters) behaving as they do today. Remembered per-task scope still
-wins on reopen.
+**B. First open shows the branch diff.** *(implemented)* `DiffView.vue`
+defaulted its scope to `working` unless told otherwise, so ⌘D on a review
+child — whose worktree is clean — opened on an empty view. The rule is now:
+**open in `branch` scope when the task's worktree has no uncommitted changes,
+`working` when it does**, decided by a new `git_worktree_is_dirty` command
+(git2 statuses, untracked included). This delivers the owner's ask without the
+diff tool needing to know what a review task is, and leaves implement tasks —
+dirty exactly when the default matters — behaving as before. A remembered
+per-task scope still wins, and skips the probe entirely. A remote task view
+keeps `working`: its worktree is on another machine and this probe cannot
+reach it.
 
 Hardening, not a prerequisite:
 
@@ -353,29 +361,40 @@ The rest stays out — see "Still deferred".
 
 ## Phasing
 
-**Phase 1 — the loop, dispatched by hand.** Engine changes A and B; the two
-workflow JSONs and the two AGENT.md files. Reviewed by using it: create a
-`pr-review` task, let it triage the repo's own open PRs, dispatch two children,
-review them in ⌘D.
+**Phase 1 — the loop, dispatched by hand.** *(implemented)* Engine changes A
+and B; the two workflow JSONs and the two AGENT.md files. Judged by using it:
+create a `pr-review` task, let it triage the repo's own open PRs, dispatch two
+children, review them in ⌘D.
 
-Acceptance criteria:
+Acceptance criteria (met except where noted):
 
 - `kanna_create_task` with `base_ref: "pr/42"` and `diff_base_ref: "origin/main"`
   produces a worktree at the PR head whose `pipeline_item.base_ref` is
   `origin/main`; omitting `diff_base_ref` behaves exactly as today (existing
   create tests unchanged).
-- Server test: `$BASE_REF` in the child's stage prompt resolves to the diff
-  base, not the fork point.
-- Desktop E2E: ⌘D on a task with a clean worktree opens in branch scope and
-  renders the fork-point-to-tip diff; ⌘D on a task with uncommitted changes
-  opens in working scope, as today; a remembered per-task scope still wins.
-- Desktop E2E (the whole point): a fixture task forked from a feature branch
-  with `diff_base_ref` set to the default branch renders that branch's changes
-  on first open — the case that is empty today.
+  Covered by `task_creation_records_an_explicit_diff_base_separately_from_the_fork_point`
+  and `task_creation_defaults_the_diff_base_to_the_fork_point`, which assert
+  against a real git fixture that the worktree carries the head's content while
+  the persisted base is the PR base.
+- Desktop: ⌘D on a task with a clean worktree opens in branch scope and asks
+  for the branch range; on a dirty worktree it opens in working scope; a
+  remembered scope wins without probing; an unreadable status and a remote task
+  view both fall back to working. Covered by the `DiffView opening scope`
+  component tests, and by `git_worktree_is_dirty` unit tests for the clean,
+  mixed, and untracked-only cases.
+- **Not yet covered: the desktop E2E** that drives ⌘D against a real task whose
+  worktree is forked from a feature branch with `diff_base_ref` set — the
+  end-to-end case this design exists for. The component tests pin the decision
+  and the git tests pin the probe, but nothing yet proves the wiring through a
+  running app. See the E2E note below.
 - Definition tests, per the existing pattern: both workflows resolve,
   `pr-review-single` is excluded from the listed lineup while still resolving by
-  name, both agents' prompts render, and every tool they reference exists in
-  `crates/kanna-tool-catalog`.
+  name, and both agents' prompts render. Covered by
+  `builtin_pr_review_workflows_bind_the_triage_and_reviewer_agents` and the
+  existing internal-visibility test.
+- Every `kanna_*` tool an agent body names exists in the tool catalog. This had
+  no test before; it does now, over every built-in agent and repo extension,
+  not just the new pair.
 - Definition test for the extension path: with
   `.kanna/agents/pr-triage/EXTEND.md` present, the resolved agent's
   prompt contains the repo's scope answer; with it absent, the resolved prompt

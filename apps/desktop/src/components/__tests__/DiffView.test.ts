@@ -249,6 +249,104 @@ function setupAnchoredDiffGeometry(documentTops: number[]) {
   };
 }
 
+describe("DiffView opening scope", () => {
+  afterEach(() => {
+    invokeMock.mockReset();
+    diffMocks.parsePatchFilesMock.mockReset();
+    if (diffMocks.actualParsePatchFiles) {
+      diffMocks.parsePatchFilesMock.mockImplementation(diffMocks.actualParsePatchFiles);
+    }
+    renderMock.mockReset();
+    clearContextShortcuts("diff");
+    resetContext();
+    document.body.innerHTML = "";
+  });
+
+  function mockGit(dirty: boolean | Error) {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_worktree_is_dirty") {
+        if (dirty instanceof Error) throw dirty;
+        return dirty;
+      }
+      if (command === "git_merge_base") return "merge-base-sha";
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_default_branch") return "main";
+      if (command === "git_graph") return { commits: [], head_commit: "head-sha" };
+      return "";
+    });
+  }
+
+  async function mountAndSettle(props: Record<string, unknown>) {
+    const wrapper = mount(DiffView, {
+      props: { repoPath: "/repo", ...props },
+      attachTo: document.body,
+      global: { mocks: { $t: (key: string) => key } },
+    });
+    // Opening on the branch diff resolves upstream, default branch, and the
+    // merge base before the diff call, so settle generously.
+    for (let tick = 0; tick < 6; tick += 1) await flushPromises();
+    return wrapper;
+  }
+
+  it("opens a clean worktree on the branch diff", async () => {
+    mockGit(false);
+    const wrapper = await mountAndSettle({ worktreePath: "/worktree" });
+
+    expect(invokeMock).toHaveBeenCalledWith("git_worktree_is_dirty", { repoPath: "/worktree" });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "git_diff_branch_range",
+      expect.objectContaining({ repoPath: "/worktree" }),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("git_diff", expect.anything());
+    wrapper.unmount();
+  });
+
+  it("opens a dirty worktree on the working diff", async () => {
+    mockGit(true);
+    const wrapper = await mountAndSettle({ worktreePath: "/worktree" });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "git_diff",
+      expect.objectContaining({ repoPath: "/worktree" }),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("git_diff_branch_range", expect.anything());
+    wrapper.unmount();
+  });
+
+  it("keeps a remembered scope without probing the worktree", async () => {
+    mockGit(false);
+    const wrapper = await mountAndSettle({ worktreePath: "/worktree", initialScope: "working" });
+
+    expect(invokeMock).not.toHaveBeenCalledWith("git_worktree_is_dirty", expect.anything());
+    expect(invokeMock).toHaveBeenCalledWith(
+      "git_diff",
+      expect.objectContaining({ repoPath: "/worktree" }),
+    );
+    wrapper.unmount();
+  });
+
+  it("falls back to the working diff when the worktree status is unreadable", async () => {
+    mockGit(new Error("not a repository"));
+    const wrapper = await mountAndSettle({ worktreePath: "/worktree" });
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "git_diff",
+      expect.objectContaining({ repoPath: "/worktree" }),
+    );
+    wrapper.unmount();
+  });
+
+  it("keeps the working diff for a remote task view, whose worktree it cannot probe", async () => {
+    mockGit(false);
+    const remoteDiffLoader = vi.fn(async () => ({ patch: "", truncated: false, baseRef: "main" }));
+    const wrapper = await mountAndSettle({ remoteDiffLoader });
+
+    expect(invokeMock).not.toHaveBeenCalledWith("git_worktree_is_dirty", expect.anything());
+    expect(remoteDiffLoader).toHaveBeenCalledWith({ scope: "working", mode: "all" });
+    wrapper.unmount();
+  });
+});
+
 describe("DiffView", () => {
   afterEach(() => {
     invokeMock.mockReset();
@@ -789,6 +887,7 @@ describe("DiffView", () => {
       wrapper = mount(DiffView, {
         props: {
           repoPath: "/repo",
+          initialScope: "working",
         },
         attachTo: document.body,
         global: {
@@ -1018,6 +1117,7 @@ describe("DiffView", () => {
       wrapper = mount(DiffView, {
         props: {
           repoPath: "/repo",
+          initialScope: "working",
         },
         attachTo: document.body,
         global: {

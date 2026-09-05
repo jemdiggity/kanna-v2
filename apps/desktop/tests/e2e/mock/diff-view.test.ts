@@ -1243,6 +1243,79 @@ describe("diff view", () => {
     }
   });
 
+  it("opens a clean review worktree on the branch diff of its recorded base", async () => {
+    // The dispatched-PR-review shape, end to end: a task whose worktree is
+    // forked from the tip of the work being reviewed and whose recorded base
+    // is what that work branched from. Its worktree is clean, so the diff must
+    // open on the branch range — opening on the working scope would show the
+    // reviewer nothing at all, which is the case this behavior exists for.
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-review-child-committed.txt <<'EOF'",
+        "review child committed marker",
+        "EOF",
+        "git add e2e-review-child-committed.txt",
+        "git commit -m 'e2e review child committed content'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    try {
+      // No remembered scope: this is a first open.
+      await resetSelectedDiffViewState(client);
+      await openDiffModal(client);
+
+      const openingScope = await client.executeSync<string>(
+        `const button = Array.from(document.querySelectorAll(".scope-selector button"))
+           .find((element) => element.classList.contains("active"));
+         return (button?.textContent || "").trim();`
+      );
+      expect(openingScope).toBe("Branch");
+
+      const branchText = await waitForDiffText(
+        client,
+        `return text.includes("review child committed marker");`,
+      );
+      expect(branchText).toContain("review child committed marker");
+
+      // An uncommitted change makes the worktree dirty, and a first open then
+      // lands on the working scope, as it always has.
+      await tauriInvoke(client, "run_script", {
+        script: [
+          "cat > e2e-review-child-dirty.txt <<'EOF'",
+          "review child dirty marker",
+          "EOF",
+        ].join("\n"),
+        cwd: worktreePath,
+        env: {},
+      });
+      await resetSelectedDiffViewState(client);
+      await openDiffModal(client);
+
+      const dirtyOpeningScope = await client.executeSync<string>(
+        `const button = Array.from(document.querySelectorAll(".scope-selector button"))
+           .find((element) => element.classList.contains("active"));
+         return (button?.textContent || "").trim();`
+      );
+      expect(dirtyOpeningScope).toBe("Working");
+    } finally {
+      await closeDiffModalIfOpen(client);
+      await resetSelectedDiffViewState(client);
+      await tauriInvoke(client, "run_script", {
+        script: [
+          "git reset --hard HEAD",
+          "if [ \"$(git log -1 --pretty=%s)\" = 'e2e review child committed content' ]; then git reset --hard HEAD~1; fi",
+          "git clean -fd -- e2e-review-child-committed.txt e2e-review-child-dirty.txt",
+        ].join("\n"),
+        cwd: worktreePath,
+        env: {},
+      });
+    }
+  });
+
   it("keeps the Branch diff on the task's own base after the PR stage renames and pushes the branch", async () => {
     const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
     const taskBranch = await getSelectedTaskBranch();

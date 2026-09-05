@@ -722,6 +722,9 @@ async fn build_create_request(
         workflow_name: Some(payload.task.workflow.clone()),
         stage: Some(payload.task.stage.clone()),
         base_ref: payload::resolve_incoming_base_branch(payload),
+        // An imported task keeps the base it was transferred with; nothing in
+        // the transfer payload distinguishes a fork point from a diff base.
+        diff_base_ref: None,
         agent: None,
         agent_provider: Some(payload.task.agent_provider.clone()),
         agent_type: Some(

@@ -76,6 +76,37 @@ describe("built-in agent completion protocol", () => {
   });
 });
 
+describe("built-in agent tool references", () => {
+  /**
+   * Agent bodies name MCP tools as literal `kanna_*` calls, and a name that
+   * does not exist in the catalog is a call the agent can never make — a
+   * failure a human only sees when the agent tries it mid-task.
+   */
+  it("only names tools the tool catalog serves", () => {
+    const catalog = readRepoFile("crates/kanna-tool-catalog/src/catalog.json");
+    const served = new Set(
+      Array.from(catalog.matchAll(/"name":\s*"(kanna_[a-z_]+)"/g), (match) => match[1])
+    );
+    expect(served.size).toBeGreaterThan(0);
+
+    const documents = [
+      ...builtInAgentNames().map((name) => `.kanna/agents/${name}/AGENT.md`),
+      ...readdirSync(resolve(repoRoot, ".kanna/agents"), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => `.kanna/agents/${entry.name}/EXTEND.md`)
+        .filter((path) => existsSync(resolve(repoRoot, path))),
+    ];
+
+    for (const path of documents) {
+      const referenced = new Set(
+        Array.from(readRepoFile(path).matchAll(/\bkanna_[a-z_]+/g), (match) => match[0])
+      );
+      const unknown = [...referenced].filter((name) => !served.has(name)).sort();
+      expect(unknown, path).toEqual([]);
+    }
+  });
+});
+
 describe("QA workflow assets", () => {
   it("keeps process termination guidance in repository conventions", () => {
     const builtInAgents = builtInAgentNames();

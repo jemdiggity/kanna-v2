@@ -1185,6 +1185,14 @@ const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../../.kanna/agents/pr/flavors/push-only/AGENT.md"),
     ),
     (
+        ".kanna/agents/pr-reviewer/AGENT.md",
+        include_str!("../../../../.kanna/agents/pr-reviewer/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/pr-triage/AGENT.md",
+        include_str!("../../../../.kanna/agents/pr-triage/AGENT.md"),
+    ),
+    (
         ".kanna/agents/qa-dispatcher/AGENT.md",
         include_str!("../../../../.kanna/agents/qa-dispatcher/AGENT.md"),
     ),
@@ -1285,6 +1293,14 @@ const BUILTIN_WORKFLOWS: &[(&str, &str)] = &[
     (
         "no-review",
         include_str!("../../../../.kanna/workflows/no-review.json"),
+    ),
+    (
+        "pr-review",
+        include_str!("../../../../.kanna/workflows/pr-review.json"),
+    ),
+    (
+        "pr-review-single",
+        include_str!("../../../../.kanna/workflows/pr-review-single.json"),
     ),
     (
         "single-reviewer",

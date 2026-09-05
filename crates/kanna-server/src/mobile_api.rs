@@ -450,6 +450,14 @@ pub struct CreateTaskRequest {
     pub workflow_name: Option<String>,
     pub stage: Option<String>,
     pub base_ref: Option<String>,
+    /// The ref the task's diffs compare against, when it is not the ref the
+    /// worktree forked from. `base_ref` is the fork *start point*; this is
+    /// what is persisted as `pipeline_item.base_ref` and what `$BASE_REF`
+    /// resolves to. They differ whenever a task is forked from the tip of the
+    /// work it reviews — a PR review child forks from the PR head and diffs
+    /// against the PR base. Absent, the fork point is used for both, which is
+    /// every ordinary task.
+    pub diff_base_ref: Option<String>,
     pub agent: Option<String>,
     pub agent_provider: Option<String>,
     pub agent_type: Option<String>,
@@ -1619,6 +1627,7 @@ mod tests {
                 "workflowName": null,
                 "stage": null,
                 "baseRef": null,
+                "diffBaseRef": null,
                 "agent": null,
                 "agentProvider": "claude",
                 "agentType": "agent",

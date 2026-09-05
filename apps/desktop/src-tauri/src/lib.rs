@@ -299,6 +299,7 @@ pub fn run() {
             commands::git::diff::git_diff,
             commands::git::diff::git_diff_branch_range,
             commands::git::diff::git_diff_range,
+            commands::git::diff::git_worktree_is_dirty,
             commands::git::diff::git_merge_base,
             commands::git::worktree::git_worktree_list,
             commands::git::log::git_log,
