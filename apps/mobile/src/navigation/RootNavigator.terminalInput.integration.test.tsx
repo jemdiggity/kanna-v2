@@ -33,6 +33,8 @@ import {
 
 const TASK_ID = "task-1";
 const SCROLL_INPUT_B64 = "G1s8NjU7MTM7MTJN";
+const ESC_INPUT_B64 = "Gw==";
+const ENTER_INPUT_B64 = "DQ==";
 
 vi.mock("@expo/vector-icons", () => ({
   Ionicons: "Ionicons"
@@ -136,7 +138,25 @@ vi.mock("../components/FloatingToolbar", () => ({
 vi.mock("../screens/MachinesScreen", () => ({ MachinesScreen: "MachinesScreen" }));
 vi.mock("../screens/MoreScreen", () => ({ MoreScreen: "MoreScreen" }));
 vi.mock("../screens/SearchScreen", () => ({ SearchScreen: "SearchScreen" }));
-vi.mock("../screens/TaskScreen", () => ({ TaskScreen: "TaskScreen" }));
+vi.mock("../screens/TaskScreen", async () => {
+  const ReactModule = await import("react");
+  return {
+    TaskScreen: (props: {
+      onSendTerminalInput?(dataB64: string, kind: "draft" | "submission" | "control"): void;
+    }) => ReactModule.createElement(
+      "TaskScreen",
+      props,
+      ReactModule.createElement("Pressable", {
+        testID: "mobile.task-terminal-key.escape",
+        onPress: () => props.onSendTerminalInput?.(ESC_INPUT_B64, "draft")
+      }),
+      ReactModule.createElement("Pressable", {
+        testID: "mobile.task-terminal-key.enter",
+        onPress: () => props.onSendTerminalInput?.(ENTER_INPUT_B64, "submission")
+      })
+    )
+  };
+});
 vi.mock("../screens/TasksScreen", () => ({ TasksScreen: "TasksScreen" }));
 vi.mock("../screens/taskActionMenu", () => ({ showTaskActionMenu: vi.fn() }));
 
@@ -296,7 +316,17 @@ describe("RootNavigator terminal scroll input integration", () => {
   it("routes a task-detail scroll control through the controller and LAN KSP as term_input_control", async () => {
     const harness = createSocketHarness();
     const client = createKannaClient(
-      createLanTransport("http://127.0.0.1:48120", createLanFetchFixture(), harness.factory)
+      createLanTransport(
+        "http://127.0.0.1:48120",
+        createLanFetchFixture(),
+        harness.factory,
+        {
+          deviceCredentials: {
+            deviceId: "mobile-device-1",
+            deviceSecret: "paired-secret"
+          }
+        }
+      )
     );
     const store = createSessionStore();
     controller = createMobileController(client, store);
@@ -332,13 +362,14 @@ describe("RootNavigator terminal scroll input integration", () => {
 
     const taskScreen = rendered?.root.findByType("TaskScreen" as never);
     if (!taskScreen) throw new Error("TaskScreen was not rendered");
+    expect(taskScreen.props.terminalInputUnavailableReason).toBeNull();
     const onSendTerminalInput = taskScreen.props.onSendTerminalInput as
-      | ((dataB64: string) => void)
+      | ((dataB64: string, kind: "draft" | "submission" | "control") => void)
       | undefined;
     expect(onSendTerminalInput).toBeTypeOf("function");
 
     await act(async () => {
-      onSendTerminalInput?.(SCROLL_INPUT_B64);
+      onSendTerminalInput?.(SCROLL_INPUT_B64, "control");
       await flushMicrotasks();
     });
 
@@ -356,9 +387,31 @@ describe("RootNavigator terminal scroll input integration", () => {
       terminalSocket.sentFrames.filter((frame) => frame.type === "term_input_control").length;
     const beforeEmptyPayload = termInputCount();
     await act(async () => {
-      onSendTerminalInput?.("");
+      onSendTerminalInput?.("", "control");
       await flushMicrotasks();
     });
     expect(termInputCount()).toBe(beforeEmptyPayload);
+
+    const escapeKey = rendered?.root.findByProps({
+      testID: "mobile.task-terminal-key.escape"
+    });
+    const enterKey = rendered?.root.findByProps({
+      testID: "mobile.task-terminal-key.enter"
+    });
+    await act(async () => {
+      escapeKey?.props.onPress();
+      enterKey?.props.onPress();
+      await flushMicrotasks();
+    });
+    expect(terminalSocket.sentFrames).toContainEqual({
+      type: "term_input",
+      task_id: TASK_ID,
+      data_b64: ESC_INPUT_B64
+    });
+    expect(terminalSocket.sentFrames).toContainEqual({
+      type: "term_input_boundary",
+      task_id: TASK_ID,
+      data_b64: ENTER_INPUT_B64
+    });
   });
 });

@@ -438,6 +438,11 @@ export function createRelayDesktopClient({
     },
     observeTaskTerminal({ desktopId, taskId }, listener) {
       const client = streamClientForDesktop(desktopId);
+      listener({
+        type: "input_availability",
+        taskId,
+        unavailableReason: "connecting"
+      });
       client.attachTerminal(taskId, {
         onSnapshot(cols, rows, dataB64, _agentProvider, window) {
           listener({
@@ -464,6 +469,18 @@ export function createRelayDesktopClient({
         },
         onSessionExit(code) {
           listener({ type: "exit", taskId, code });
+        },
+        onInputAvailabilityChange(availability) {
+          listener({
+            type: "input_availability",
+            taskId,
+            unavailableReason:
+              availability === "available"
+                ? null
+                : availability === "unsupported"
+                  ? "capability_required"
+                  : "connecting"
+          });
         },
         onError(code, message) {
           listener({ type: "error", taskId, code, message });

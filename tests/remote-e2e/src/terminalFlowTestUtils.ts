@@ -116,6 +116,7 @@ export async function createScriptedTask(
     terminalCols?: number;
     terminalRows?: number;
     tracePartialInput?: boolean;
+    traceTerminalKeys?: boolean;
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
   }
@@ -131,6 +132,7 @@ export async function createScriptedTask(
     snapshotHistory: options.snapshotHistory,
     terminalPasteSemantics: options.terminalPasteSemantics,
     tracePartialInput: options.tracePartialInput,
+    traceTerminalKeys: options.traceTerminalKeys,
   });
 
   const repo = asCreatedRepo(await harness.client.invokeDesktop({

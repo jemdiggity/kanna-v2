@@ -21,7 +21,8 @@ import {
 } from "@kanna/visual-companion";
 import type {
   TaskAgentStreamEvent,
-  TaskCompanionStreamEvent
+  TaskCompanionStreamEvent,
+  TaskTerminalInputUnavailableReason
 } from "../lib/api/client";
 import type {
   TerminalScrollbackChunk,
@@ -202,6 +203,7 @@ export interface SessionState {
   taskTerminalCols: number | null;
   taskTerminalRows: number | null;
   taskTerminalErrorMessage: string | null;
+  taskTerminalInputUnavailableReason: TaskTerminalInputUnavailableReason | null;
   /** What the desktop kept back from the loaded terminal buffer, when it sent
    * a bounded window of it. Null when the whole terminal arrived. */
   taskTerminalScrollback: TaskTerminalScrollback | null;
@@ -429,6 +431,10 @@ export interface SessionStore {
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
   setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
   setTaskTerminalError(taskId: string, message: string): void;
+  setTaskTerminalInputUnavailableReason(
+    taskId: string,
+    reason: TaskTerminalInputUnavailableReason | null
+  ): void;
   beginTaskAgent(taskId: string): void;
   setTaskAgentStatus(taskId: string, status: TaskTerminalStatus): void;
   applyTaskAgentStreamEvent(
@@ -508,6 +514,7 @@ export function createSessionStore(): SessionStore {
     taskTerminalCols: null,
     taskTerminalRows: null,
     taskTerminalErrorMessage: null,
+    taskTerminalInputUnavailableReason: "terminal_detached",
     taskTerminalScrollback: null,
     taskAgentTaskId: null,
     taskAgentStatus: "idle",
@@ -1280,6 +1287,10 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? null : state.taskTerminalRows,
         taskTerminalErrorMessage:
           selectedTaskId === null ? null : state.taskTerminalErrorMessage,
+        taskTerminalInputUnavailableReason:
+          selectedTaskId === null
+            ? "terminal_detached"
+            : state.taskTerminalInputUnavailableReason,
         taskTerminalScrollback:
           selectedTaskId === null ? null : state.taskTerminalScrollback,
         taskAgentTaskId:
@@ -1576,7 +1587,8 @@ export function createSessionStore(): SessionStore {
         taskTerminalOutputStart: initialOutput.length - terminalOutput.length,
         taskTerminalCols: null,
         taskTerminalRows: null,
-        taskTerminalErrorMessage: null
+        taskTerminalErrorMessage: null,
+        taskTerminalInputUnavailableReason: "connecting"
       };
       publishTerminalOutput();
       publish();
@@ -1810,6 +1822,20 @@ export function createSessionStore(): SessionStore {
         taskTerminalErrorMessage
       };
       publishTerminalOutput();
+      publish();
+    },
+    setTaskTerminalInputUnavailableReason(taskId, reason) {
+      if (state.taskTerminalTaskId !== taskId) {
+        return;
+      }
+      const nextReason = reason ?? null;
+      if (state.taskTerminalInputUnavailableReason === nextReason) {
+        return;
+      }
+      state = {
+        ...state,
+        taskTerminalInputUnavailableReason: nextReason
+      };
       publish();
     },
     beginTaskAgent(taskId) {
@@ -2062,6 +2088,7 @@ export function createSessionStore(): SessionStore {
         taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
         taskTerminalOutputStart: 0,
         taskTerminalErrorMessage: null,
+        taskTerminalInputUnavailableReason: "terminal_detached",
         taskAgentTaskId: null,
         taskAgentStatus: "idle",
         taskAgentEvents: [],
@@ -2086,7 +2113,8 @@ export function createSessionStore(): SessionStore {
         taskTerminalOutput: EMPTY_TERMINAL_OUTPUT,
         taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
         taskTerminalOutputStart: 0,
-        taskTerminalErrorMessage: null
+        taskTerminalErrorMessage: null,
+        taskTerminalInputUnavailableReason: "terminal_detached"
       };
       publishTerminalOutput();
       publish();

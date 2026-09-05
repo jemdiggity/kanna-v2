@@ -214,7 +214,16 @@ interface RenderTaskScreenOptions {
   onRecoverTaskCreation?: () => void;
   onBack?: () => boolean;
   agentStatus?: TaskTerminalStatus;
-  onSendTerminalInput?: (dataB64: string) => void;
+  onSendTerminalInput?: (
+    dataB64: string,
+    kind: "draft" | "submission" | "control"
+  ) => void;
+  terminalInputUnavailableReason?:
+    | "connecting"
+    | "authentication_required"
+    | "capability_required"
+    | "terminal_detached"
+    | null;
   onResizeTerminal?: (cols: number, rows: number) => void;
   onResolveTaskFileMentions?: (
     mentions: readonly { path: string; line?: number }[]
@@ -291,6 +300,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onBack = componentMocks.onBack,
     agentStatus = "live",
     onSendTerminalInput,
+    terminalInputUnavailableReason = "terminal_detached",
     onResizeTerminal,
     onResolveTaskFileMentions = vi.fn().mockResolvedValue({
       mentions: []
@@ -353,6 +363,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     terminalOutputEpoch,
     terminalOutputStart,
     terminalStatus,
+    terminalInputUnavailableReason,
     terminalErrorMessage: null,
     taskCreationPhase,
     taskCreationErrorMessage,
@@ -1212,10 +1223,51 @@ describe("TaskScreen", () => {
     const tree = renderTaskScreen({ agentType: "pty", onSendTerminalInput });
     const terminal = findByType(tree, "TerminalWebView");
 
-    expect(terminal?.props?.onTerminalInput).toBe(onSendTerminalInput);
+    expect(terminal?.props?.onTerminalInput).toBeTypeOf("function");
 
     (terminal?.props?.onTerminalInput as (dataB64: string) => void)("G1s8NjU7MTsxTQ==");
-    expect(onSendTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
+    expect(onSendTerminalInput).toHaveBeenCalledWith(
+      "G1s8NjU7MTsxTQ==",
+      "control"
+    );
+  });
+
+  it("sends terminal-strip keys with their exact kind when available", () => {
+    const onSendTerminalInput = vi.fn();
+    const tree = renderTaskScreen({
+      agentType: "pty",
+      onSendTerminalInput,
+      terminalInputUnavailableReason: null
+    });
+
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalKey("escape"));
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalKey("enter"));
+    expect(onSendTerminalInput).toHaveBeenNthCalledWith(1, "Gw==", "draft");
+    expect(onSendTerminalInput).toHaveBeenNthCalledWith(
+      2,
+      "DQ==",
+      "submission"
+    );
+  });
+
+  it("explains disabled PTY keys and omits the strip for SDK tasks", () => {
+    const pty = renderTaskScreen({
+      agentType: "pty",
+      terminalInputUnavailableReason: "authentication_required"
+    });
+    expect(
+      findByTestId(pty, MOBILE_E2E_IDS.taskTerminalKey("escape"))?.props
+        ?.disabled
+    ).toBe(true);
+    expect(
+      JSON.stringify(
+        findByTestId(pty, MOBILE_E2E_IDS.taskTerminalKeyDisabledReason)?.props
+          ?.children
+      )
+    ).toMatch(/pair/i);
+
+    const sdk = renderTaskScreen({ agentType: "agent" });
+    expect(findByTestId(sdk, MOBILE_E2E_IDS.taskTerminalKeyStrip)).toBeNull();
   });
 
   it("uses the mobile viewport geometry instead of a never-rendered PTY snapshot", () => {

@@ -268,6 +268,10 @@ export interface MobileRelayHarness {
   };
   taskOrdering: RelayTaskOrderingFixture;
   terminalEvents: TerminalEventCollector;
+  terminalKeys: {
+    count(key: "ESC" | "ENTER"): number;
+    waitForCount(key: "ESC" | "ENTER", count: number): Promise<void>;
+  };
   publishHybridCloudRefresh(): Promise<void>;
   setLanHttpEnabled(enabled: boolean): Promise<void>;
   stop(): Promise<void>;
@@ -417,6 +421,7 @@ export async function startMobileRelayHarness(
             // observable, rather than inherited from fixture seeding.
             terminalCols: 80,
             terminalRows: 24,
+            traceTerminalKeys: true,
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
         : {}),
@@ -627,6 +632,21 @@ export async function startMobileRelayHarness(
       },
       taskOrdering,
       terminalEvents,
+      terminalKeys: {
+        count(key) {
+          return terminalEvents!.outputText().split(`SCRIPT_KEY:${key}`).length - 1;
+        },
+        async waitForCount(key, count) {
+          const deadline = Date.now() + 10_000;
+          while (Date.now() < deadline) {
+            const observed =
+              terminalEvents!.outputText().split(`SCRIPT_KEY:${key}`).length - 1;
+            if (observed >= count) return;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          throw new Error(`Expected desktop PTY to receive ${key} ${count} times`);
+        }
+      },
       publishHybridCloudRefresh: () =>
         publishHybridCloudRefresh({ harness }),
       setLanHttpEnabled: (enabled) => updateHarnessMobileMachineControls(

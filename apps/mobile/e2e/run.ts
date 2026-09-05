@@ -359,6 +359,7 @@ async function main(): Promise<void> {
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,
         taskOrdering: relayHarness.taskOrdering,
+        terminalKeys: relayHarness.terminalKeys,
         waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity,
         beginMobileTerminalGeometryObservation:
           relayHarness.beginMobileTerminalGeometryObservation,

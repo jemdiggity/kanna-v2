@@ -52,6 +52,10 @@ import type {
 import type { TaskInputSendOutcome } from "../state/mobileController";
 import type { TerminalOutputLike } from "../state/terminalOutputBuffer";
 import type {
+  TaskTerminalInputKind,
+  TaskTerminalInputUnavailableReason,
+} from "../lib/api/client";
+import type {
   CompanionEvent,
   FrameAgentEvent,
   PermissionDecision
@@ -82,6 +86,10 @@ import {
 } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
 import { QuickReplySendControl } from "./QuickReplySendControl";
+import {
+  TASK_TERMINAL_KEYS,
+  taskTerminalInputDisabledReason
+} from "./taskTerminalKeys";
 import {
   buildTaskQuickReply,
   type TaskQuickReply
@@ -128,6 +136,7 @@ interface TaskScreenProps {
    * contract. Absent on desktops built before it, which accept the field and
    * silently drop the photo. */
   desktopSupportsAttachments?: boolean;
+  terminalInputUnavailableReason?: TaskTerminalInputUnavailableReason | null;
   pendingTaskAction?: TaskStageAction | TaskCreationAction | null;
   onBack(): boolean;
   onAdvanceTaskStage(): void;
@@ -148,7 +157,7 @@ interface TaskScreenProps {
   ): Promise<TaskInputSendOutcome> | void;
   /** Injected by the attachment tests; production uses the Expo picker. */
   pickAttachment?(source: ImageAttachmentSource): Promise<PreparedImageAttachment | null>;
-  onSendTerminalInput?(dataB64: string): void;
+  onSendTerminalInput?(dataB64: string, kind: TaskTerminalInputKind): void;
   /** The terminal view scrolled near the top of its loaded buffer. */
   onRequestTerminalScrollback?(): void;
   onResizeTerminal?(cols: number, rows: number): void;
@@ -237,6 +246,7 @@ export function TaskScreen({
   quickReplies,
   quickRepliesHydrated,
   desktopSupportsAttachments = false,
+  terminalInputUnavailableReason = "terminal_detached",
   pendingTaskAction = null,
   onBack,
   onAdvanceTaskStage,
@@ -454,6 +464,9 @@ export function TaskScreen({
     inputDeliveryStatus?.taskId === task.id
       ? inputDeliveryStatus.outcome
       : null;
+  const terminalKeysDisabledReason = taskTerminalInputDisabledReason(
+    terminalInputUnavailableReason
+  );
   const composerSnapshotRef = useRef({
     taskId: task.id,
     draftInput,
@@ -885,6 +898,10 @@ export function TaskScreen({
     isComposerScrollable ||
     (!isComposerExpanded &&
       composerLayoutRef.current.contentHeight > TASK_COMPOSER_MIN_HEIGHT);
+  const sendTerminalControlInput = useCallback(
+    (dataB64: string) => onSendTerminalInput?.(dataB64, "control"),
+    [onSendTerminalInput]
+  );
 
   return (
     <View
@@ -1004,7 +1021,7 @@ export function TaskScreen({
             onConsolePress={Keyboard.dismiss}
             onMentionedFilesChange={handleTerminalMentionedFilesChange}
             onOpenFile={handleTerminalOpenFile}
-            onTerminalInput={onSendTerminalInput}
+            onTerminalInput={sendTerminalControlInput}
             onRequestScrollback={onRequestTerminalScrollback}
           />
         ) : (
@@ -1334,6 +1351,48 @@ export function TaskScreen({
                   ? "being handed to the desktop terminal. Keep this screen open for confirmation."
                 : "queued behind an unsent draft at the desktop terminal. Kanna keeps it and sends it once that draft is submitted or cleared — don't send it again."}
             </Text>
+          </View>
+        ) : null}
+
+        {!isAgentTask ? (
+          <View style={styles.terminalKeyStripGroup}>
+            <ScrollView
+              horizontal
+              contentContainerStyle={styles.terminalKeyStrip}
+              keyboardShouldPersistTaps="always"
+              showsHorizontalScrollIndicator={false}
+              testID={MOBILE_E2E_IDS.taskTerminalKeyStrip}
+            >
+              {TASK_TERMINAL_KEYS.map((key) => (
+                <Pressable
+                  key={key.id}
+                  accessibilityLabel={`${key.label} terminal key`}
+                  accessibilityRole="button"
+                  accessibilityState={{ disabled: terminalKeysDisabledReason !== null }}
+                  disabled={terminalKeysDisabledReason !== null}
+                  onPress={() => onSendTerminalInput?.(key.dataB64, key.kind)}
+                  style={({ pressed }) => [
+                    styles.terminalKey,
+                    terminalKeysDisabledReason ? styles.terminalKeyDisabled : null,
+                    pressed && !terminalKeysDisabledReason
+                      ? styles.terminalKeyPressed
+                      : null
+                  ]}
+                  testID={MOBILE_E2E_IDS.taskTerminalKey(key.id)}
+                >
+                  <Text style={styles.terminalKeyLabel}>{key.label}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            {terminalKeysDisabledReason ? (
+              <Text
+                accessibilityLiveRegion="polite"
+                style={styles.terminalKeyDisabledReason}
+                testID={MOBILE_E2E_IDS.taskTerminalKeyDisabledReason}
+              >
+                {terminalKeysDisabledReason}
+              </Text>
+            ) : null}
           </View>
         ) : null}
 
@@ -1848,6 +1907,44 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 12,
     lineHeight: 17
+  },
+  terminalKeyStripGroup: {
+    gap: 5,
+    marginBottom: 8
+  },
+  terminalKeyStrip: {
+    gap: 6,
+    paddingHorizontal: 1
+  },
+  terminalKey: {
+    alignItems: "center",
+    backgroundColor: "rgba(13, 21, 36, 0.92)",
+    borderColor: "#2A4267",
+    borderRadius: 9,
+    borderWidth: 1,
+    justifyContent: "center",
+    minHeight: 34,
+    minWidth: 42,
+    paddingHorizontal: 10
+  },
+  terminalKeyDisabled: {
+    opacity: 0.42
+  },
+  terminalKeyPressed: {
+    backgroundColor: "rgba(43, 83, 131, 0.94)",
+    transform: [{ scale: 0.96 }]
+  },
+  terminalKeyLabel: {
+    color: "#D5DEEC",
+    fontFamily: "Menlo",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  terminalKeyDisabledReason: {
+    color: "#8EA3C1",
+    fontSize: 11,
+    lineHeight: 15,
+    paddingHorizontal: 3
   },
   inputComposer: {
     alignItems: "flex-end",

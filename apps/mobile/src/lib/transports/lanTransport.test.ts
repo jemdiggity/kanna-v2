@@ -877,6 +877,16 @@ describe("createLanTransport", () => {
     ]);
     expect(events).toEqual([
       {
+        type: "input_availability",
+        taskId: "task-1",
+        unavailableReason: "connecting"
+      },
+      {
+        type: "input_availability",
+        taskId: "task-1",
+        unavailableReason: "capability_required"
+      },
+      {
         type: "snapshot",
         taskId: "task-1",
         cols: 80,

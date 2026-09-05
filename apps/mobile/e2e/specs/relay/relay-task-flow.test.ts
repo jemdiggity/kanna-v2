@@ -35,6 +35,7 @@ describe("relay task flow orchestration", () => {
           verifyQuickReply(): Promise<void>;
           verifyQuickReplyPersistence(): Promise<void>;
           verifyTaskActionMenu(): Promise<void>;
+          verifyTerminalKeys(): Promise<void>;
           verifyVisualCompanion(): Promise<void>;
         }) => Promise<void>;
       }
@@ -65,6 +66,10 @@ describe("relay task flow orchestration", () => {
         expect(screen).toBe("detail");
         calls.push("task-actions");
       },
+      async verifyTerminalKeys() {
+        expect(screen).toBe("detail");
+        calls.push("terminal-keys");
+      },
       async verifyVisualCompanion() {
         expect(screen).toBe("detail");
         calls.push("visual-companion");
@@ -91,6 +96,7 @@ describe("relay task flow orchestration", () => {
       "close",
       "open",
       "rendered",
+      "terminal-keys",
       "quick-reply",
       "transport",
       "task-actions",

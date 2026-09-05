@@ -39,6 +39,14 @@ import type {
   TaskSummary
 } from "./types";
 
+export type TaskTerminalInputKind = "draft" | "submission" | "control";
+
+export type TaskTerminalInputUnavailableReason =
+  | "connecting"
+  | "authentication_required"
+  | "capability_required"
+  | "terminal_detached";
+
 export type TaskTerminalStreamEvent =
   | {
       type: "snapshot";
@@ -60,6 +68,11 @@ export type TaskTerminalStreamEvent =
       chunk: TerminalScrollbackChunk;
     }
   | { type: "exit"; taskId: string; code: number }
+  | {
+      type: "input_availability";
+      taskId: string;
+      unavailableReason: TaskTerminalInputUnavailableReason | null;
+    }
   | { type: "error"; taskId: string; code?: string; message: string };
 
 export interface TaskTerminalSubscription {
