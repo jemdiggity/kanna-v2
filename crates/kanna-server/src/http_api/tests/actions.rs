@@ -6111,6 +6111,7 @@ async fn run_actions_reject_stale_and_ambiguous_ids_without_mutation() {
         for (task_id, run_id) in [
             ("task-post", Some("task-post-main")),
             ("task-ambiguous", None),
+            ("task-ambiguous", Some("run-stale")),
         ] {
             let response = app
                 .clone()
@@ -6135,6 +6136,14 @@ async fn run_actions_reject_stale_and_ambiguous_ids_without_mutation() {
             let message = String::from_utf8_lossy(&bytes);
             assert!(message.contains(&format!("{task_id}-main")), "{message}");
             assert!(message.contains(&format!("{task_id}-post")), "{message}");
+            assert!(!message.contains("Some("), "{message}");
+            assert!(!message.contains("None"), "{message}");
+            if task_id == "task-ambiguous" {
+                assert!(
+                    message.contains(&format!("received {}", run_id.unwrap_or("omitted"))),
+                    "{message}"
+                );
+            }
         }
     }
     let db = Db::open(&db_path).unwrap();
@@ -6442,24 +6451,27 @@ async fn complete_post_and_transition(refinish: bool) {
     // Both an unbound post verdict and an explicitly bound late recovery
     // verdict must finish this post and execute its deferred transition.
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let request_body = serde_json::json!({
+        "runId": if refinish { Some("run-post") } else { None },
+        "completionAttemptKey": "post-completion-attempt",
+        "status": "success",
+        "summary": "cleaned up and committed"
+    });
     let response = app
+        .clone()
         .oneshot(
             Request::post("/v1/tasks/task-1/actions/complete-stage")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "runId": if refinish { Some("run-post") } else { None },
-                        "status": "success",
-                        "summary": "cleaned up and committed"
-                    })
-                    .to_string(),
-                ))
+                .body(Body::from(request_body.to_string()))
                 .unwrap(),
         )
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let original_response = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     daemon_server.await.unwrap();
 
     // The deferred transition executes on a detached task; wait for it.
@@ -6482,6 +6494,57 @@ async fn complete_post_and_transition(refinish: bool) {
         Some("cleaned up and committed")
     );
     assert_eq!(next_stage_run.status, "running");
+
+    // A fresh router and connection prove this is durable, not an adapter or
+    // process-local cache. The successor run must never receive this verdict.
+    let replay_app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let retry = replay_app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(retry.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        original_response
+    );
+    if !refinish {
+        let mut conflicting = request_body.clone();
+        conflicting["status"] = serde_json::json!("failure");
+        let conflict = replay_app
+            .oneshot(
+                Request::post("/v1/tasks/task-1/actions/complete-stage")
+                    .header("content-type", "application/json")
+                    .body(Body::from(conflicting.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let message = axum::body::to_bytes(conflict.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&message).contains("run-post"));
+    }
+    let successor = db.stage_run(&next_stage_run.id).unwrap().unwrap();
+    assert_eq!(successor.kind, "main");
+    assert_eq!(successor.status, "running");
+    assert!(successor.result.is_none());
+    assert_eq!(
+        db.list_stage_runs_for_task("task-1").unwrap().len(),
+        runs.len()
+    );
+    assert_eq!(
+        db.get_pipeline_item("task-1").unwrap().unwrap().stage,
+        task.stage
+    );
 
     if created_sidecar {
         let _ = std::fs::remove_file(&kanna_cli_path);

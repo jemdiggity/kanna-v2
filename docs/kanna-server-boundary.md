@@ -1453,6 +1453,18 @@ behavior. Request-revision uses the same resolution and still requires an
 agent's resolved live run to be a main run; merge handoff is task-scoped and
 has no run-id binding.
 
+MCP and both CLI completion paths always send `completionAttemptKey`, even
+without run context. Context-less attempts are stored durably in
+`contextless_completion_attempt`, keyed by `(task_id, attempt_key)` with the
+original `run_id` and verdict JSON. The binding and run verdict commit in one
+transaction. Lookup precedes running-run resolution: an identical retry returns
+the original acknowledgement without finishing or advancing another run, even
+after a server restart. A key reused with a different verdict returns 409.
+Explicit run-bound attempts retain the lineage rules below. Since adapter keys
+are deterministic verdict bodies, identical context-less prose means the same
+attempt for that task; submitting it for a later run requires explicit run
+context. This adds migration 062, without changing the HTTP/tool schema.
+
 Adapters prefer the run identity in the spawned agent's protected environment
 and its server-owned completion-context file, reread on each call. A successor
 gets a distinct file, so preparing it never publishes an identity to the live

@@ -101,12 +101,11 @@ async fn bind_completion_request(
                 .unwrap_or(&context.run_id)
                 .to_string(),
         );
-        request.completion_attempt_key = Some(attempt_key);
     } else if let Ok(run_id) = env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV) {
         if !run_id.trim().is_empty() {
             request.run_id = Some(run_id);
-            request.completion_attempt_key = Some(attempt_key);
         }
     }
+    request.completion_attempt_key = Some(attempt_key);
     Ok(())
 }

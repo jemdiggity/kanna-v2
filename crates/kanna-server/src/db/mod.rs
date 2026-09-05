@@ -125,6 +125,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "059_repo_sidebar_order",
     "060_repo_default_branch_source",
     "061_stage_run_trigger",
+    "062_contextless_completion_attempt",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1917,6 +1918,18 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "stage_run",
             "trigger",
             "TEXT CHECK (trigger IN ('auto', 'operator', 'manager', 'unspecified'))",
+        )
+    })?;
+
+    run_migration(conn, "062_contextless_completion_attempt", |conn| {
+        conn.execute_batch(
+            "CREATE TABLE contextless_completion_attempt (
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                attempt_key TEXT NOT NULL,
+                run_id TEXT NOT NULL REFERENCES stage_run(id) ON DELETE CASCADE,
+                result TEXT NOT NULL,
+                PRIMARY KEY (task_id, attempt_key)
+            );",
         )
     })?;
 

@@ -679,6 +679,9 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
             body: Some(json!({
                 "status": "success",
                 "summary": "QA passed",
+                "completionAttemptKey": kanna_tool_catalog::completion_attempt_key(&json!({
+                    "status": "success", "summary": "QA passed", "metadata": { "review": "stdio-http" }
+                })).unwrap(),
                 "metadata": { "review": "stdio-http" }
             })),
             response_status: "200 OK",
@@ -750,6 +753,41 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
         tool_text(&responses[3]),
         json!({ "taskId": "task-1", "stage": "pr" })
     );
+}
+
+#[test]
+fn contextless_completion_retry_keeps_attempt_key_without_run_id() {
+    let verdict = json!({"status": "success", "summary": "post committed"});
+    let key = kanna_tool_catalog::completion_attempt_key(&verdict).unwrap();
+    let mut body = verdict;
+    body["completionAttemptKey"] = json!(key);
+    let (base_url, server) = start_http_fixture(
+        (0..2)
+            .map(|_| ExpectedRequest {
+                method: "POST",
+                path: "/v1/tasks/task-1/actions/complete-stage",
+                body: Some(body.clone()),
+                response_status: "200 OK",
+                response_body: json!({"taskId": "task-1"}),
+            })
+            .collect(),
+    );
+    let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "kanna_complete_stage", "arguments": {"task_id": "task-1", "status": "success", "summary": "post committed"}
+    }});
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+            call.clone(),
+            call,
+        ],
+    );
+    let observed = server.join().unwrap();
+    assert_eq!(observed[0].body, observed[1].body);
+    assert!(observed[0].body.as_ref().unwrap().get("runId").is_none());
+    assert_eq!(tool_text(&responses[1]), json!({"taskId": "task-1"}));
+    assert_eq!(tool_text(&responses[2]), json!({"taskId": "task-1"}));
 }
 
 #[test]
