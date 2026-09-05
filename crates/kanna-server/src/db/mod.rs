@@ -161,9 +161,11 @@ pub struct PipelineItem {
     pub runtime_status: Option<String>,
     /// Why the task's agent session refuses messages delivered into it, or
     /// `None` when it accepts them. Today the only value is
-    /// `inherited-draft-unknown`: the daemon adopted the session across a
-    /// restart or handoff and its composer holds text nobody here saw typed,
-    /// so submitting would append to an unsent line.
+    /// `inherited-draft-unknown`: the daemon cannot prove that composer is
+    /// clear, either because it adopted the session across a restart or
+    /// handoff and the composer holds text nobody here saw typed, or because a
+    /// delivered message's text is parked there unsubmitted. Submitting would
+    /// append to an unsent line.
     pub input_blocked: Option<String>,
     /// The text the task's agent session currently renders on its composer
     /// line, or `None` when it draws no readable composer. Never folded into

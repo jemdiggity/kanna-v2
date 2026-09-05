@@ -275,7 +275,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `Ok` | — | Command acknowledged |
-| `Error` | message, code | Command failed. `logical_input_held_by_draft` means the message is queued behind a human's unsent line and was not submitted |
+| `Error` | message, code | Command failed. `logical_input_held_by_draft` means the message is queued behind a human's unsent line and was not submitted; `logical_input_submission_unproven` means its text reached the composer but its Enter was withheld because the terminal never settled |
 | `Output` | session_id, data (byte array) | PTY output |
 | `Exit` | session_id, code | Process exited |
 | `SessionCreated` | session_id | New session ready |
@@ -349,16 +349,11 @@ one-way forms) classify raw bytes as draft, submission, or non-composer control;
 the daemon never infers a boundary from CR/LF bytes.
 
 **`Ok` to `SubmitInput` means submitted, not accepted.** A logical message is
-one delivery in two writes — the message, then its delayed Enter — and the
+one delivery in two writes — the message, then its fenced Enter — and the
 acknowledgement fires only after that Enter reaches the PTY. It travels with
 the message rather than with the call, so a message dispatched immediately, one
 released by a producer's boundary, and one released by composer attestation all
-acknowledge through the same channel. When the application has enabled terminal
-bracketed-paste mode, a message containing CR or LF is framed with those markers
-in its first write, so an interactive TUI consumes every embedded newline as
-part of one editor operation before the delayed Enter. Unadvertised mode and
-single-line messages remain unframed, so unsupported controls never become
-literal text and slash commands keep their provider-native behavior. A message
+acknowledge through the same channel. A message
 the daemon parks behind a declared raw draft has not been submitted, and is
 answered `logical_input_held_by_draft` rather than `Ok`: the message stays
 queued for the boundary, but no caller is told a delivery happened that did
@@ -377,6 +372,51 @@ making unsupported server/daemon pairings fail closed. `ClassifyInput` shares th
 snapshot; a command that loses that race receives `RetryOnSuccessor`, and the
 server repeats negotiation plus the complete classification pass on every
 published daemon generation.
+
+**The daemon's writes are not the CLI's reads.** A PTY master's input queue
+takes about a kilobyte per write — 1022 bytes on macOS — so a longer message
+reaches the CLI as several separate input events however the daemon issues it,
+and an interactive TUI reads the first burst as a paste and the rest as typing.
+Measured on 2026-09-05 against Claude Code 2.1.261: a 1,191-byte single-line
+message was written as 1022 + 169 bytes and only the 169-byte tail was
+submitted. So when the application has enabled terminal bracketed-paste mode, a
+message is framed with those markers in its first write if it contains CR or LF
+**or** is at least 256 bytes long. The markers travel in-band with the bytes and
+are therefore immune to however the queue splits them: everything between them
+is one editor operation, closed before the fenced Enter submits it. A terminal
+that never advertised the mode is left untouched — sending unsupported controls
+would become literal composer text, a worse corruption — and so is a message
+short enough to arrive in one write, which keeps provider slash commands typed
+rather than pasted.
+
+**The Enter waits for the terminal to settle, not for a clock.** Submission is
+never inferred from PTY bytes, and it is not inferred from elapsed time either.
+A CLI repaints while it consumes an input burst, so output still arriving is
+positive evidence that the burst has not been consumed; an Enter written into it
+is taken as part of the burst rather than as a submission, and the message sits
+unsent at the composer while the delivery reports success. That is what happened
+to a 1,227-byte dictated message on 2026-09-05: it drained for about 19 seconds,
+the Enter went out 150 ms in, and nothing ran for six minutes. The daemon
+therefore holds the Enter until no output has been mirrored for
+`LOGICAL_INPUT_SUBMIT_DELAY_MS` — a settle window that restarts on every chunk,
+not a countdown from the write. Output already mirrored is the only
+provider-neutral evidence there is; the rule needs no frame, only whether
+anything was drawn.
+
+**A terminal that never settles leaves the composer unknown.** The wait is
+bounded by `LOGICAL_INPUT_CONSUMPTION_TIMEOUT_MS` (25 s, kept under the server's
+30-second daemon command timeout so the caller hears the verdict). When it
+elapses the Enter is *withheld* rather than written into a repaint that would
+swallow it, and the call is answered `logical_input_submission_unproven`. The
+message text is then parked on that composer: something the daemon put there and
+cannot prove left. So the daemon stops claiming to know what is there —
+attestation drops to **unknown**, exactly the state an inherited composer is in,
+and every later logical message is refused with `inherited_draft_state_unknown`
+instead of being written behind the parked text and submitted as one sentence
+nobody wrote. It is deliberately not `not-typed`, which asserts the composer is
+clear, and deliberately not `typed`, because nobody typed it. It clears through
+the paths that already end an unknown composer: a producer-declared submission
+boundary, or a frame that renders the provider's own empty composer.
 
 Draft state and accepted logical messages are part of transactional-v3 handoff
 state. A sender refuses a legacy-v2 adopter while that state is unknown, a draft
@@ -519,6 +559,7 @@ session said": it is the input line, not output.
 |---------|-------------|---------|
 | `KANNA_DAEMON_DIR` | Data directory (socket, PID, log files) | `~/Library/Application Support/Kanna` |
 | `KANNA_SERVER_EXECUTABLE` | Server executable allowed to clear inherited protected-input policy | unset (fails closed) |
+| `KANNA_DAEMON_TEST_LOGICAL_CONSUMPTION_TIMEOUT_MS` | Debug-build test hook: shortens the bound on waiting for a terminal to settle after a logical message | `LOGICAL_INPUT_CONSUMPTION_TIMEOUT_MS` (25000) |
 | `RUST_LOG` | Log level filter | `info` |
 
 ## Benchmarks

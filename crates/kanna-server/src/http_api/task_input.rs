@@ -218,6 +218,14 @@ async fn send_logical_session_input(
             code: Some(kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft),
             message,
         } => Err(TaskInputError::HeldByRawDraft(message)),
+        // The text is at the composer and its Enter was withheld. That is the
+        // definition of an uncertain delivery: it may still be submitted by
+        // the human who owns that terminal, so it is neither recorded as
+        // delivered nor safe to retry.
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::LogicalInputSubmissionUnproven),
+            message,
+        } => Err(TaskInputError::Uncertain(message)),
         DaemonEvent::Error { message, .. }
             if message.to_ascii_lowercase().contains("session not found") =>
         {

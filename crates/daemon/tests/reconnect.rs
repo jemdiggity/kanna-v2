@@ -162,6 +162,8 @@ enum ErrorCode {
     InputUnauthorized,
     ProtectedInputProtocolRequired,
     LogicalInputHeldByDraft,
+    InheritedDraftStateUnknown,
+    LogicalInputSubmissionUnproven,
     #[serde(other)]
     Other,
 }
@@ -661,6 +663,177 @@ fn submit_input_is_acknowledged_only_after_its_terminating_enter_is_written() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// A child that repaints for a couple of seconds after it is given input,
+/// the way an agent TUI does while it consumes a pasted burst, and reports
+/// whether the terminating Enter reached it during that repaint or after it.
+///
+/// It reads its own tty non-canonically so it can see the message before any
+/// line terminator, and polls for input while a background emitter keeps the
+/// screen busy, which is exactly the state that used to swallow the Enter.
+const SLOW_DRAINING_CHILD: &str = "\
+stty -echo -icanon -icrnl min 1 time 0; \
+dd bs=4096 count=1 >/dev/null 2>&1; \
+printf 'GOT_MESSAGE\\r\\n'; \
+( i=0; while [ $i -lt 120 ]; do printf 'R\\r\\n'; sleep 0.02; i=$((i+1)); done ) & \
+stty min 0 time 0; \
+during=''; \
+i=0; \
+while [ $i -lt 30 ]; do \
+during=\"$during$(dd bs=256 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\"; \
+sleep 0.03; \
+i=$((i+1)); \
+done; \
+case \"$during\" in *0d*) printf 'ENTER_DURING_REPAINT\\r\\n';; *) printf 'ENTER_NOT_SEEN_YET\\r\\n';; esac; \
+wait; \
+printf 'REPAINT_DONE\\r\\n'; \
+stty min 1 time 0; \
+after=$(dd bs=256 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); \
+case \"$after\" in *0d*) printf 'ENTER_AFTER_REPAINT\\r\\n';; *) printf 'NO_ENTER\\r\\n';; esac; \
+sleep 60";
+
+/// A child whose screen never settles, and which echoes what it is given so
+/// the frame shows exactly what reached the terminal.
+const NEVER_SETTLING_CHILD: &str = "\
+stty -icanon min 0 time 0; \
+while :; do printf 'T\\r\\n'; sleep 0.02; done";
+
+/// The fault the owner's 2026-09-05 dictated message hit, at the boundary that
+/// caused it: the Enter used to be written a fixed 150 ms after the message,
+/// which lands inside the burst a CLI is still consuming and is taken as part
+/// of it rather than as a submission. The message then sits unsent at the
+/// composer while the delivery reports success.
+///
+/// The submission boundary now waits for the terminal to stop drawing, which
+/// is the daemon's only provider-neutral evidence that the CLI is finished
+/// with what it was handed.
+#[test]
+fn a_terminating_enter_waits_for_a_repainting_terminal_to_settle() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "slow-draining-consumer";
+    spawn_shell_session(&mut conn, session_id, SLOW_DRAINING_CHILD);
+
+    // The child arms its reader before anything is delivered, so the message
+    // cannot be consumed by the shell's own startup.
+    thread::sleep(Duration::from_millis(700));
+
+    let started = Instant::now();
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"owner reply".to_vec(),
+    });
+    expect_ok(&mut conn);
+    let acknowledged_after = started.elapsed();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let vt = loop {
+        let snapshot = recv_snapshot_for(&mut conn, session_id);
+        if snapshot.vt.contains("ENTER_AFTER_REPAINT") || snapshot.vt.contains("NO_ENTER") {
+            break snapshot.vt;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child never reported what happened to the Enter: {:?}",
+            snapshot.vt
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+
+    assert!(
+        !vt.contains("ENTER_DURING_REPAINT"),
+        "the Enter reached the child while it was still repainting: {vt:?}"
+    );
+    assert!(
+        vt.contains("ENTER_NOT_SEEN_YET") && vt.contains("ENTER_AFTER_REPAINT"),
+        "the Enter did not arrive after the repaint settled: {vt:?}"
+    );
+    assert!(
+        acknowledged_after >= Duration::from_secs(1),
+        "the delivery was acknowledged in {acknowledged_after:?}, before the child could \
+         have stopped repainting"
+    );
+}
+
+/// The other side of the same rule. A terminal that never stops drawing never
+/// proves it took the message, so the Enter is withheld instead of being
+/// written into a repaint that would swallow it.
+///
+/// The text is then parked at that composer, which is a thing the daemon put
+/// there and cannot prove left, so the daemon stops claiming to know what is on
+/// that composer and a second delivery is refused rather than written behind
+/// the first and submitted as one sentence nobody wrote.
+#[test]
+fn an_unconsumable_delivery_is_reported_uncertain_and_cannot_be_concatenated_onto() {
+    let daemon =
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_LOGICAL_CONSUMPTION_TIMEOUT_MS", "800")]);
+    let mut conn = daemon.connect();
+    let session_id = "never-settling-consumer";
+    spawn_shell_session(&mut conn, session_id, NEVER_SETTLING_CHILD);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if recv_snapshot_for(&mut conn, session_id).vt.contains('T') || Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"FIRSTMESSAGE".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error { code, .. } => assert_eq!(
+            code,
+            Some(ErrorCode::LogicalInputSubmissionUnproven),
+            "an unconsumable delivery must be reported, not answered Ok"
+        ),
+        other => panic!("expected an unproven-submission error, got: {other:?}"),
+    }
+
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => {
+            let session = sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .expect("the session is listed");
+            assert_eq!(
+                session["composer_attestation"], "unknown",
+                "the daemon put a line at that composer and cannot prove it left"
+            );
+            assert_eq!(session["logical_input_blocked"], true);
+        }
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"SECONDMESSAGE".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error { code, .. } => assert_eq!(
+            code,
+            Some(ErrorCode::InheritedDraftStateUnknown),
+            "a later message must be refused, not written behind the parked one"
+        ),
+        other => panic!("expected a blocked-input error, got: {other:?}"),
+    }
+
+    // The child echoes what reaches it, so the frame is the record of what was
+    // actually written to that terminal.
+    thread::sleep(Duration::from_millis(500));
+    let vt = recv_snapshot_for(&mut conn, session_id).vt;
+    assert!(
+        vt.contains("FIRSTMESSAGE"),
+        "the first message's text should have reached the terminal: {vt:?}"
+    );
+    assert!(
+        !vt.contains("SECONDMESSAGE"),
+        "the second message was concatenated onto the parked one: {vt:?}"
+    );
 }
 
 fn recv_snapshot_for(conn: &mut ClientConn, session_id: &str) -> SnapshotPayload {

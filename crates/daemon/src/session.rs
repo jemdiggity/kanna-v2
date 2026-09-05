@@ -16,23 +16,64 @@ use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
+/// How long the terminal must stay quiet before a logical message's Enter may
+/// follow it, and how long the writer pauses after an Enter before the next
+/// message may own the composer.
+///
+/// This is a *settle window*, not a countdown from the write. A CLI repaints
+/// while it consumes an input burst, so output that is still arriving is
+/// positive evidence that the burst has not been consumed yet and the window
+/// restarts. It was a fixed fence from the write until 2026-09-05, when a
+/// 1,227-byte dictated message took a Claude session about 19 seconds of
+/// repainting to drain: the Enter landed 150 ms in, was taken as part of the
+/// burst rather than as a submission, and the owner's message sat unsent at the
+/// composer for six minutes.
 pub const LOGICAL_INPUT_SUBMIT_DELAY_MS: u64 = 150;
+/// The bound on waiting for that quiet window.
+///
+/// A terminal that never settles cannot be proven to have consumed anything, so
+/// the Enter is withheld rather than written into a repaint and the delivery is
+/// answered as unproven. Kept well under the server's 30-second daemon command
+/// timeout so the caller hears that verdict instead of losing the round trip.
+pub const LOGICAL_INPUT_CONSUMPTION_TIMEOUT_MS: u64 = 25_000;
 const BRACKETED_PASTE_BEGIN: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
-/// Present a multiline logical message to the terminal as one paste.
+/// A logical message at least this long is framed as a paste even when it
+/// carries no embedded newline.
 ///
-/// A PTY is only a byte stream: without the terminal's bracketed-paste
-/// protocol, embedded line feeds are indistinguishable from independently
-/// typed input to an interactive agent TUI. Long stage-post prompts can then
-/// be consumed in pieces before the synthesized Enter arrives, leaving only a
-/// suffix at the composer. When the application has enabled the mode, the
-/// explicit paste boundary keeps every embedded newline inside one editor
-/// operation and closes that operation before the separately delayed Enter
-/// submits it. Otherwise the bytes stay untouched; sending unsupported control
-/// markers as literal composer text would be a worse corruption.
+/// A PTY master's input queue accepts only about a kilobyte per write — 1022
+/// bytes on macOS — so anything longer reaches the CLI as several separate
+/// input events no matter how the daemon issues it. Measured on 2026-09-05
+/// against Claude Code 2.1.261: a 1,191-byte single-line message was written as
+/// 1022 + 169 bytes, the CLI read the first burst as a paste and the remainder
+/// as typing, and only the 169-byte tail was submitted. The owner's 1,227-byte
+/// dictated message failed the same way in production; their 927-byte re-send
+/// fit one write and arrived.
+///
+/// The threshold sits far below that split boundary and far above any provider
+/// slash command, which is the only thing the unframed path protects.
+const PASTE_FRAMING_MIN_LEN: usize = 256;
+
+/// Present a logical message to the terminal as one paste.
+///
+/// A PTY is only a byte stream, and the daemon's writes are not the CLI's reads:
+/// embedded line feeds are indistinguishable from independently typed input,
+/// and a message too long for one write arrives as several input events even
+/// without them. An interactive agent TUI then consumes the pieces as separate
+/// editor actions and submits only a fragment. When the application has enabled
+/// the mode, the explicit paste markers travel in-band with the bytes and are
+/// therefore immune to however the queue splits them: every byte between them
+/// is one editor operation, closed before the separately fenced Enter submits
+/// it. Otherwise the bytes stay untouched; sending unsupported control markers
+/// as literal composer text would be a worse corruption, and a session whose
+/// terminal never advertised the mode cannot be protected from the split.
 fn frame_logical_message(mut data: Vec<u8>, bracketed_paste_mode: bool) -> Vec<u8> {
-    if !bracketed_paste_mode || !data.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+    if !bracketed_paste_mode {
+        return data;
+    }
+    let has_newline = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
+    if !has_newline && data.len() < PASTE_FRAMING_MIN_LEN {
         return data;
     }
 
@@ -178,11 +219,44 @@ pub struct SessionRuntimeState {
     pub input_policy_classified: bool,
 }
 
+/// How long the writer may wait for evidence that a CLI consumed a logical
+/// message before giving up on proving its submission.
+pub fn logical_input_consumption_timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = std::env::var("KANNA_DAEMON_TEST_LOGICAL_CONSUMPTION_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Duration::from_millis(milliseconds);
+    }
+    Duration::from_millis(LOGICAL_INPUT_CONSUMPTION_TIMEOUT_MS)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingInputKind {
     Raw,
     LogicalMessage,
     LogicalEnter,
+}
+
+/// What actually became of one write the daemon acknowledged.
+///
+/// Acceptance, arrival and submission are three different events, and a caller
+/// that hears only "ok" cannot tell them apart. A logical message is two writes
+/// — its text, then its Enter — and only the second one submits anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// Everything this write was for reached the PTY. For a logical message
+    /// that includes its terminating Enter.
+    Written,
+    /// The message text reached the PTY, but the terminal never settled inside
+    /// the bound, so no Enter was written and the text is parked at the
+    /// composer. The caller must not retry it blindly.
+    SubmissionUnproven,
+    /// Nothing was written. An earlier logical message is parked unsubmitted at
+    /// this composer, and writing here would concatenate onto it.
+    NotWritten,
 }
 
 /// Meaning declared by the terminal input producer. Submission is never
@@ -202,14 +276,14 @@ pub struct PendingInput {
     /// back when their PTY write completes, so attestation can tell a frame
     /// that post-dates the draft from one that merely predates it.
     declared_draft: bool,
-    written: Option<oneshot::Sender<()>>,
+    written: Option<oneshot::Sender<WriteOutcome>>,
     #[cfg_attr(not(test), allow(dead_code))]
-    logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>, bool)>,
+    logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<WriteOutcome>>, bool)>,
     logical_released_from_draft: bool,
 }
 
 impl PendingInput {
-    fn raw(data: Vec<u8>, written: Option<oneshot::Sender<()>>) -> Self {
+    fn raw(data: Vec<u8>, written: Option<oneshot::Sender<WriteOutcome>>) -> Self {
         Self {
             data,
             kind: PendingInputKind::Raw,
@@ -220,7 +294,7 @@ impl PendingInput {
         }
     }
 
-    fn raw_draft(data: Vec<u8>, written: Option<oneshot::Sender<()>>) -> Self {
+    fn raw_draft(data: Vec<u8>, written: Option<oneshot::Sender<WriteOutcome>>) -> Self {
         Self {
             data,
             kind: PendingInputKind::Raw,
@@ -233,8 +307,8 @@ impl PendingInput {
 
     fn raw_submission(
         data: Vec<u8>,
-        written: Option<oneshot::Sender<()>>,
-        logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<()>>, bool)>,
+        written: Option<oneshot::Sender<WriteOutcome>>,
+        logical_after_write: Vec<(Vec<u8>, Option<oneshot::Sender<WriteOutcome>>, bool)>,
     ) -> Self {
         Self {
             data,
@@ -253,7 +327,7 @@ impl PendingInput {
     /// still sitting unsent at the composer.
     pub(crate) fn acknowledged_logical(
         data: Vec<u8>,
-        written: Option<oneshot::Sender<()>>,
+        written: Option<oneshot::Sender<WriteOutcome>>,
         released_from_draft: bool,
         bracketed_paste_mode: bool,
     ) -> Self {
@@ -293,10 +367,17 @@ impl PendingInput {
         self.declared_draft
     }
 
-    pub fn acknowledge_written(mut self) {
+    /// Tell the caller what became of this write. Exactly one outcome is ever
+    /// reported for a given input; dropping the sender instead reports a
+    /// writer that ended mid-delivery.
+    pub fn resolve(mut self, outcome: WriteOutcome) {
         if let Some(written) = self.written.take() {
-            let _ = written.send(());
+            let _ = written.send(outcome);
         }
+    }
+
+    pub fn acknowledge_written(self) {
+        self.resolve(WriteOutcome::Written);
     }
 
     pub fn logical_released_from_draft(&self) -> bool {
@@ -306,7 +387,7 @@ impl PendingInput {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn take_logical_after_write(
         &mut self,
-    ) -> Vec<(Vec<u8>, Option<oneshot::Sender<()>>, bool)> {
+    ) -> Vec<(Vec<u8>, Option<oneshot::Sender<WriteOutcome>>, bool)> {
         std::mem::take(&mut self.logical_after_write)
     }
 }
@@ -328,7 +409,7 @@ pub enum InputQueueError {
 /// own line, so nothing has been written and no acknowledgement is coming
 /// within this call.
 pub struct LogicalInputAccepted {
-    pub written: oneshot::Receiver<()>,
+    pub written: oneshot::Receiver<WriteOutcome>,
     pub held_by_raw_draft: bool,
 }
 
@@ -372,7 +453,7 @@ struct QueuedLogicalInput {
     /// the message rather than with the call that queued it, so a message
     /// released by a later boundary or by composer attestation acknowledges
     /// through the same channel as one dispatched immediately.
-    written: Option<oneshot::Sender<()>>,
+    written: Option<oneshot::Sender<WriteOutcome>>,
 }
 
 impl InputCoordinationState {
@@ -587,7 +668,7 @@ impl SessionHandle {
         &self,
         data: Vec<u8>,
         kind: RawInputKind,
-    ) -> Result<oneshot::Receiver<()>, InputQueueError> {
+    ) -> Result<oneshot::Receiver<WriteOutcome>, InputQueueError> {
         let (written_tx, written) = oneshot::channel();
         self.enqueue_raw_input_with_ack(data, kind, Some(written_tx))?;
         Ok(written)
@@ -597,7 +678,7 @@ impl SessionHandle {
         &self,
         data: Vec<u8>,
         kind: RawInputKind,
-        written: Option<oneshot::Sender<()>>,
+        written: Option<oneshot::Sender<WriteOutcome>>,
     ) -> Result<(), InputQueueError> {
         let mut state = self
             .input_coordination
@@ -873,6 +954,40 @@ impl SessionHandle {
             .lock()
             .map_err(|_| InputQueueError::CoordinationUnavailable)?;
         state.logical_inputs.pop_front();
+        Ok(())
+    }
+
+    /// Output chunks mirrored into this session's headless terminal so far.
+    ///
+    /// The writer reads it to tell a CLI that is still repainting an input
+    /// burst from one that has finished with it. A frame is not needed for
+    /// that question — only whether anything was drawn at all — so this stays
+    /// a lock-free counter rather than a terminal read.
+    pub fn mirrored_chunks(&self) -> u64 {
+        self.mirrored_chunks.load(Ordering::SeqCst)
+    }
+
+    /// Record that a logical message's text reached the PTY but its submission
+    /// could not be proven, so no Enter was written and the text is parked at
+    /// the composer.
+    ///
+    /// The daemon put a line at that composer and cannot prove it left, so it
+    /// no longer knows what is sitting there: attestation drops to `unknown`,
+    /// which is exactly the state an inherited composer is in and holds every
+    /// later logical message the same way. It is deliberately not `not-typed`
+    /// — that asserts the composer is clear and would let the next delivery
+    /// append to text still sitting on it — and deliberately not `typed`,
+    /// because nobody typed it. It clears through the existing paths: a
+    /// producer-declared submission boundary, or a frame that renders the
+    /// provider's own empty composer.
+    pub fn park_unproven_logical_input(&self) -> Result<(), InputQueueError> {
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        state.logical_inputs.pop_front();
+        state.raw_input_draft_state_known = false;
+        state.typed_draft_bytes = None;
         Ok(())
     }
 
@@ -2289,6 +2404,126 @@ mod tests {
             super::frame_logical_message(message.clone(), false),
             message
         );
+    }
+
+    /// The fault the owner's 1,227-byte dictated message hit. A PTY master
+    /// takes about a kilobyte per write, so a longer single-line message
+    /// reaches the CLI as separate input events and an interactive TUI reads
+    /// the first burst as a paste and the rest as typing — submitting only the
+    /// tail. The paste markers travel in-band with the bytes, so however the
+    /// queue splits them the CLI still sees one editor operation.
+    #[tokio::test]
+    async fn a_long_single_line_message_is_framed_as_one_paste() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .mirror_output(b"\x1b[?2004h", false)
+            .await
+            .expect("terminal enables bracketed paste mode");
+
+        let dictated = vec![b'a'; super::PASTE_FRAMING_MIN_LEN];
+        handle
+            .enqueue_logical_input(dictated.clone())
+            .expect("accept a long single-line logical input");
+        let pending = input_rx.recv().await.expect("logical message");
+
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(pending.data.first(), Some(&0x1b));
+        assert!(pending.data.starts_with(b"\x1b[200~"));
+        assert!(pending.data.ends_with(b"\x1b[201~"));
+        assert_eq!(
+            &pending.data[6..pending.data.len() - 6],
+            dictated.as_slice(),
+            "framing must not alter a single byte of the message"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// The carve-out the framing rule protects, restated as a bound: a message
+    /// short enough to be a provider slash command is still short enough to
+    /// reach the CLI in one write, so it needs no markers and keeps its
+    /// provider-native typing semantics.
+    #[test]
+    fn a_message_short_enough_to_arrive_whole_is_not_framed() {
+        let short = vec![b'x'; super::PASTE_FRAMING_MIN_LEN - 1];
+
+        assert_eq!(super::frame_logical_message(short.clone(), true), short);
+    }
+
+    /// A terminal that never advertised bracketed paste cannot be protected
+    /// in-band, and inventing markers for it would send control bytes to a
+    /// program that renders them as literal composer text.
+    #[test]
+    fn a_long_message_is_not_framed_for_an_unadvertising_terminal() {
+        let long = vec![b'x'; super::PASTE_FRAMING_MIN_LEN * 2];
+
+        assert_eq!(super::frame_logical_message(long.clone(), false), long);
+    }
+
+    /// A message the daemon wrote but could not prove submitted is still on
+    /// that composer. The daemon therefore stops claiming to know what is
+    /// there: attestation drops to `unknown`, which holds every later message
+    /// exactly as an inherited composer does, so nothing can be appended to
+    /// the parked text. It is deliberately not `not-typed` — that asserts the
+    /// composer is clear — and not `typed`, because nobody typed it.
+    #[tokio::test]
+    async fn a_parked_message_leaves_the_composer_unknown_and_refuses_the_next_one() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let _input_rx = handle.take_input_rx().await.expect("input queue");
+
+        handle
+            .enqueue_logical_input(b"the owner's message".to_vec())
+            .expect("accept the first logical input");
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::NotTyped,
+            "an attested session starts from proven-empty"
+        );
+
+        handle
+            .park_unproven_logical_input()
+            .expect("park the unproven message");
+
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::Unknown
+        );
+        assert!(handle.logical_input_blocked());
+        assert!(matches!(
+            handle.enqueue_logical_input(b"a later message".to_vec()),
+            Err(super::InputQueueError::InheritedDraftStateUnknown)
+        ));
+        handle.kill().await.unwrap();
+    }
+
+    /// The park is not permanent. It clears through the paths that already
+    /// end an unknown composer: the human at that terminal submitting, or a
+    /// frame that renders the provider's own empty composer.
+    #[tokio::test]
+    async fn a_human_submission_boundary_clears_a_parked_message() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let _input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .enqueue_logical_input(b"the owner's message".to_vec())
+            .expect("accept the first logical input");
+        handle
+            .park_unproven_logical_input()
+            .expect("park the unproven message");
+        assert!(handle.logical_input_blocked());
+
+        handle
+            .enqueue_raw_input(b"\r".to_vec(), RawInputKind::Submission)
+            .expect("the human presses Enter at that terminal");
+
+        assert!(!handle.logical_input_blocked());
+        assert_eq!(
+            handle.composer_attestation(),
+            crate::protocol::ComposerAttestation::NotTyped
+        );
+        assert!(handle
+            .enqueue_logical_input(b"a later message".to_vec())
+            .is_ok());
+        handle.kill().await.unwrap();
     }
 
     #[tokio::test]

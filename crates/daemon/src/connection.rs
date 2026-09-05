@@ -24,7 +24,7 @@ use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{
     pty_occupancy_snapshot, LogicalInputAccepted, RawInputKind, SessionHandle, SessionManager,
-    SessionRecord, StreamControl,
+    SessionRecord, StreamControl, WriteOutcome,
 };
 use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
@@ -132,7 +132,20 @@ async fn logical_input_event(
         );
     }
     match accepted.written.await {
-        Ok(()) => Event::Ok,
+        Ok(WriteOutcome::Written) => Event::Ok,
+        Ok(WriteOutcome::SubmissionUnproven) => error_event(
+            Some(protocol::ErrorCode::LogicalInputSubmissionUnproven),
+            format!(
+                "logical input for session {session_id} reached the terminal but its submission \
+                 could not be proven: the terminal never settled after the message, so no Enter \
+                 was written and the text is parked at that composer. Do not retry it; a human \
+                 at that terminal decides what happens to it"
+            ),
+        ),
+        Ok(WriteOutcome::NotWritten) => error_event(
+            Some(protocol::ErrorCode::InheritedDraftStateUnknown),
+            inherited_draft_state_unknown_message(session_id),
+        ),
         Err(_) => error_event(
             Some(protocol::ErrorCode::WriteFailed),
             format!(
@@ -838,7 +851,7 @@ pub(crate) async fn handle_command(
 
             let evt = match session.enqueue_acknowledged_raw_input(data, kind) {
                 Ok(written) => match written.await {
-                    Ok(()) => Event::Ok,
+                    Ok(_) => Event::Ok,
                     Err(_) => error_event(
                         Some(protocol::ErrorCode::WriteFailed),
                         format!("input write failed for session: {}", session_id),
@@ -898,7 +911,7 @@ pub(crate) async fn handle_command(
 
             let evt = match session.enqueue_acknowledged_raw_input(data, RawInputKind::Draft) {
                 Ok(written) => match written.await {
-                    Ok(()) => Event::Ok,
+                    Ok(_) => Event::Ok,
                     Err(_) => error_event(
                         Some(protocol::ErrorCode::WriteFailed),
                         format!("input write failed for session: {session_id}"),
@@ -1071,7 +1084,7 @@ pub(crate) async fn handle_command(
             }
             let evt = match session.enqueue_acknowledged_raw_input(data, RawInputKind::Draft) {
                 Ok(written) => match written.await {
-                    Ok(()) => Event::Ok,
+                    Ok(_) => Event::Ok,
                     Err(_) => error_event(
                         Some(protocol::ErrorCode::WriteFailed),
                         format!("input write failed for session: {session_id}"),
@@ -1118,7 +1131,7 @@ pub(crate) async fn handle_command(
             }
             let evt = match session.enqueue_acknowledged_raw_input(data, RawInputKind::Draft) {
                 Ok(written) => match written.await {
-                    Ok(()) => Event::Ok,
+                    Ok(_) => Event::Ok,
                     Err(_) => error_event(
                         Some(protocol::ErrorCode::WriteFailed),
                         format!("input write failed for session: {session_id}"),
