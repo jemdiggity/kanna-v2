@@ -1921,19 +1921,25 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
-    run_migration(conn, "062_contextless_completion_attempt", |conn| {
-        conn.execute_batch(
-            "CREATE TABLE contextless_completion_attempt (
-                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
-                attempt_key TEXT NOT NULL,
-                run_id TEXT NOT NULL REFERENCES stage_run(id) ON DELETE CASCADE,
-                result TEXT NOT NULL,
-                PRIMARY KEY (task_id, attempt_key)
-            );",
-        )
-    })?;
+    run_migration(
+        conn,
+        "062_contextless_completion_attempt",
+        create_contextless_completion_attempt_schema,
+    )?;
 
     Ok(())
+}
+
+fn create_contextless_completion_attempt_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE contextless_completion_attempt (
+            task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+            attempt_key TEXT NOT NULL,
+            run_id TEXT NOT NULL REFERENCES stage_run(id) ON DELETE CASCADE,
+            result TEXT NOT NULL,
+            PRIMARY KEY (task_id, attempt_key)
+        );",
+    )
 }
 
 fn create_task_approval_authorization_schema(conn: &Connection) -> Result<(), rusqlite::Error> {

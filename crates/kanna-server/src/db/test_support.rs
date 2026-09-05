@@ -318,6 +318,7 @@ impl Db {
         let mut stmt = self
             .conn
             .prepare("INSERT INTO schema_migrations (id) VALUES (?1)")?;
+        super::create_contextless_completion_attempt_schema(&self.conn)?;
         for id in CURRENT_SCHEMA_MIGRATIONS {
             stmt.execute([id])?;
         }

@@ -6468,10 +6468,16 @@ async fn complete_post_and_transition(refinish: bool) {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let original_response = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&original_response)
+    );
     daemon_server.await.unwrap();
 
     // The deferred transition executes on a detached task; wait for it.
