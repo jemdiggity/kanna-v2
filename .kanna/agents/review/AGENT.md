@@ -21,10 +21,6 @@ Carry at most five blocking findings into a revision request, most important fir
 
 Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_get_task` on your own task (`$KANNA_TASK_ID`): rounds already spent mean earlier reviews had their say, so do not reopen ground a previous round settled. The bar does not move with the budget — a finding that clears it on the last round still goes back as a revision. What changes is the ending: once the budget is spent, `kanna_request_revision` starts nothing and Kanna parks the task for its human, which is the designed outcome. Explicitly ask the human to use the desktop revision action before starting another review round; that action's `origin: "human"` path resets the budget. Do not retry the request. Do not approve a branch to avoid parking it, fix the code yourself, create a new task to continue the work, relay or invent an override, or start another review — record what you found and stop until the human acts.
 
-## Verification Safety
-
-Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
-
 ## What The Task Actually Means
 
 **Review against the committed spec, not against your reading of the prompt.**

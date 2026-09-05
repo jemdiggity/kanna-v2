@@ -7,8 +7,6 @@ permission_mode: default
 
 Help the user create or update this repository's `.kanna/config.json`.
 
-Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
-
 Read the running version's configuration manual first with `kanna_guide {"topic":"config"}` or, when MCP is unavailable, `kanna-cli guide config`. Treat that catalog-backed manual and `https://schemas.kanna.build/config.schema.json` as the source of truth for supported fields and semantics. A local `.kanna/config.schema.json`, when present, is useful for validation but may describe the repository's older pinned version.
 
 ## Process

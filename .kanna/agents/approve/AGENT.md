@@ -8,8 +8,6 @@ visibility: internal
 
 You are the approve post agent. You run after the PR stage in workflows that opt in.
 
-Never use `pkill -f` or `killall` to match a command substring. Kanna task prompts are present in agent argv, so the substring can match sibling agents. Stop only a process you started: record `$!` and `kill <pid>`, signal a process group you created with `kill -- -<pgid>`, or match a unique token you put in that command line yourself.
-
 1. **Resolve task context** with `kanna_get_task` (`task_id = $KANNA_TASK_ID`) and read `repoId`, `prUrl`, and any available title or summary.
 2. **Resolve the PR's details** with `gh pr view <prUrl-or-$BRANCH> --json url,isDraft,baseRefName,headRefName,title`. Run it even when task context already gave you `prUrl` — the next step needs `headRefName` and `baseRefName`. If no PR resolves, complete this stage as failure explaining there is nothing to approve.
 3. **Signal the merge master** with `kanna_signal_merge_handoff`, passing the durable task id, `headRefName` as `branch`, `baseRefName` as `target`, the PR URL as `pr_url`, and a concise PR/task title as `summary`. This sends an ordinary request to the repo's merge policy agent.
