@@ -409,6 +409,7 @@ export async function exerciseTaskPromptExpansion(
       const collapsedTaskId = await ui.getCollapsedTaskId();
       return (
         (await collapsedTaskId.isExisting()) &&
+        (await collapsedTaskId.isDisplayed?.()) === true &&
         (await smokeElementText(collapsedTaskId)) === fixture.taskId
       );
     },
@@ -446,6 +447,7 @@ export async function exerciseTaskPromptExpansion(
       const expandedTaskId = await ui.getExpandedTaskId();
       return (
         (await expandedTaskId.isExisting()) &&
+        (await expandedTaskId.isDisplayed?.()) === true &&
         (await smokeElementText(expandedTaskId)) === fixture.taskId
       );
     },
@@ -859,6 +861,7 @@ export async function assertPtyFixtureTaskRow(
       const rowText = await smokeElementText(taskRow);
       return (
         (await taskRow.isExisting()) &&
+        (await taskRow.isDisplayed?.()) === true &&
         rowText.includes(fixture.expectedTitle) &&
         rowText.includes(`Task ID ${fixture.taskId}`)
       );
