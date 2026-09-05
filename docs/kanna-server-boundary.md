@@ -1088,6 +1088,17 @@ cursor-based, not snapshot-diffed:
 - `task.teardown_failed` reports that detached best-effort workspace teardown
   failed to start or exceeded its hard deadline. Its payload contains
   `sessionId` and `error`; the same failure is written to the server log.
+- `task.lifecycle_operation_retired` reports that a durable lifecycle
+  operation intent — an accepted post, or a stage spawn crossing the daemon
+  socket — was dropped without being applied because no server generation
+  could ever reconcile it: its payload cannot be decoded, its kind is unknown,
+  it names another task, it carries half a workspace, or its task has since
+  been closed. That intent is also the task's pre-operation guard, so this
+  event is what says the task was unblocked at the cost of the projection.
+  `payload.reason` says why; `payload.operationId`, `payload.kind` and
+  `payload.phase` identify what was retired. An operation that is merely
+  *uncertain* is never retired — it stays durable until the daemon can answer
+  for it.
 - `task.transfer_finalizing` reports each step of a cross-machine transfer
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See

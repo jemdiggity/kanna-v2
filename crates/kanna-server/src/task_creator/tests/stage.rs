@@ -3191,8 +3191,11 @@ async fn dispatch_post_keeps_uncertain_intent_and_reconciles_before_next_post() 
     assert_eq!(db.list_lifecycle_operation_intents().unwrap().len(), 1);
     drop(daemon);
 
-    // The next live post performs the same one-shot daemon List reconciliation
-    // in this process, clears the old intent, and then submits the new post.
+    // A caller that retries the ambiguous delivery reaches the guard, which
+    // performs the same one-shot daemon List reconciliation in this process
+    // and commits the post the daemon did accept. The retry itself is then
+    // refused: submitting again would inject one instruction twice into one
+    // live agent and leave two post runs where the workflow intends one.
     let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Post(post) => post,
         _ => panic!("expected post dispatch"),
@@ -3222,33 +3225,33 @@ async fn dispatch_post_keeps_uncertain_intent_and_reconciles_before_next_post() 
             )
             .await
             .unwrap();
-        let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
-        assert!(matches!(
-            command,
-            kanna_daemon::protocol::Command::SubmitInput { .. }
-        ));
-        write_half
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
     });
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
-    crate::task_creator::dispatch_prepared_post_for_api(
+    let error = match crate::task_creator::dispatch_prepared_post_for_api(
         &config.db_path,
         &mut daemon,
         &crate::session_replacements::SessionReplacements::default(),
         *post,
     )
     .await
-    .unwrap();
+    {
+        Err(error) => error,
+        Ok(_) => panic!("an uncertain post must never be re-submitted"),
+    };
+    assert!(
+        error.contains("post is still running"),
+        "unexpected error: {error}"
+    );
     daemon_server.await.unwrap();
     assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+    let posts = db
+        .list_stage_runs_for_task("task-1")
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.kind == "post")
+        .collect::<Vec<_>>();
+    assert_eq!(posts.len(), 1, "the accepted post must be recorded once");
+    assert_eq!(posts[0].status, "running");
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -3487,6 +3490,208 @@ async fn stage_spawn_clears_intent_on_known_pre_submission_refusal() {
 #[tokio::test]
 async fn stage_spawn_clears_intent_on_daemon_error_response() {
     run_stage_spawn_boundary_failure("stage-spawn-daemon-error", false).await;
+}
+
+/// The fork is created during preparation, so every way of leaving the
+/// pre-operation guard without a spawn has to remove it — a refusal *and* a
+/// database failure. Only the refusal used to.
+#[tokio::test]
+async fn stage_spawn_rolls_back_its_fork_when_the_guard_cannot_be_read() {
+    let repo_root = init_git_repo("stage-spawn-guard-error");
+    write_post_workflow_fixtures(&repo_root);
+    let config = test_config("stage-spawn-guard-error");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_workflow_task(&config, &db, &repo_root);
+    // Advance past the post so the transition prepares a forked workspace.
+    db.insert_stage_run(NewStageRun {
+        id: "run-post",
+        task_id: "task-1",
+        stage: "commit",
+        kind: "post",
+        agent: Some("commit"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        other => panic!(
+            "expected a forked stage transition, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    };
+    let fork = run
+        .forked_workspace()
+        .expect("stage transition forks a workspace");
+    let fork_branch = fork.branch.clone();
+    let fork_worktree = fork.worktree_path.clone();
+    assert!(std::path::Path::new(&fork_worktree).is_dir());
+
+    std::fs::create_dir_all(&config.daemon_dir).unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let idle_daemon = tokio::spawn(async move {
+        let _ = listener.accept().await;
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    // The guard's first act is to open the database; this one cannot be.
+    let unreadable_db_path = format!("{}/absent-directory/kanna.db", config.daemon_dir);
+    let error = spawn_prepared_stage_run_for_api(
+        &unreadable_db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *run,
+    )
+    .await
+    .expect_err("an unreadable guard must fail the spawn");
+    idle_daemon.await.unwrap();
+
+    assert!(error.contains("db error"), "unexpected error: {error}");
+    assert!(
+        !std::path::Path::new(&fork_worktree).exists(),
+        "the fork's worktree outlived the operation nobody started"
+    );
+    assert_eq!(
+        run_git_fixture(&repo_root, &["branch", "--list", &fork_branch]),
+        "",
+        "the fork's branch outlived the operation nobody started"
+    );
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The submitted phase is the boundary that decides how a crash is
+/// reconciled, so it must begin at the socket. At the last command before the
+/// Spawn write the durable run row already exists — it has to, or the child
+/// would be unobservable — while the intent is still a known pre-submission
+/// failure.
+#[tokio::test]
+async fn stage_spawn_opens_its_submitted_phase_at_the_daemon_boundary() {
+    let repo_root = init_git_repo("stage-spawn-submission-boundary");
+    write_post_workflow_fixtures(&repo_root);
+    let config = test_config("stage-spawn-submission-boundary");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_workflow_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-post",
+        task_id: "task-1",
+        stage: "commit",
+        kind: "post",
+        agent: Some("commit"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        other => panic!(
+            "expected a forked stage transition, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    };
+
+    std::fs::create_dir_all(&config.daemon_dir).unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let db_path = config.db_path.clone();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut negotiated = false;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command =
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap();
+            let response = match &command {
+                kanna_daemon::protocol::Command::Snapshot { session_id } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: format!("session not found: {session_id}"),
+                    }
+                }
+                kanna_daemon::protocol::Command::SeedSnapshot { .. }
+                | kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
+                // The last exchange before the Spawn write.
+                kanna_daemon::protocol::Command::NegotiateProtectedInput { .. } => {
+                    let db = Db::open(&db_path).unwrap();
+                    let intents = db.list_lifecycle_operation_intents().unwrap();
+                    assert_eq!(intents.len(), 1);
+                    assert_eq!(
+                        intents[0].phase, "spawn_ready",
+                        "the submitted phase must not begin before the daemon boundary"
+                    );
+                    assert!(
+                        db.stage_run(&intents[0].id).unwrap().is_some(),
+                        "the run row must be durable before Spawn can make its child observable"
+                    );
+                    negotiated = true;
+                    kanna_daemon::protocol::Event::ProtectedInputReady {
+                        version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
+                    assert!(negotiated, "Spawn arrived before its negotiation");
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            let spawned = matches!(
+                command,
+                kanna_daemon::protocol::Command::Spawn { .. }
+                    | kanna_daemon::protocol::Command::SpawnAgent { .. }
+            );
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if spawned {
+                break;
+            }
+        }
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *run,
+    )
+    .await
+    .unwrap();
+    fake_daemon.await.unwrap();
+
+    assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .stage
+            .as_deref(),
+        Some("pr")
+    );
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[tokio::test]
