@@ -75,6 +75,8 @@ pub enum DiscoveryMode {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    #[cfg(test)]
+    pub(super) mdns_fixture: Option<Arc<tokio::sync::Mutex<super::discovery::MdnsState>>>,
     pub peer_id: String,
     pub display_name: String,
     pub registry_dir: PathBuf,
@@ -122,6 +124,8 @@ impl RuntimeConfig {
         listen_port: u16,
     ) -> Self {
         Self {
+            #[cfg(test)]
+            mdns_fixture: None,
             peer_id: peer_id.into(),
             display_name: display_name.into(),
             registry_dir: registry_dir.as_ref().to_path_buf(),
@@ -327,6 +331,8 @@ impl RuntimeConfig {
             .unwrap_or(DiscoveryMode::Mdns);
 
         Ok(Self {
+            #[cfg(test)]
+            mdns_fixture: None,
             peer_id,
             display_name,
             registry_dir,

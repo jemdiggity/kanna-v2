@@ -1191,6 +1191,22 @@ async fn review_run_binding_refuses_cross_task_pair_and_allows_concurrent_verdic
         seed_bound_review_run(&db, "budget-2", "review-run-2");
     }
 
+    // A real task has one active main run. Pin the fixture lifecycle here:
+    // a second active review makes the result depend on which run is selected.
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        for (task, expected) in [("budget-1", "review-run-1"), ("budget-2", "review-run-2")] {
+            let active = db
+                .list_stage_runs_for_task(task)
+                .unwrap()
+                .into_iter()
+                .filter(|run| run.kind == "main" && run.status == "running")
+                .map(|run| run.id)
+                .collect::<Vec<_>>();
+            assert_eq!(active, [expected]);
+        }
+    }
+
     let daemon = spawn_fixture_daemon(fixture.socket_path.clone(), None, None);
     let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
     let request = |task_id: &'static str, run_id: Option<&'static str>, finding: &'static str| {
@@ -1246,8 +1262,14 @@ async fn review_run_binding_refuses_cross_task_pair_and_allows_concurrent_verdic
         app.clone()
             .oneshot(request("budget-2", Some("review-run-2"), "second finding"))
     );
-    assert_eq!(first.unwrap().status(), StatusCode::OK);
-    assert_eq!(second.unwrap().status(), StatusCode::OK);
+    for response in [first, second] {
+        let response = response.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    }
 
     let db = Db::open(&fixture.config.db_path).unwrap();
     wait_for_revision_run(&db, "budget-1", "in progress").await;

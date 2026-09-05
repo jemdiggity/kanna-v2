@@ -15,9 +15,11 @@ use tokio::task::JoinHandle;
 pub(super) enum PeerDiscovery {
     Registry(PeerRegistry),
     Mdns(Arc<MdnsDiscovery>),
+    #[cfg(test)]
+    MdnsFixture(Arc<Mutex<MdnsState>>),
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct MdnsState {
     peers_by_id: HashMap<String, PeerRegistryEntry>,
     peer_ids_by_fullname: HashMap<String, String>,
@@ -38,6 +40,8 @@ impl PeerDiscovery {
         match self {
             Self::Registry(registry) => Ok(registry.list_peers(self_peer_id)?),
             Self::Mdns(discovery) => discovery.list_peers(self_peer_id).await,
+            #[cfg(test)]
+            Self::MdnsFixture(state) => Ok(state.lock().await.list_peers(self_peer_id)),
         }
     }
 
@@ -107,14 +111,7 @@ impl MdnsDiscovery {
 
     async fn list_peers(&self, self_peer_id: &str) -> Result<Vec<PeerRegistryEntry>, RuntimeError> {
         let state = self.state.lock().await;
-        let mut peers = state
-            .peers_by_id
-            .values()
-            .filter(|peer| peer.peer_id != self_peer_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        peers.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
-        Ok(peers)
+        Ok(state.list_peers(self_peer_id))
     }
 
     fn shutdown(&self) {
@@ -124,7 +121,20 @@ impl MdnsDiscovery {
     }
 }
 
-async fn handle_mdns_event(state: &Arc<Mutex<MdnsState>>, event: ServiceEvent) {
+impl MdnsState {
+    fn list_peers(&self, self_peer_id: &str) -> Vec<PeerRegistryEntry> {
+        let mut peers = self
+            .peers_by_id
+            .values()
+            .filter(|peer| peer.peer_id != self_peer_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+        peers
+    }
+}
+
+pub(super) async fn handle_mdns_event(state: &Arc<Mutex<MdnsState>>, event: ServiceEvent) {
     match event {
         ServiceEvent::ServiceResolved(service) => {
             let peer = match resolved_service_to_peer_entry(&service) {

@@ -1,3 +1,6 @@
+#[path = "../../tests/support/mdns_names.rs"]
+mod mdns_names;
+
 use super::state::{
     install_companion_observer_if_latest, remove_companion_observer_generation,
     remove_companion_observer_registration, runtime_event_channel, CompanionObserver,
@@ -2186,4 +2189,126 @@ async fn latest_companion_lane_gets_bounded_fairness_during_continuous_reliable_
         runtime.next_event().await.unwrap(),
         RuntimeEvent::TerminalEvent { .. }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_mdns_test_runs_keep_their_peers_apart() {
+    use super::discovery::{handle_mdns_event, MdnsState};
+    use crate::discovery::{encode_txt_record, hostname_for_peer, SERVICE_TYPE};
+    use mdns_sd::{ServiceEvent, ServiceInfo};
+
+    // Feed both runs' Bonjour records through the real resolver/cache in a
+    // controlled order. LAN multicast delivery and multi-NIC convergence are
+    // not the invariant: routing must select the intended identity even when
+    // the cache also contains the other run's peers. The integration target's
+    // mdns_peers_can_discover_pair_and_transfer retains real Bonjour coverage.
+    let temp = tempfile::tempdir().unwrap();
+    let mut peers = Vec::new();
+    let mut caches = Vec::new();
+    for id in [
+        "peer-primary-mdns",
+        "peer-secondary-mdns",
+        "peer-primary-mdns",
+        "peer-secondary-mdns",
+    ] {
+        let cache = Arc::new(tokio::sync::Mutex::new(MdnsState::default()));
+        let mut config =
+            RuntimeConfig::for_tests(mdns_names::unique_mdns_peer_id(id), id, temp.path(), 0);
+        config.mdns_fixture = Some(Arc::clone(&cache));
+        peers.push(TransferRuntime::spawn(config).await.unwrap());
+        caches.push(cache);
+    }
+    let services = peers
+        .iter()
+        .map(|peer| {
+            let txt = encode_txt_record(
+                &peer.config.peer_id,
+                &peer.config.display_name,
+                &crate::crypto::public_key_to_string(&peer.identity.public_key),
+                super::utils::CURRENT_PROTOCOL_VERSION,
+                true,
+            )
+            .unwrap();
+            let properties = txt.into_iter().collect::<Vec<_>>();
+            ServiceInfo::new(
+                SERVICE_TYPE,
+                &peer.config.peer_id,
+                &hostname_for_peer(&peer.config.peer_id).unwrap(),
+                "127.0.0.1",
+                peer.config.listen_port,
+                &properties[..],
+            )
+            .unwrap()
+            .as_resolved_service()
+        })
+        .collect::<Vec<_>>();
+    for (index, cache) in caches.iter().enumerate() {
+        for offset in 0..services.len() {
+            let service = services[(index + offset) % services.len()].clone();
+            handle_mdns_event(cache, ServiceEvent::ServiceResolved(Box::new(service))).await;
+        }
+    }
+    for peer in &peers {
+        let discovered = peer.list_peers().await.unwrap();
+        assert_eq!(discovered.len(), 3);
+        for entry in discovered {
+            let intended = peers
+                .iter()
+                .find(|peer| peer.config.peer_id == entry.peer_id)
+                .unwrap();
+            assert_eq!(entry.endpoint, intended.config.endpoint());
+        }
+    }
+
+    async fn exchange(source: &TransferRuntime, target: &TransferRuntime, task: &str) -> String {
+        let pair = source.start_pairing(&target.config.peer_id);
+        let accept = async {
+            loop {
+                if let RuntimeEvent::PairingRequested(request) = target.next_event().await.unwrap()
+                {
+                    assert_eq!(request.peer_id, source.config.peer_id);
+                    target
+                        .accept_pairing(&request.request_id, &request.verification_code)
+                        .await
+                        .unwrap();
+                    break;
+                }
+            }
+        };
+        let (paired, ()) = tokio::join!(pair, accept);
+        assert_eq!(paired.unwrap().peer.peer_id, target.config.peer_id);
+        let preflight = source
+            .prepare_transfer_preflight(&target.config.peer_id, task)
+            .await
+            .unwrap();
+        assert_eq!(preflight.source_peer_id, source.config.peer_id);
+        source
+            .prepare_transfer_commit(
+                &preflight.transfer_id,
+                serde_json::json!({
+                    "target_peer_id": target.config.peer_id,
+                    "task": { "source_task_id": task }
+                }),
+            )
+            .await
+            .unwrap();
+        loop {
+            if let RuntimeEvent::IncomingTransferRequest(event) = target.next_event().await.unwrap()
+            {
+                assert_eq!(event.source_peer_id, source.config.peer_id);
+                return event.source_task_id;
+            }
+        }
+    }
+    // A missing event is a broken fixture; only this outer guard uses time.
+    let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(
+            exchange(&peers[0], &peers[1], "task-source-a"),
+            exchange(&peers[2], &peers[3], "task-source-b")
+        )
+    })
+    .await
+    .expect("concurrent exchanges did not complete");
+    assert_eq!(first, "task-source-a");
+    assert_eq!(second, "task-source-b");
 }
