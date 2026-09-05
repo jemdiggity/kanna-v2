@@ -3119,6 +3119,377 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
 }
 
 #[tokio::test]
+async fn dispatch_post_keeps_uncertain_intent_and_reconciles_before_next_post() {
+    let repo_root = init_git_repo("dispatch-post-uncertain-guard");
+    write_post_workflow_fixtures(&repo_root);
+
+    let config = test_config("dispatch-post-uncertain-guard");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_workflow_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: Some("sonnet"),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let completion_path =
+        std::path::Path::new(&config.daemon_dir).join("runtime/completion/run-main.json");
+    kanna_tool_catalog::write_completion_context(
+        &completion_path,
+        &kanna_tool_catalog::CompletionContext::new("run-main"),
+    )
+    .unwrap();
+
+    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let uncertain_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, _) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::SubmitInput { .. }
+        ));
+        // EOF after the command is the daemon-response-lost boundary.
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = match crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("response loss must remain uncertain"),
+    };
+    assert!(
+        error.contains("daemon response lost"),
+        "unexpected error: {error}"
+    );
+    uncertain_daemon.await.unwrap();
+    assert_eq!(db.list_lifecycle_operation_intents().unwrap().len(), 1);
+    drop(daemon);
+
+    // The next live post performs the same one-shot daemon List reconciliation
+    // in this process, clears the old intent, and then submits the new post.
+    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::SessionList {
+                        sessions: vec![]
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+        assert!(matches!(
+            command,
+            kanna_daemon::protocol::Command::SubmitInput { .. }
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    .unwrap();
+    daemon_server.await.unwrap();
+    assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn dispatch_post_known_refusal_clears_live_intent() {
+    let repo_root = init_git_repo("dispatch-post-known-refusal");
+    write_post_workflow_fixtures(&repo_root);
+    let config = test_config("dispatch-post-known-refusal");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_workflow_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+        assert!(matches!(
+            command,
+            kanna_daemon::protocol::Command::SubmitInput { .. }
+        ));
+        let response = kanna_daemon::protocol::Event::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown),
+            message: "inherited draft is unknown".to_string(),
+        };
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = match crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("known refusal must be returned"),
+    };
+    assert!(error.contains("inherited draft is unknown"));
+    daemon_server.await.unwrap();
+    assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+    assert_eq!(db.stage_run("run-main").unwrap().unwrap().status, "running");
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+fn current_stage_spawn_fixture(
+    label: &str,
+) -> (Config, Db, super::super::types::PreparedStageRunSpawn) {
+    let config = test_config(label);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Transition",
+        Some("Transition"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-original",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let prepared = super::super::types::PreparedStageRunSpawn {
+        task_id: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        next_stage: "review".to_string(),
+        run_stage: "review".to_string(),
+        run_kind: "main",
+        workspace: super::super::types::PreparedRunWorkspace::Current,
+        workspace_teardown: None,
+        stage_agent: Some("review".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: WorkflowStageTransition::Manual,
+        trigger: crate::db::StageTrigger::Operator,
+        feedback: None,
+        provider_session_id: None,
+        resumed_from_run_id: None,
+        resume_fallback_reason: None,
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        terminal_prelude: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_provider: DaemonAgentProvider::Codex,
+        },
+        deferred_setup: None,
+        setup_hard_timeout: None,
+    };
+    (config, db, prepared)
+}
+
+async fn run_stage_spawn_boundary_failure(label: &str, before_submission: bool) {
+    let (config, db, prepared) = current_stage_spawn_fixture(label);
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let db_path = config.db_path.clone();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command =
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap();
+            let finish = (before_submission
+                && matches!(
+                    &command,
+                    kanna_daemon::protocol::Command::NegotiateProtectedInput { .. }
+                ))
+                || (!before_submission
+                    && matches!(&command, kanna_daemon::protocol::Command::Spawn { .. }));
+            let response = match command {
+                kanna_daemon::protocol::Command::Snapshot { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    let db = Db::open(&db_path).unwrap();
+                    assert!(db.has_lifecycle_operation_for_task("task-1").unwrap());
+                    kanna_daemon::protocol::Event::Ok
+                }
+                kanna_daemon::protocol::Command::NegotiateProtectedInput { .. }
+                    if before_submission =>
+                {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(
+                            kanna_daemon::protocol::ErrorCode::ProtectedInputProtocolRequired,
+                        ),
+                        message: "protected input negotiation refused".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::NegotiateProtectedInput { .. } => {
+                    kanna_daemon::protocol::Event::ProtectedInputReady {
+                        version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn { .. }
+                | kanna_daemon::protocol::Command::SpawnAgent { .. } => {
+                    assert!(!before_submission);
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::AgentSpawnFailed),
+                        message: "spawn refused".to_string(),
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if finish {
+                break;
+            }
+        }
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .expect_err("stage spawn failure must be returned");
+    fake_daemon.await.unwrap();
+    assert!(
+        (before_submission && error.contains("protected input negotiation refused"))
+            || (!before_submission && error.contains("spawn refused")),
+        "unexpected error: {error}"
+    );
+    assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "failed"
+    );
+}
+
+#[tokio::test]
+async fn stage_spawn_clears_intent_on_known_pre_submission_refusal() {
+    run_stage_spawn_boundary_failure("stage-spawn-before-submission", true).await;
+}
+
+#[tokio::test]
+async fn stage_spawn_clears_intent_on_daemon_error_response() {
+    run_stage_spawn_boundary_failure("stage-spawn-daemon-error", false).await;
+}
+
+#[tokio::test]
 async fn dispatch_post_records_a_running_post_when_the_daemon_holds_it_behind_a_draft() {
     let repo_root = init_git_repo("dispatch-post-held-draft");
     write_post_workflow_fixtures(&repo_root);

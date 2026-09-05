@@ -20,6 +20,7 @@ use std::time::Duration;
 mod analytics;
 mod blockers;
 mod create_intents;
+mod lifecycle_operations;
 mod operator_events;
 mod pipeline_items;
 mod ports;
@@ -40,6 +41,7 @@ mod worktrees;
 #[allow(unused_imports)]
 pub use analytics::RepoAnalytics;
 pub use blockers::ReplaceTaskBlockersError;
+pub use lifecycle_operations::LifecycleOperationIntent;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
@@ -126,6 +128,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "060_repo_default_branch_source",
     "061_stage_run_trigger",
     "062_contextless_completion_attempt",
+    "063_lifecycle_operation_intent",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1926,6 +1929,21 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         "062_contextless_completion_attempt",
         create_contextless_completion_attempt_schema,
     )?;
+
+    run_migration(conn, "063_lifecycle_operation_intent", |conn| {
+        conn.execute_batch(
+            "CREATE TABLE lifecycle_operation_intent (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN ('post', 'stage_spawn')),
+                phase TEXT NOT NULL CHECK (phase IN ('prepared', 'spawn_ready', 'submitted', 'committed')),
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE UNIQUE INDEX idx_lifecycle_operation_intent_task
+              ON lifecycle_operation_intent(task_id);",
+        )
+    })?;
 
     Ok(())
 }
