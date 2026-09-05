@@ -2,7 +2,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Starting a process and having it publish a socket is an eventual event with
+/// no product latency contract. This deadline only contains a wedged child.
+const EVENTUAL_PROGRESS_GUARD: Duration = Duration::from_secs(30);
 
 fn compute_socket_path(dir: &Path) -> PathBuf {
     kanna_runtime_defaults::socket_path(dir)
@@ -16,26 +20,42 @@ fn unique_temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("kanna-{name}-{}-{nanos}", std::process::id()))
 }
 
-fn wait_for_daemon(child: &Child, daemon_dir: &Path) {
+/// Wait for *this* daemon generation to publish a connectable socket.
+///
+/// The PID file is written immediately before the socket is bound, so the PID
+/// alone is not readiness; production clients require both, and so does this
+/// harness. A fixed five-second budget used to stand in for that event, which
+/// on a loaded box failed a daemon that was merely slow to start rather than
+/// one that never started.
+fn wait_for_daemon(child: &mut Child, daemon_dir: &Path) {
     let pid_path = daemon_dir.join("daemon.pid");
     let socket_path = compute_socket_path(daemon_dir);
-
-    for _ in 0..50 {
-        let pid_matches = std::fs::read_to_string(&pid_path)
-            .ok()
-            .and_then(|pid| pid.trim().parse::<u32>().ok())
-            == Some(child.id());
-        if pid_matches && UnixStream::connect(&socket_path).is_ok() {
-            return;
+    let deadline = Instant::now() + EVENTUAL_PROGRESS_GUARD;
+    let mut last_pid;
+    let mut last_connect_error = None;
+    loop {
+        if let Some(status) = child.try_wait().expect("daemon status should be readable") {
+            panic!("daemon exited before becoming ready: {status}");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        last_pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok());
+        if last_pid == Some(child.id()) {
+            match UnixStream::connect(&socket_path) {
+                Ok(_) => return,
+                Err(error) => last_connect_error = Some(error),
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon {} never published a connectable socket at {} (pid file at {} held \
+             {last_pid:?}, last connect error: {last_connect_error:?})",
+            child.id(),
+            socket_path.display(),
+            pid_path.display(),
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
-
-    panic!(
-        "daemon did not become ready at {} with socket {}",
-        pid_path.display(),
-        socket_path.display()
-    );
 }
 
 #[test]
@@ -75,7 +95,7 @@ fn worktree_daemon_ignores_production_default_env_and_writes_runtime_files_local
         .expect("daemon should start");
 
     let test_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        wait_for_daemon(&child, &expected_daemon_dir);
+        wait_for_daemon(&mut child, &expected_daemon_dir);
 
         assert!(
             expected_daemon_dir.join("daemon.pid").exists(),

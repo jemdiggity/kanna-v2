@@ -497,7 +497,7 @@ async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
             agent_provider: kanna_daemon::protocol::AgentProvider::Codex,
         },
         deferred_setup: None,
-        setup_hard_timeout: None,
+        setup_timeout_signal: None,
     };
 
     let raw = Connection::open(&config.db_path).unwrap();
@@ -3384,7 +3384,7 @@ fn current_stage_spawn_fixture(
             agent_provider: DaemonAgentProvider::Codex,
         },
         deferred_setup: None,
-        setup_hard_timeout: None,
+        setup_timeout_signal: None,
     };
     (config, db, prepared)
 }

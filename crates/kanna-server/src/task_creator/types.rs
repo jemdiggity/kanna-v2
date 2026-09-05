@@ -280,8 +280,10 @@ pub(crate) struct PreparedStageRunSpawn {
     /// worker. The provisional provider/session above are never spawned while
     /// this is present.
     pub(super) deferred_setup: Option<DeferredStageSetup>,
+    /// Test seam: when armed, workspace setup reports its hard timeout. See
+    /// `workspace_commands::run_workspace_command_with_armed_timeout_for_test`.
     #[cfg(test)]
-    pub(super) setup_hard_timeout: Option<std::time::Duration>,
+    pub(super) setup_timeout_signal: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub(super) struct DeferredStageSetup {
@@ -322,8 +324,11 @@ impl PreparedStageRunSpawn {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_setup_hard_timeout(&mut self, timeout: std::time::Duration) {
-        self.setup_hard_timeout = Some(timeout);
+    pub(crate) fn set_setup_timeout_signal(
+        &mut self,
+        signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.setup_timeout_signal = Some(signal);
     }
 
     /// The freshly created workspace, when this run forked one.
