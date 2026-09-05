@@ -277,6 +277,8 @@ fn seal_owner_payload(
     Ok(seal_typed(identity, viewer_public, &payload)?)
 }
 
+// Keep each authenticated frame binding explicit beside its serialized payload field.
+#[allow(clippy::too_many_arguments)]
 fn seal_owner_frame_payload(
     identity: &TransferIdentity,
     viewer_public: &x25519_dalek::PublicKey,
@@ -314,6 +316,8 @@ fn open_owner_payload(
     })
 }
 
+// Each expected binding is independent of the untrusted payload being checked.
+#[allow(clippy::too_many_arguments)]
 fn validate_owner_payload(
     payload: CompanionOwnerPayload,
     operation: &str,
@@ -341,6 +345,8 @@ fn validate_owner_payload(
     Ok((payload.observation_challenge, payload.frame))
 }
 
+// Keep each authenticated control binding explicit beside its serialized payload field.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn seal_owner_control_payload(
     context: &ListenerContext,
     requester_peer_id: &str,
@@ -372,23 +378,22 @@ pub(super) async fn seal_owner_control_payload(
     )
 }
 
+type OwnerControlPayloadFields = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    u64,
+    Option<ServerFrame>,
+);
+
 pub(super) fn open_owner_control_payload(
     identity: &TransferIdentity,
     owner_public: &x25519_dalek::PublicKey,
     sealed_payload: &str,
-) -> Result<
-    (
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        u64,
-        Option<ServerFrame>,
-    ),
-    RuntimeError,
-> {
+) -> Result<OwnerControlPayloadFields, RuntimeError> {
     let payload = open_owner_payload(identity, owner_public, sealed_payload)?;
     Ok((
         payload.operation,
@@ -433,6 +438,8 @@ pub(super) fn seal_observe_companion_proof(
     Ok((sealed, stream_nonce))
 }
 
+// Keep event identity and observation bindings explicit beside the proof fields.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn seal_send_companion_event_proof(
     identity: &TransferIdentity,
     receiver_public: &x25519_dalek::PublicKey,
@@ -727,16 +734,29 @@ fn now_ms() -> Result<u64, RuntimeError> {
         .as_millis() as u64)
 }
 
+pub(super) struct PeerCompanionOpen {
+    pub(super) peer: PeerRegistryEntry,
+    pub(super) request_id: String,
+    pub(super) requester_peer_id: String,
+    pub(super) task_id: String,
+    pub(super) generation: String,
+    pub(super) sealed_proof: String,
+    pub(super) stream_nonce: String,
+}
+
 pub(super) async fn open_peer_companion_stream(
-    peer: PeerRegistryEntry,
-    request_id: String,
-    requester_peer_id: String,
-    task_id: String,
-    generation: String,
-    sealed_proof: String,
-    stream_nonce: String,
+    opening: PeerCompanionOpen,
     identity: &TransferIdentity,
 ) -> Result<(BufReader<TcpStream>, String), RuntimeError> {
+    let PeerCompanionOpen {
+        peer,
+        request_id,
+        requester_peer_id,
+        task_id,
+        generation,
+        sealed_proof,
+        stream_nonce,
+    } = opening;
     let mut stream = TcpStream::connect(&peer.endpoint).await?;
     write_json_line(
         &mut stream,
@@ -761,59 +781,76 @@ pub(super) async fn open_peer_companion_stream(
             peer.peer_id
         ))
     })?;
-    let observation_challenge;
-    match parse_peer_response_line(&peer.peer_id, "observe-companion", &response_line)? {
-        PeerResponse::ObserveCompanion {
-            request_id: response_request_id,
-            sealed_payload,
-        } if response_request_id == request_id => {
-            let owner_public = crate::crypto::parse_public_key(&peer.public_key)?;
-            let payload = open_owner_payload(identity, &owner_public, &sealed_payload)?;
-            let (challenge, frame) = validate_owner_payload(
-                payload,
-                "observe_companion_ack",
-                &request_id,
-                &task_id,
-                &generation,
-                &stream_nonce,
-                None,
-                0,
-            )?;
-            if frame.is_some() {
-                return Err(RuntimeError::Protocol(
-                    "companion ACK contains a frame".into(),
-                ));
+    let observation_challenge =
+        match parse_peer_response_line(&peer.peer_id, "observe-companion", &response_line)? {
+            PeerResponse::ObserveCompanion {
+                request_id: response_request_id,
+                sealed_payload,
+            } if response_request_id == request_id => {
+                let owner_public = crate::crypto::parse_public_key(&peer.public_key)?;
+                let payload = open_owner_payload(identity, &owner_public, &sealed_payload)?;
+                let (challenge, frame) = validate_owner_payload(
+                    payload,
+                    "observe_companion_ack",
+                    &request_id,
+                    &task_id,
+                    &generation,
+                    &stream_nonce,
+                    None,
+                    0,
+                )?;
+                if frame.is_some() {
+                    return Err(RuntimeError::Protocol(
+                        "companion ACK contains a frame".into(),
+                    ));
+                }
+                challenge
             }
-            observation_challenge = challenge;
-        }
-        PeerResponse::Error { message, .. } => return Err(RuntimeError::Protocol(message)),
-        other => {
-            return Err(RuntimeError::Protocol(format!(
-                "unexpected observe-companion response: {other:?}"
-            )));
-        }
-    }
+            PeerResponse::Error { message, .. } => return Err(RuntimeError::Protocol(message)),
+            other => {
+                return Err(RuntimeError::Protocol(format!(
+                    "unexpected observe-companion response: {other:?}"
+                )));
+            }
+        };
 
     Ok((reader, observation_challenge))
 }
 
+pub(super) struct PeerCompanionStream {
+    pub(super) peer: PeerRegistryEntry,
+    pub(super) task_id: String,
+    pub(super) generation: String,
+    pub(super) generation_order: u64,
+    pub(super) request_id: String,
+    pub(super) stream_nonce: String,
+    pub(super) observation_challenge: String,
+    pub(super) identity: TransferIdentity,
+    pub(super) incoming_sender: RuntimeEventSender,
+    pub(super) inbound_decode_slots: Arc<Semaphore>,
+    pub(super) inbound_decode_budget: Arc<CompanionInboundByteBudget>,
+}
+
 pub(super) async fn stream_peer_companion<R>(
-    peer: PeerRegistryEntry,
-    task_id: String,
-    generation: String,
-    generation_order: u64,
-    request_id: String,
-    stream_nonce: String,
-    observation_challenge: String,
-    identity: TransferIdentity,
-    incoming_sender: RuntimeEventSender,
+    observation: PeerCompanionStream,
     mut reader: R,
-    inbound_decode_slots: Arc<Semaphore>,
-    inbound_decode_budget: Arc<CompanionInboundByteBudget>,
 ) -> Result<(), RuntimeError>
 where
     R: AsyncBufRead + Unpin,
 {
+    let PeerCompanionStream {
+        peer,
+        task_id,
+        generation,
+        generation_order,
+        request_id,
+        stream_nonce,
+        observation_challenge,
+        identity,
+        incoming_sender,
+        inbound_decode_slots,
+        inbound_decode_budget,
+    } = observation;
     let mut expected_sequence = 1_u64;
     loop {
         let (event_line, wire_permit) =
@@ -987,17 +1024,28 @@ async fn decode_peer_companion_frame(
     .map_err(|_| RuntimeError::Protocol("companion decode worker failed".into()))?
 }
 
+pub(super) struct OwnerCompanionStream {
+    pub(super) task_id: String,
+    pub(super) request_id: String,
+    pub(super) generation: String,
+    pub(super) stream_nonce: String,
+    pub(super) observation_challenge: String,
+}
+
 pub(super) async fn stream_owner_companion(
     context: &ListenerContext,
     mut stream: TcpStream,
     requester_peer_id: &str,
-    task_id: String,
-    request_id: String,
-    generation: String,
-    stream_nonce: String,
-    observation_challenge: String,
+    observation: OwnerCompanionStream,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<(), RuntimeError> {
+    let OwnerCompanionStream {
+        task_id,
+        request_id,
+        generation,
+        stream_nonce,
+        observation_challenge,
+    } = observation;
     let _active = ActiveOwnerCompanion::new(Arc::clone(&context.active_owner_companions));
     let db_path = context
         .db_path
@@ -1892,13 +1940,15 @@ mod tests {
         )
         .unwrap();
         let error = open_peer_companion_stream(
-            peer,
-            "request-1".into(),
-            "peer-viewer".into(),
-            "task-1".into(),
-            "generation-1".into(),
-            sealed,
-            stream_nonce,
+            crate::runtime::companion::PeerCompanionOpen {
+                peer,
+                request_id: "request-1".into(),
+                requester_peer_id: "peer-viewer".into(),
+                task_id: "task-1".into(),
+                generation: "generation-1".into(),
+                sealed_proof: sealed,
+                stream_nonce,
+            },
             &viewer,
         )
         .await
@@ -2018,33 +2068,39 @@ mod tests {
         )
         .unwrap();
         let (stream, challenge) = open_peer_companion_stream(
-            peer.clone(),
-            "request-1".into(),
-            "peer-viewer".into(),
-            "task-1".into(),
-            "generation-1".into(),
-            sealed,
-            stream_nonce.clone(),
+            crate::runtime::companion::PeerCompanionOpen {
+                peer: peer.clone(),
+                request_id: "request-1".into(),
+                requester_peer_id: "peer-viewer".into(),
+                task_id: "task-1".into(),
+                generation: "generation-1".into(),
+                sealed_proof: sealed,
+                stream_nonce: stream_nonce.clone(),
+            },
             &viewer,
         )
         .await
         .unwrap();
         let (sender, _) = super::super::state::runtime_event_channel();
         let error = stream_peer_companion(
-            peer,
-            "task-1".into(),
-            "generation-1".into(),
-            1,
-            "request-1".into(),
-            stream_nonce,
-            challenge,
-            viewer,
-            sender,
+            crate::runtime::companion::PeerCompanionStream {
+                peer,
+                task_id: "task-1".into(),
+                generation: "generation-1".into(),
+                generation_order: 1,
+                request_id: "request-1".into(),
+                stream_nonce,
+                observation_challenge: challenge,
+                identity: viewer,
+                incoming_sender: sender,
+                inbound_decode_slots: Arc::new(Semaphore::new(
+                    MAX_CONCURRENT_COMPANION_INBOUND_DECODES,
+                )),
+                inbound_decode_budget: Arc::new(CompanionInboundByteBudget::new(
+                    MAX_COMPANION_INBOUND_DECODE_BYTES,
+                )),
+            },
             stream,
-            Arc::new(Semaphore::new(MAX_CONCURRENT_COMPANION_INBOUND_DECODES)),
-            Arc::new(CompanionInboundByteBudget::new(
-                MAX_COMPANION_INBOUND_DECODE_BYTES,
-            )),
         )
         .await
         .unwrap_err();
@@ -2132,32 +2188,36 @@ mod tests {
         let (idle_two_polled, idle_two_poll) = oneshot::channel();
 
         let idle_one = tokio::spawn(stream_peer_companion(
-            idle_peer_one,
-            "task-idle-one".into(),
-            "generation-idle-one".into(),
-            1,
-            "request-idle-one".into(),
-            fresh_nonce(),
-            fresh_nonce(),
-            viewer.clone(),
-            sender.clone(),
+            crate::runtime::companion::PeerCompanionStream {
+                peer: idle_peer_one,
+                task_id: "task-idle-one".into(),
+                generation: "generation-idle-one".into(),
+                generation_order: 1,
+                request_id: "request-idle-one".into(),
+                stream_nonce: fresh_nonce(),
+                observation_challenge: fresh_nonce(),
+                identity: viewer.clone(),
+                incoming_sender: sender.clone(),
+                inbound_decode_slots: Arc::clone(&slots),
+                inbound_decode_budget: Arc::clone(&budget),
+            },
             PollTrackingReader::new(BufReader::new(idle_stream_one), idle_one_polled),
-            Arc::clone(&slots),
-            Arc::clone(&budget),
         ));
         let idle_two = tokio::spawn(stream_peer_companion(
-            idle_peer_two,
-            "task-idle-two".into(),
-            "generation-idle-two".into(),
-            1,
-            "request-idle-two".into(),
-            fresh_nonce(),
-            fresh_nonce(),
-            viewer.clone(),
-            sender.clone(),
+            crate::runtime::companion::PeerCompanionStream {
+                peer: idle_peer_two,
+                task_id: "task-idle-two".into(),
+                generation: "generation-idle-two".into(),
+                generation_order: 1,
+                request_id: "request-idle-two".into(),
+                stream_nonce: fresh_nonce(),
+                observation_challenge: fresh_nonce(),
+                identity: viewer.clone(),
+                incoming_sender: sender.clone(),
+                inbound_decode_slots: Arc::clone(&slots),
+                inbound_decode_budget: Arc::clone(&budget),
+            },
             PollTrackingReader::new(BufReader::new(idle_stream_two), idle_two_polled),
-            Arc::clone(&slots),
-            Arc::clone(&budget),
         ));
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -2174,18 +2234,20 @@ mod tests {
         assert_eq!(slots.available_permits(), 2);
 
         let ready = tokio::spawn(stream_peer_companion(
-            ready_peer,
-            "task-ready".into(),
-            "generation-ready".into(),
-            1,
-            "request-ready".into(),
-            stream_nonce,
-            observation_challenge,
-            viewer,
-            sender,
+            crate::runtime::companion::PeerCompanionStream {
+                peer: ready_peer,
+                task_id: "task-ready".into(),
+                generation: "generation-ready".into(),
+                generation_order: 1,
+                request_id: "request-ready".into(),
+                stream_nonce,
+                observation_challenge,
+                identity: viewer,
+                incoming_sender: sender,
+                inbound_decode_slots: Arc::clone(&slots),
+                inbound_decode_budget: Arc::clone(&budget),
+            },
             BufReader::new(ready_stream),
-            Arc::clone(&slots),
-            Arc::clone(&budget),
         ));
 
         let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
@@ -2249,26 +2311,28 @@ mod tests {
         let (sender, mut receiver) = super::super::state::runtime_event_channel();
 
         let partial = tokio::spawn(stream_peer_companion(
-            PeerRegistryEntry {
-                peer_id: "peer-partial".into(),
-                display_name: "Partial".into(),
-                endpoint: endpoint.to_string(),
-                pid: std::process::id(),
-                public_key: owner_public_key.clone(),
-                protocol_version: 1,
-                accepting_transfers: true,
+            crate::runtime::companion::PeerCompanionStream {
+                peer: PeerRegistryEntry {
+                    peer_id: "peer-partial".into(),
+                    display_name: "Partial".into(),
+                    endpoint: endpoint.to_string(),
+                    pid: std::process::id(),
+                    public_key: owner_public_key.clone(),
+                    protocol_version: 1,
+                    accepting_transfers: true,
+                },
+                task_id: "task-partial".into(),
+                generation: "generation-partial".into(),
+                generation_order: 1,
+                request_id: "request-partial".into(),
+                stream_nonce: fresh_nonce(),
+                observation_challenge: fresh_nonce(),
+                identity: viewer.clone(),
+                incoming_sender: sender.clone(),
+                inbound_decode_slots: Arc::clone(&slots),
+                inbound_decode_budget: Arc::clone(&budget),
             },
-            "task-partial".into(),
-            "generation-partial".into(),
-            1,
-            "request-partial".into(),
-            fresh_nonce(),
-            fresh_nonce(),
-            viewer.clone(),
-            sender.clone(),
             BufReader::new(partial_stream),
-            Arc::clone(&slots),
-            Arc::clone(&budget),
         ));
         partial_remote.write_all(&partial_bytes).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -2285,26 +2349,28 @@ mod tests {
             .await
             .unwrap();
         let ready = tokio::spawn(stream_peer_companion(
-            PeerRegistryEntry {
-                peer_id: "peer-ready".into(),
-                display_name: "Ready".into(),
-                endpoint: endpoint.to_string(),
-                pid: std::process::id(),
-                public_key: owner_public_key,
-                protocol_version: 1,
-                accepting_transfers: true,
+            crate::runtime::companion::PeerCompanionStream {
+                peer: PeerRegistryEntry {
+                    peer_id: "peer-ready".into(),
+                    display_name: "Ready".into(),
+                    endpoint: endpoint.to_string(),
+                    pid: std::process::id(),
+                    public_key: owner_public_key,
+                    protocol_version: 1,
+                    accepting_transfers: true,
+                },
+                task_id: "task-ready".into(),
+                generation: "generation-ready".into(),
+                generation_order: 1,
+                request_id: "request-ready".into(),
+                stream_nonce,
+                observation_challenge,
+                identity: viewer,
+                incoming_sender: sender,
+                inbound_decode_slots: Arc::clone(&slots),
+                inbound_decode_budget: Arc::clone(&budget),
             },
-            "task-ready".into(),
-            "generation-ready".into(),
-            1,
-            "request-ready".into(),
-            stream_nonce,
-            observation_challenge,
-            viewer,
-            sender,
             BufReader::new(ready_stream),
-            Arc::clone(&slots),
-            Arc::clone(&budget),
         ));
         let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
             .await

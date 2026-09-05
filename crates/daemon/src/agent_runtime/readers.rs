@@ -422,7 +422,7 @@ async fn prepare_child_exit(life: &ReaderLife, agents: &AgentSessions) -> Option
     // duplicates (including the stdin dup, so a provider reading stdin to
     // EOF can actually exit). No blocking wait happens under the registry
     // lock.
-    let Some((child, child_start, stdin, handoff_fds)) = ({
+    let (child, child_start, stdin, handoff_fds) = {
         let mut registry = agents.lock().await;
         match registry.get_mut(session_id) {
             None => None,
@@ -444,9 +444,7 @@ async fn prepare_child_exit(life: &ReaderLife, agents: &AgentSessions) -> Option
                 record.handoff_fds.take(),
             )),
         }
-    }) else {
-        return None;
-    };
+    }?;
 
     // Phase 2 (off-lock): close stdin + handoff dups, then reap bounded.
     drop(stdin);

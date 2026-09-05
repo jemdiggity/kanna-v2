@@ -111,10 +111,6 @@ impl PreparedTaskSpawn {
     pub(crate) fn task_id(&self) -> &str {
         &self.created_task.task_id
     }
-
-    pub(crate) fn session_id(&self) -> &str {
-        &self.session_id
-    }
 }
 
 #[derive(Clone)]

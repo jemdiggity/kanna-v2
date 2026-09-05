@@ -231,13 +231,14 @@ fn reopen_failure_rolls_back_lifecycle_port_metadata_and_claims_exactly() {
         "#,
     )
     .unwrap();
-    let original: (
+    type ReopenState = (
         Option<String>,
         Option<String>,
         Option<String>,
         Option<i64>,
         Option<String>,
-    ) = raw
+    );
+    let original: ReopenState = raw
         .query_row(
             "SELECT closed_at, teardown_started_at, updated_at, port_offset, port_env
              FROM pipeline_item WHERE id = 'task-closed'",
@@ -261,13 +262,7 @@ fn reopen_failure_rolls_back_lifecycle_port_metadata_and_claims_exactly() {
         matches!(error, ReopenTaskError::Internal(ref message) if message.contains("injected reopen persistence failure")),
         "unexpected reopen error: {error:?}"
     );
-    let current: (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-    ) = Connection::open(&config.db_path)
+    let current: ReopenState = Connection::open(&config.db_path)
         .unwrap()
         .query_row(
             "SELECT closed_at, teardown_started_at, updated_at, port_offset, port_env
@@ -1156,7 +1151,7 @@ fn workspace_config_env_merges_values_and_resolves_path_entries_against_worktree
 fn task_creation_uses_one_remote_default_branch_definition_context() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard_blocking();
     let repo_root = init_git_repo_without_provider_fixtures("remote-task-creation-context");
     let mut config = test_config("remote-task-creation-context");
     let kanna_cli_sidecar = ensure_test_sidecar("kanna-cli");
@@ -2860,8 +2855,7 @@ fn read_agent_definition_rejects_malformed_provider_frontmatter() {
         let repo_root = write_agent_repo(label, &agent_md, None);
 
         let error = resolve_test_agent_definition(&repo_root, "reviewer")
-            .err()
-            .expect("malformed provider frontmatter should fail");
+            .expect_err("malformed provider frontmatter should fail");
 
         assert!(
             error.contains(expected),
@@ -2882,8 +2876,7 @@ fn read_agent_extension_rejects_malformed_provider_frontmatter() {
         );
 
         let error = resolve_test_agent_definition(&repo_root, "reviewer")
-            .err()
-            .expect("malformed provider extension should fail");
+            .expect_err("malformed provider extension should fail");
 
         assert!(
             error.contains(expected),
@@ -2925,8 +2918,7 @@ fn read_workflow_definition_rejects_malformed_provider_selections() {
         publish_origin_main(&repo_root, "publish malformed workflow provider");
 
         let error = resolve_test_workflow_definition(&repo_root, "qa")
-            .err()
-            .expect("malformed workflow provider selection should fail");
+            .expect_err("malformed workflow provider selection should fail");
 
         assert!(
             error.contains("agent_provider"),
@@ -2968,8 +2960,7 @@ fn read_workflow_definition_rejects_legacy_csv_provider_selections() {
         publish_origin_main(&repo_root, "publish legacy CSV workflow provider");
 
         let error = resolve_test_workflow_definition(&repo_root, "qa")
-            .err()
-            .expect("live workflow definitions must reject legacy CSV providers");
+            .expect_err("live workflow definitions must reject legacy CSV providers");
 
         assert!(
             error.contains("agent_provider"),
@@ -4285,7 +4276,7 @@ fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
 
 #[test]
 fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard_blocking();
     let mut config = test_config("spawn-env-kanna-cli-path");
     let kanna_cli_sidecar = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp_sidecar = ensure_test_sidecar("kanna-mcp");
@@ -5830,7 +5821,7 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
 
 #[test]
 fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard_blocking();
     let codex_sidecar = ensure_test_sidecar("codex");
     let repo_root = init_git_repo_without_provider_fixtures("codex-headless-executable");
     let config = test_config("codex-headless-executable");
@@ -5885,7 +5876,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
 
 #[test]
 fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution() {
-    let _sidecar_guard = crate::test_sidecar_guard();
+    let _sidecar_guard = crate::test_sidecar_guard_blocking();
     use std::os::unix::fs::PermissionsExt;
 
     let repo_root = init_git_repo("headless-workspace-path");

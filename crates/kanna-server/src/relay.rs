@@ -1551,16 +1551,6 @@ fn relay_exit_event(session_id: &str, code: i32) -> RelayMessage {
     }
 }
 
-fn relay_error_event(session_id: &str, message: String) -> RelayMessage {
-    RelayMessage::Event {
-        name: "terminal_error".to_string(),
-        payload: serde_json::json!({
-            "session_id": session_id,
-            "message": message,
-        }),
-    }
-}
-
 fn relay_tunnel_ksp_auth_mode() -> crate::ksp::AuthMode {
     crate::ksp::AuthMode::AlreadyAuthenticated
 }

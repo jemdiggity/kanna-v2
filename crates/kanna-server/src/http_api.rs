@@ -55,6 +55,8 @@ pub fn router(state: std::sync::Arc<AppState>) -> axum::Router {
     routes::router(state)
 }
 
+// Unauthenticated in-process dispatch is exercised only by route tests.
+#[cfg(test)]
 pub async fn dispatch_http_invoke(
     state: std::sync::Arc<AppState>,
     method: &str,

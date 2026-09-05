@@ -311,6 +311,8 @@ impl RuntimeEventSender {
 
     /// Non-blocking delivery for ordinary (non-companion) events whose lane
     /// must never wait on channel capacity, such as observed terminal output.
+    // Match Tokio try_send: callers receive the original event on full or closed channels.
+    #[allow(clippy::result_large_err)]
     pub(super) fn try_send(
         &self,
         event: RuntimeEvent,
@@ -609,6 +611,8 @@ pub(super) struct ListenerContext {
     pub(super) preauth_requests: Arc<Semaphore>,
 }
 
+pub(super) type CompanionObserverGenerations = Arc<Mutex<HashMap<(String, String), (u64, String)>>>;
+
 pub struct TransferRuntime {
     pub(super) config: RuntimeConfig,
     pub(super) discovery: PeerDiscovery,
@@ -630,7 +634,7 @@ pub struct TransferRuntime {
     pub(super) mark_read_peer_request_permits: Arc<Semaphore>,
     pub(super) receipt_events: Mutex<mpsc::Receiver<OutgoingTransferCommittedEvent>>,
     pub(super) companion_observers: Arc<Mutex<HashMap<(String, String), CompanionObserver>>>,
-    pub(super) companion_observer_generations: Arc<Mutex<HashMap<(String, String), (u64, String)>>>,
+    pub(super) companion_observer_generations: CompanionObserverGenerations,
     pub(super) owner_companion_observers:
         Arc<Mutex<HashMap<(String, String), OwnerCompanionObserver>>>,
     pub(super) active_owner_companions: Arc<AtomicUsize>,

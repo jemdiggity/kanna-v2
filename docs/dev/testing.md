@@ -12,10 +12,14 @@ It composes the individual lanes, which you can still run one at a time:
 
 ```sh
 pnpm test        # turbo-run JS/TS suites across the workspace
-./kd test rust   # Rust workspace tests
+./kd test rust   # strict Rust clippy, then workspace tests
 ```
 
-Plus the static checks: `pnpm exec tsc --noEmit`, `cargo clippy`,
+The Rust lane runs `cargo clippy --workspace --all-targets -- -D warnings`
+after building its prerequisites and before executing test binaries. Warnings
+in production code and test targets fail `./kd test all`.
+
+Plus the static checks: `pnpm exec tsc --noEmit`,
 `cargo fmt --all` (Rust formatter is pinned by `rust-toolchain.toml`).
 
 ## Test taxonomy

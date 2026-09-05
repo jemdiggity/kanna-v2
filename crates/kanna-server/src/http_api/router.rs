@@ -444,6 +444,8 @@ async fn log_error_responses(
     }
 }
 
+// Unauthenticated in-process dispatch is exercised only by route tests.
+#[cfg(test)]
 pub async fn dispatch_http_invoke(
     state: Arc<AppState>,
     method: &str,

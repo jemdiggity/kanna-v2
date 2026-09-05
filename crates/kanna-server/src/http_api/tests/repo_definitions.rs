@@ -695,10 +695,7 @@ async fn the_manifest_route_reads_local_refs_and_fetch_origin_refreshes_them() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let published_revision = manifest["revision"].as_str().unwrap().to_string();
-    assert_eq!(
-        workflow_names(&manifest).contains(&"second".to_string()),
-        false
-    );
+    assert!(!workflow_names(&manifest).contains(&"second".to_string()));
 
     // Publish a second workflow. Nothing has fetched, so the consumer's
     // remote-tracking ref still points at the first commit.

@@ -159,7 +159,7 @@ async fn wait_for_companion_registration_test_gate(generation: &str) {
 async fn wait_for_companion_registration_test_gate(_generation: &str) {}
 
 struct CompanionObserverRegistrationRollback {
-    latest_generations: Arc<Mutex<HashMap<(String, String), (u64, String)>>>,
+    latest_generations: super::state::CompanionObserverGenerations,
     incoming_sender: RuntimeEventSender,
     observer_key: (String, String),
     generation: String,
@@ -169,7 +169,7 @@ struct CompanionObserverRegistrationRollback {
 
 impl CompanionObserverRegistrationRollback {
     fn new(
-        latest_generations: Arc<Mutex<HashMap<(String, String), (u64, String)>>>,
+        latest_generations: super::state::CompanionObserverGenerations,
         incoming_sender: RuntimeEventSender,
         observer_key: (String, String),
         generation: String,
@@ -705,12 +705,12 @@ impl TransferRuntime {
         // Discovery can be delayed while an unobserve or replacement races this
         // request. Recheck the lease before the owner-epoch network round trip so
         // a displaced observer never reaches the peer at all.
-        if !self
+        if self
             .terminal_observers
             .lock()
             .await
             .get(&observer_lease_key)
-            .is_some_and(|slot| !slot.closed)
+            .is_none_or(|slot| slot.closed)
         {
             return Ok(());
         }
@@ -923,13 +923,15 @@ impl TransferRuntime {
             let (stream, observation_challenge) = tokio::time::timeout(
                 self.config.peer_request_timeout,
                 open_peer_companion_stream(
-                    target_peer.clone(),
-                    request_id.clone(),
-                    self.config.peer_id.clone(),
-                    task_id.to_owned(),
-                    generation.clone(),
-                    sealed_proof,
-                    stream_nonce.clone(),
+                    crate::runtime::companion::PeerCompanionOpen {
+                        peer: target_peer.clone(),
+                        request_id: request_id.clone(),
+                        requester_peer_id: self.config.peer_id.clone(),
+                        task_id: task_id.to_owned(),
+                        generation: generation.clone(),
+                        sealed_proof,
+                        stream_nonce: stream_nonce.clone(),
+                    },
                     &self.identity,
                 ),
             )
@@ -970,18 +972,20 @@ impl TransferRuntime {
                 return;
             }
             if let Err(error) = stream_peer_companion(
-                peer_for_task,
-                task_id.clone(),
-                generation_for_cleanup.clone(),
-                observer_order,
-                request_id_for_stream,
-                stream_nonce_for_stream,
-                observation_challenge_for_stream,
-                identity_for_stream,
-                incoming_sender.clone(),
+                crate::runtime::companion::PeerCompanionStream {
+                    peer: peer_for_task,
+                    task_id: task_id.clone(),
+                    generation: generation_for_cleanup.clone(),
+                    generation_order: observer_order,
+                    request_id: request_id_for_stream,
+                    stream_nonce: stream_nonce_for_stream,
+                    observation_challenge: observation_challenge_for_stream,
+                    identity: identity_for_stream,
+                    incoming_sender: incoming_sender.clone(),
+                    inbound_decode_slots,
+                    inbound_decode_budget,
+                },
                 stream,
-                inbound_decode_slots,
-                inbound_decode_budget,
             )
             .await
             {
@@ -1089,7 +1093,7 @@ impl TransferRuntime {
         };
         let registration = latest_generations
             .get(&observer_key)
-            .filter(|(_, current_generation)| current_generation == &generation)
+            .filter(|(_, current_generation)| current_generation == generation)
             .cloned();
         if let Some((generation_order, current_generation)) = &registration {
             remove_companion_observer_registration(

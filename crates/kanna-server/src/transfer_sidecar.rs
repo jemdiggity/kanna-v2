@@ -267,14 +267,6 @@ impl TransferEventLog {
 /// only bounds latency if a notification is ever missed.
 const EVENT_WAIT_RECHECK: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Environment handed to the sidecar process.
-///
-/// Every value has exactly one owner. The listen port and the daemon/database
-/// locations come from the server's own config — the same `transfer_port` the
-/// inbound tunnel bridge dials, so the two can never disagree. Peer identity
-/// and the transfer root are resolved by the desktop (it owns the Tauri app
-/// data dir and the machine name) and handed to the server at spawn.
-
 /// Frame classes whose older instances are superseded by a newer one for the
 /// same `(peer_id, task_id)`. Reliable classes (event results, errors) are
 /// never coalesced.
@@ -456,6 +448,13 @@ impl CompanionEventLog {
     }
 }
 
+/// Environment handed to the sidecar process.
+///
+/// Every value has exactly one owner. The listen port and the daemon/database
+/// locations come from the server's own config — the same `transfer_port` the
+/// inbound tunnel bridge dials, so the two can never disagree. Peer identity
+/// and the transfer root are resolved by the desktop (it owns the Tauri app
+/// data dir and the machine name) and handed to the server at spawn.
 pub fn build_transfer_sidecar_env(
     config: &crate::config::Config,
 ) -> Result<Vec<(String, String)>, String> {
@@ -828,11 +827,8 @@ fn spawn_companion_reader(
 ) {
     use tokio::io::AsyncReadExt;
     tokio::spawn(async move {
-        loop {
-            let length = match stream.read_u32().await {
-                Ok(length) => length as usize,
-                Err(_) => break,
-            };
+        while let Ok(length) = stream.read_u32().await {
+            let length = length as usize;
             if length == 0 || length > MAX_COMPANION_IPC_FRAME_BYTES {
                 log::error!(
                     "transfer sidecar companion IPC frame length {length} is outside the                      1..={MAX_COMPANION_IPC_FRAME_BYTES} bound"
@@ -1209,7 +1205,7 @@ mod tests {
     /// value has to travel rather than be re-derived.
     #[test]
     fn sidecar_env_takes_the_listen_port_from_the_server_config() {
-        let _guard = crate::test_sidecar_guard();
+        let _guard = crate::test_sidecar_guard_blocking();
         let root = std::env::temp_dir().join("kanna-transfer-env-test");
         clear_identity_env();
         std::env::set_var("KANNA_TRANSFER_ROOT", &root);
@@ -1254,7 +1250,7 @@ mod tests {
 
     #[test]
     fn sidecar_env_refuses_to_spawn_without_desktop_resolved_identity() {
-        let _guard = crate::test_sidecar_guard();
+        let _guard = crate::test_sidecar_guard_blocking();
         clear_identity_env();
         let error = build_transfer_sidecar_env(&test_config(4455, 48120))
             .expect_err("identity is required");
@@ -1303,10 +1299,9 @@ done
     /// The env guard has to span the awaits rather than be dropped before them:
     /// the sidecar is spawned lazily *inside* `control`, and that spawn is what
     /// reads the identity environment this test sets.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_dead_sidecar_is_replaced_rather_than_left_wedged() {
-        let _guard = crate::test_sidecar_guard();
+        let _guard = crate::test_sidecar_guard().await;
         let root = std::env::temp_dir().join(format!(
             "kanna-transfer-respawn-{}-{}",
             std::process::id(),

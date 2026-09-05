@@ -1405,6 +1405,8 @@ pub(in crate::task_creator) fn prepare_workspace_teardown_for_transition_close(
     Some(teardown)
 }
 
+// Keep the same explicit workspace inputs as prepare_workspace_teardown_with_extra below.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::task_creator) fn prepare_workspace_teardown(
     db: &Db,
     config: &Config,
@@ -2712,8 +2714,7 @@ fn prepare_task_spawn_with_error(
             &task_id,
             &branch,
             &resolved,
-            provisional_provider,
-            provisional_agent_type,
+            (provisional_provider, provisional_agent_type),
             has_requested_task_id,
         )?;
         if let Some(request_json) = create_intent_json.as_deref() {
@@ -3087,10 +3088,10 @@ fn insert_new_task_record(
     task_id: &str,
     branch: &str,
     resolved: &ResolvedTaskSpawn,
-    provider: AgentProvider,
-    agent_type: AgentSessionType,
+    agent: (AgentProvider, AgentSessionType),
     has_requested_task_id: bool,
 ) -> Result<(), PrepareTaskError> {
+    let (provider, agent_type) = agent;
     let agent_spawn_options_json = agent_spawn_options_json(resolved, provider)?;
     let result = db.insert_pipeline_item(NewPipelineItem {
         id: task_id,

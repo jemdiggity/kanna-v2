@@ -60,6 +60,8 @@ pub struct UpsertRemoteCompanionBridgeOutput {
     pub bridge_id: String,
 }
 
+// Tauri binds these individual arguments to the existing frontend invoke contract.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn upsert_remote_companion_bridge(
     window: tauri::WebviewWindow,
@@ -162,6 +164,8 @@ async fn set_remote_companion_bridge_state_inner(
         .await
 }
 
+// Tauri binds these individual arguments to the existing frontend invoke contract.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn set_remote_companion_event_result(
     window: tauri::WebviewWindow,

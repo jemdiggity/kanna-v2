@@ -558,10 +558,12 @@ impl TransferRuntime {
                     requester_peer_id: self.config.peer_id.clone(),
                     sealed_payload,
                 },
-                &request_id,
-                transfer_id,
-                artifact_id,
-                artifact_framing,
+                super::peer::ArtifactStreamRequest {
+                    request_id: &request_id,
+                    transfer_id,
+                    artifact_id,
+                    framing: artifact_framing,
+                },
                 &source_public_key,
             )
             .await?;

@@ -3262,12 +3262,14 @@ mod merge_handoff_on_close {
         .to_string()
     }
 
+    type RecordedInputs = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     struct Harness {
         config: Config,
         repo_root: std::path::PathBuf,
         daemon_dir: std::path::PathBuf,
         socket_path: PathBuf,
-        inputs: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        inputs: RecordedInputs,
     }
 
     impl Harness {
@@ -3430,8 +3432,8 @@ mod merge_handoff_on_close {
     /// A daemon that answers every command and records the session input it
     /// was handed. The close path and the merge signal each open their own
     /// connection, so this accepts as many as the server makes.
-    fn spawn_recording_daemon(listener: UnixListener) -> Arc<Mutex<Vec<(String, Vec<u8>)>>> {
-        let inputs: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    fn spawn_recording_daemon(listener: UnixListener) -> RecordedInputs {
+        let inputs: RecordedInputs = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&inputs);
         tokio::spawn(async move {
             loop {

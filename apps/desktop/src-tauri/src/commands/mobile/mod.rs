@@ -567,23 +567,6 @@ async fn adopt_native_desktop(daemon_dir: &Path) -> Result<(), String> {
     .map(|_| ())
 }
 
-async fn send_native_control_request_with_adoption(
-    daemon_dir: &Path,
-    request: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    match send_native_control_request(daemon_dir, request).await {
-        Ok(response) => Ok(response),
-        Err(first_error) => {
-            adopt_native_desktop(daemon_dir)
-                .await
-                .map_err(|adopt_error| {
-                    format!("{first_error}; native desktop re-adoption failed: {adopt_error}")
-                })?;
-            send_native_control_request(daemon_dir, request).await
-        }
-    }
-}
-
 async fn send_native_control_request(
     daemon_dir: &Path,
     request: &serde_json::Value,
@@ -1152,9 +1135,9 @@ mod tests {
         adopt_native_desktop, app_data_dir_for_server_config, current_server_version,
         default_desktop_name_from_sources, desktop_id, escape_toml_string,
         generate_uuid_v4_from_reader, is_current_server_status, listening_server_pid,
-        resolved_db_path, send_native_control_request_with_adoption, server_base_url,
-        server_stderr_log, stop_server_on_port, stopped_snapshot, MobilePairingSession,
-        MobileServerManager, MobileServerState, MobileServerStatus, WritePathHealth,
+        resolved_db_path, server_base_url, server_stderr_log, stop_server_on_port,
+        stopped_snapshot, MobilePairingSession, MobileServerManager, MobileServerState,
+        MobileServerStatus, WritePathHealth,
     };
     use crate::daemon_client::DaemonClient;
     use std::collections::HashMap;
@@ -1166,7 +1149,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
     use tokio::process::{Child, Command};
 
     const RESTART_ORDINARY_SESSION: &str = "shell-restart-ordinary";
@@ -1996,58 +1978,6 @@ mod tests {
         let _ = replacement_daemon.wait().await;
         cleanup_process_test_env();
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn visible_native_action_recovers_by_adopting_then_retrying() {
-        let daemon_dir = unique_test_root("native-action-readoption");
-        let socket_path = kanna_runtime_defaults::human_control_socket_path(&daemon_dir);
-        let _ = std::fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        let server = tokio::spawn(async move {
-            let mut actions = Vec::new();
-            for attempt in 0..3 {
-                let (stream, _) = listener.accept().await.unwrap();
-                let (read_half, mut write_half) = stream.into_split();
-                let mut line = String::new();
-                BufReader::new(read_half)
-                    .read_line(&mut line)
-                    .await
-                    .unwrap();
-                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-                actions.push(request["action"].as_str().unwrap().to_string());
-                if attempt == 0 {
-                    // A surviving server rejects the replacement desktop's
-                    // first action and closes without an authenticated reply.
-                    continue;
-                }
-                let body = if attempt == 2 {
-                    serde_json::json!({ "state": "overridden" })
-                } else {
-                    serde_json::Value::Null
-                };
-                let response = serde_json::json!({ "ok": true, "status": 200, "body": body });
-                write_half
-                    .write_all(format!("{response}\n").as_bytes())
-                    .await
-                    .unwrap();
-            }
-            actions
-        });
-        let request = serde_json::json!({
-            "action": "terminal_input",
-            "task_id": "task-merge",
-            "data_b64": "bWVyZ2U="
-        });
-        let response = send_native_control_request_with_adoption(&daemon_dir, &request)
-            .await
-            .unwrap();
-        assert!(response["ok"].as_bool().unwrap());
-        assert_eq!(
-            server.await.unwrap(),
-            vec!["terminal_input", "adopt_desktop", "terminal_input"]
-        );
-        let _ = std::fs::remove_file(socket_path);
     }
 
     #[tokio::test(flavor = "current_thread")]
