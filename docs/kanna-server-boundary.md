@@ -1099,6 +1099,15 @@ cursor-based, not snapshot-diffed:
   `payload.phase` identify what was retired. An operation that is merely
   *uncertain* is never retired — it stays durable until the daemon can answer
   for it.
+  A retirement never destroys committed work. A stage spawn whose `Spawn`
+  already crossed the daemon socket may have had its session created, so an
+  agent may have run and committed in the workspace it forked; retiring it
+  drops the stage move but keeps that workspace, and because the move never
+  landed nothing else in the record names it. `payload.retainedBranch` and
+  `payload.retainedWorktreePath` are then that branch and worktree, and the
+  reason names the branch too, so an operator can find the work. They are
+  `null` when nothing was kept — a pre-submission intent provably never
+  started, so its fresh fork is removed as before.
 - `task.transfer_finalizing` reports each step of a cross-machine transfer
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
