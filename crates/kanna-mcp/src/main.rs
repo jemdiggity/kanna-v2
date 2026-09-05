@@ -2012,7 +2012,7 @@ mod tests {
                 "method": "tools/call",
                 "params": {
                     "name": "kanna_guide",
-                    "arguments": { "topic": "agents" }
+                    "arguments": { "topic": "mobile" }
                 }
             }),
             "http://127.0.0.1:1",
@@ -2025,10 +2025,10 @@ mod tests {
             .as_str()
             .expect("guide tool text");
         let guide: Value = serde_json::from_str(text).expect("guide result json");
-        assert_eq!(guide["topic"], "agents");
+        assert_eq!(guide["topic"], "mobile");
         assert!(guide["content"]
             .as_str()
-            .is_some_and(|content| content.contains("# Kanna Agent Authoring")));
+            .is_some_and(|content| content.contains("# Kanna Mobile Previews")));
     }
 
     #[tokio::test]
@@ -2111,7 +2111,7 @@ mod tests {
         assert_eq!(tools[1]["name"], json!("kanna_list_machines"));
         assert_eq!(tools[2]["name"], json!("kanna_guide"));
         assert_eq!(tools[3]["name"], json!("kanna_custom_ping"));
-        assert_eq!(catalog.read().unwrap().guide_topics().len(), 4);
+        assert_eq!(catalog.read().unwrap().guide_topics().len(), 5);
         let output = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
         assert_eq!(
             output,

@@ -20,12 +20,12 @@
     },
     {
       "name": "kanna_guide",
-      "description": "Read the Kanna manual for authoring repository config, workflows, agents, or for operating tasks. The content comes from the running adapter's hot-reloadable tool catalog, so it matches the Kanna version exposing this tool.",
+      "description": "Read the Kanna manual for authoring repository config, workflows, agents, operating tasks, or making dev servers and visual companions available in Kanna Mobile (topic: mobile). The content comes from the running adapter's hot-reloadable tool catalog, so it matches the Kanna version exposing this tool.",
       "method": "GET",
       "path": "",
       "response": "guide",
       "params": [
-        { "name": "topic", "description": "Manual topic to read.", "type": "string", "required": true, "location": "body", "enum": ["config", "workflows", "agents", "tasks"] }
+        { "name": "topic", "description": "Manual topic to read.", "type": "string", "required": true, "location": "body", "enum": ["config", "workflows", "agents", "tasks", "mobile"] }
       ]
     },
     {
@@ -533,6 +533,33 @@
         {
           "title": "Inputs and task terms",
           "body": "Delivered input is durable and readable through `kanna_task_inputs`; terminal bytes alone are not the record. A non-zero `deliveredInputCount` means instruction history exists. Keep the task's actual terms in `docs/task-specs/<task-id>.md` and update it with owner directives or review decisions so later stages in fresh worktrees share the same contract.",
+          "schemaPaths": []
+        }
+      ]
+    },
+    {
+      "topic": "mobile",
+      "title": "Kanna Mobile Previews",
+      "summary": "Read this topic with `kanna-cli guide mobile` or `kanna_guide {\"topic\":\"mobile\"}`. Make a task web app available with dev-server Preview on LAN, or share an HTML visual companion on LAN and through the authenticated relay. These are separate features; a localhost URL printed in the terminal does not expose a server to the phone.",
+      "sections": [
+        {
+          "title": "Dev server: declare, start, verify",
+          "body": "Declare the server's port in the repository's `.kanna/config.json`, for example `\"ports\": { \"WEB_PORT\": 5173 }` (see `kanna-cli guide config`). Kanna claims task-specific ports when creating the workspace and exports their values. Read `kanna_get_task` (CLI: `kanna-cli tool call kanna_get_task --arg task_id=\"$KANNA_TASK_ID\"`) and check its `ports` array; use the claimed value, not the base number. Editing config or exporting a new variable alone does not claim a port for an already-running task. If the required port is absent, configure it before creating the next workspace and verify its task detail. Follow the repository's canonical dev command; for a Vite repository without a wrapper, an example is `pnpm exec vite --host 127.0.0.1 --port \"$WEB_PORT\" --strictPort`. Check `curl -I \"http://127.0.0.1:$WEB_PORT/\"` and the server log. Keep the process running for the user's preview and stop processes you started when finished, following the task's lifecycle instructions.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Dev server: mobile access and limits",
+          "body": "Have the paired phone connect to the owning desktop over LAN, open this task, tap Preview (also in Task Actions), and select the declared web port if several are listed. The desktop proxies plain HTTP to `127.0.0.1` at that claimed port; the dev server need not bind to `0.0.0.0`. Preview supports HTTP and WebSocket forwarding, Refresh/Retry, and Open preview in browser (Safari on iOS). It is currently LAN-only: relay-only connections do not offer dev-server Preview. There is no public/shareable URL to generate and no need to manually create preview credentials. HTTPS upstreams and undeclared ports are unsupported. Response bodies are not rewritten: app URLs hard-coded to localhost, separate API ports, or HMR addresses can still point at the phone; prefer same-origin URLs and the dev server's own API proxy. If Preview is missing, check LAN routing, desktop support, and task port claims. If it reports not listening, check the selected claimed port and the local HTTP server. Closing the preview releases its session; closing the task or releasing its port invalidates access.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Visual companion: publish task-owned HTML",
+          "body": "In this task's current worktree, create `.superpowers/brainstorm/<session-id>/content/` and `state/` beside it. Write UTF-8 HTML to `content/screen.html` and a JSON metadata file to `state/server-info`; `{}` is sufficient for a file-only companion. There must be no `state/server-stopped` marker for an active session. For example, from the worktree root:\n\n```sh\ncompanion_dir=\".superpowers/brainstorm/mobile-demo\"\nmkdir -p \"$companion_dir/content\" \"$companion_dir/state\"\nprintf '%s\\n' '<h1>Design preview</h1><p>Ready for feedback.</p>' > \"$companion_dir/content/screen.html\"\nprintf '%s\\n' '{}' > \"$companion_dir/state/server-info\"\n```\n\nUse a fresh session id or the existing companion tool's active session. Kanna discovers these files automatically; no dev-server port claim or HTTP server is required for mobile companion delivery. Existing companion tooling can continue to manage the same layout. The most recently modified eligible `.html` file across active sessions is selected, so update the intended file and retire stale sessions by writing `state/server-stopped`. Keep files inside the worktree without symlinks. A normal stage transition changes worktrees; runtime files left behind do not automatically publish in the new workspace.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Visual companion: mobile rendering and feedback",
+          "body": "On the paired phone, open the task and tap Visual companion ready. Kanna streams the current document and subsequent updates over LAN or the authenticated relay. Use a self-contained HTML fragment or full document with inline CSS and inline JavaScript. Mobile blocks fetch/WebSocket connections, external scripts/styles, frames, form submission, and navigation; this is not a full dev-app browser. Keep source HTML within 1 MiB and images small. Supported local image references in the content directory can be inlined within size limits; do not rely on arbitrary filesystem paths or an asset server. For interactive choices use the companion's `toggleSelect(this)` helper on elements with `data-choice`; accepted click feedback is appended to the active session's `state/events` JSONL file. Read that file rather than assuming clicks arrive as terminal input. If the companion is unavailable, check the current worktree, server-info/server-stopped markers, newest HTML, file permissions, and content limits. Tell the user which task and mobile action to open, and whether you verified the rendered result or only the source.",
           "schemaPaths": []
         }
       ]
