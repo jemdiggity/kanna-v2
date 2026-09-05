@@ -1873,6 +1873,16 @@ fn missing_remote_custom_definitions_fall_back_only_to_compiled_builtins() {
     );
     assert_eq!(definitions.agent("review").unwrap().name, "review");
 
+    for name in ["singleton-merge", "singleton-task-manager"] {
+        let error = definitions.workflow(name).unwrap_err();
+        assert!(error.contains("kanna_signal_agent"), "{error}");
+        assert!(error.contains("kanna_signal_merge_handoff"), "{error}");
+        assert!(
+            error.contains("atomically claim account-wide ownership"),
+            "{error}"
+        );
+    }
+
     let workflow_error = definitions.workflow("remote-only").unwrap_err();
     assert!(
         workflow_error.contains("compiled resource not found")

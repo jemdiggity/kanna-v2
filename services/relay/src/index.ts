@@ -958,7 +958,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.warn(`[cloud] Repository singleton lookup failed for ${userId}: ${message}`);
-          sendErrorResponse(ws, publication.id, "repository singleton directory is unavailable");
+          sendErrorResponse(ws, publication.id, `repository singleton directory is unavailable: ${message}`);
         }
         return;
       }
@@ -1002,7 +1002,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.warn(`[cloud] Repository singleton claim failed for ${userId}: ${message}`);
-          sendErrorResponse(ws, publication.id, "repository singleton ownership is unavailable");
+          sendErrorResponse(ws, publication.id, `repository singleton ownership is unavailable: ${message}`);
         }
         return;
       }

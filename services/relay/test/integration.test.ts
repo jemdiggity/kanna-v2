@@ -2473,7 +2473,7 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
-  it("atomically elects one owner after concurrent desktops both discover singleton absence", async () => {
+  it.each(["absent", "unowned", "closed-owner"])("atomically elects one owner for a %s singleton record", async (recordState) => {
     const userId = `singleton-race-${Date.now()}`;
     const userRef = testFirestore.doc(`users/${userId}`);
     await Promise.all(["desktop-a", "desktop-b"].map(async (desktopId) => {
@@ -2482,6 +2482,13 @@ describe("Relay integration", () => {
         singletonDirectoryVersion: 1,
       });
     }));
+    if (recordState !== "absent") {
+      const key = sha256Hex("shared-remote-hash\0task-manager");
+      await userRef.collection("repoSingletonClaims").doc(key).set({
+        remoteUrlHash: "shared-remote-hash", agent: "task-manager", state: "owned",
+        ...(recordState === "closed-owner" ? { machineId: "desktop-a", taskId: "closed-task" } : {}),
+      });
+    }
     const bothAbsent = deferredVoid();
     let absenceDiscoveries = 0;
     const afterAbsenceDiscovery = async () => {
@@ -2743,17 +2750,30 @@ describe("Relay integration", () => {
     const userId = `singleton-publication-${Date.now()}`;
     const desktopId = "singleton-publication-desktop";
     const userRef = testFirestore.doc(`users/${userId}`);
-    const store = createFirestoreCloudTaskPublicationStore(testFirestore);
+    let rejectClose = false;
+    let verifyRelease = false;
+    let verifiedRelease = false;
+    const store = createFirestoreCloudTaskPublicationStore(testFirestore, {
+      onTaskDocumentWrite(kind) {
+        if (rejectClose && kind === "delete") throw new Error("injected close failure");
+      },
+      async afterTaskBatch() {
+        if (!verifyRelease) return;
+        expect((await userRef.collection("desktops").doc(desktopId).collection("tasks").get()).empty).toBe(true);
+        expect((await userRef.collection("repoSingletonClaims").get()).empty).toBe(true);
+        verifiedRelease = true;
+      },
+    });
     try {
       const session = await beginCloudTaskPublicationSession({ userId, desktopId, store });
       await handleCloudTaskPublication({
         userId,
         desktopId,
         generation: { session, sequence: 1 },
-        snapshot: publishedSnapshot("idle", [publishedTask("idle", {
+        snapshot: { ...publishedSnapshot("idle", [publishedTask("idle", {
           ownerDesktopId: desktopId,
           singletonAgent: "merge",
-        })]),
+        })]), singletonDirectoryVersion: 1 },
         store,
       });
       let claims = await userRef.collection("repoSingletonClaims").get();
@@ -2766,15 +2786,35 @@ describe("Relay integration", () => {
         agent: "merge",
       });
 
+      // Directory ownership persists without an active websocket. An offline
+      // open owner is not an unowned record and must never be replaced.
+      await expect(claimRepoSingleton({
+        userId, remoteUrlHash: "remote-hash", agent: "merge", machineId: "contender",
+        taskId: "rival", creatorFence: "rival-creator", db: testFirestore,
+      })).resolves.toMatchObject({ status: "owned", machineId: desktopId, taskId: "task-cloud-publish" });
+      rejectClose = true;
+      await expect(handleCloudTaskPublication({
+        userId, desktopId, generation: { session, sequence: 2 },
+        snapshot: { ...publishedSnapshot("idle", []), singletonDirectoryVersion: 1 }, store,
+      })).rejects.toThrow("injected close failure");
+      expect((await userRef.collection("repoSingletonClaims").get()).docs).toHaveLength(1);
+      expect((await userRef.collection("desktops").doc(desktopId).collection("tasks").get()).docs).toHaveLength(1);
+      rejectClose = false;
+      verifyRelease = true;
       await handleCloudTaskPublication({
         userId,
         desktopId,
         generation: { session, sequence: 2 },
-        snapshot: publishedSnapshot("idle", []),
+        snapshot: { ...publishedSnapshot("idle", []), singletonDirectoryVersion: 1 },
         store,
       });
       claims = await userRef.collection("repoSingletonClaims").get();
       expect(claims.empty).toBe(true);
+      expect(verifiedRelease).toBe(true);
+      await expect(claimRepoSingleton({
+        userId, remoteUrlHash: "remote-hash", agent: "merge", machineId: desktopId,
+        taskId: "replacement", creatorFence: "replacement-creator", db: testFirestore,
+      })).resolves.toMatchObject({ status: "acquired", machineId: desktopId, taskId: "replacement" });
     } finally {
       await testFirestore.recursiveDelete(userRef);
     }

@@ -520,22 +520,55 @@ reservation, and only when the proposed task id is absent. A snapshot carrying
 the reservation's fence, a snapshot without a fence, or any other desktop's
 snapshot is not authoritative for this purpose. Explicit failure cleanup is
 also fenced to the creator process and the matching machine/task identity.
-Cloud snapshot reconciliation otherwise promotes the matching reservation to a
-durable owner and conditionally deletes that claim when the owning open task is
-removed, so another desktop's claim can never be overwritten or released.
-One remote match receives the message through the existing
-task-input route. Two or more open matches are an existing-world duplicate:
-resolution logs and returns every `machineId:taskId` owner instead of choosing
-one.
+Cloud snapshot reconciliation promotes a matching reservation to a durable owner.
+Closing a singleton removes its local ownership in the same SQLite transaction
+that writes `closed_at`; there is no separate local claim table. The cloud
+projection is a separate database: its task removal and conditional claim
+release now commit in one Firestore transaction, fenced by publication session
+and sequence and by the old machine/task identity. SQLite and Firestore are not
+one distributed transaction. Before account-wide discovery, the requesting
+server publishes its current snapshot and awaits the relay acknowledgement;
+reachable siblings do the same before replying to native singleton lookup.
+Thus the subsequent claim sees a known close without waiting for the periodic
+publisher. Publication failure returns a specific 503 and creates nothing.
 
-Resolution fails closed. A signed-in server that cannot list siblings, cannot
-complete any native lookup, or loses the discovered owner before input
-delivery returns an error and never creates a replacement. The durable
-directory plus successfully observed live owner sets ensure a later signal
-still names and refuses an owner that has gone offline; only a successful live
-lookup proving that task closed overrides its stale directory row. There is no
-implicit takeover. A future takeover surface must be explicitly named and
-must durably supersede or close the stranded task when its machine reconnects.
+An absent or unowned claim is reclaimable, including a present record without
+an owner identifier. In this protocol `desktopId` identifies the publishing
+desktop document, `ownerDesktopId` identifies a published task's owner, and
+`machineId` identifies the claim's owner. They are not interchangeable optional
+fields on one record. An `owned` claim whose task is absent from that owner's
+complete authoritative directory is also reclaimable. The relay re-reads the
+directory and claim within its claim transaction and replaces unowned/stale
+records with the new fenced reservation. Two simultaneous requesters therefore
+still elect one master. A `reserved` claim remains exclusive until the existing
+creator-fence recovery rules prove its creator is gone. There is one additional
+positive proof: its task has committed a local close. The close lifecycle sends
+the existing conditional reservation release with its creator fence, covering
+creation followed by close before the first task publication. If that release
+failed, a later handoff asks the claiming desktop to prove the reserved task
+closed and release it with its own fence, then re-enters arbitration. The local
+case calls this directly; siblings use the privileged internal
+`POST /v1/tasks/{task_id}/actions/release-closed-singleton-reservation` route,
+which returns false for an open or nonexistent task and never closes a task. This never clears an
+unpersisted creator or an open task; a failed release is logged and a restart
+still uses the existing different-process-fence recovery.
+
+One remote match receives the message through the existing task-input route.
+Two or more open matches return a conflict naming every `machineId:taskId`.
+An open owner on an unreachable desktop remains owned: a 503 names the task,
+owner machine, and failed operation. Missing/incomplete directory information,
+failed publication, and an in-progress reservation also have distinct 503
+reasons; none proves a safe takeover. No implicit takeover of a potentially
+live task is permitted.
+
+Operators/managers deliberately re-seed a Merge Master with
+`kanna_signal_merge_handoff` for the source task, or `kanna_signal_agent` with
+`agent: "merge"` and an initial request. Other singleton agents use the latter
+surface with their agent name. These are find-or-create recovery operations:
+all pass through the same account-wide arbitration. Synthetic `singleton-*`
+workflows remain internal implementation definitions, not independently
+creatable resources that could bypass ownership. The ordinary task creation
+workflow name is not the recovery API.
 Repositories without `remote_url_hash` have no cross-machine identity and
 deliberately keep the original per-machine behavior. A desktop without an
 account credential likewise has no sibling namespace; when account routing

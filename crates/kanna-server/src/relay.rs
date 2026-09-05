@@ -39,6 +39,9 @@ const RELAY_CONNECTION_TIMING: RelayConnectionTiming = RelayConnectionTiming {
 };
 
 enum PendingDesktopRequest {
+    PublishTaskSnapshot {
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     ListActive {
         response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
     },
@@ -387,6 +390,24 @@ async fn run_relay_loop_with_timing(
                     );
                     next_desktop_request_id = next_desktop_request_id.wrapping_add(1).max(1);
                     let (request_generation, message, pending) = match request {
+                        http_api::DesktopRelayRequest::PublishTaskSnapshot { generation, response } => {
+                            let snapshot = match db.ui_snapshot() {
+                                Ok(snapshot) => map_ui_snapshot_for_publication(
+                                    &config.desktop_id,
+                                    &config.desktop_name,
+                                    crate::agent_inventory::installed_agent_providers(),
+                                    snapshot,
+                                    &mut resting_snippets,
+                                ).with_singleton_reservation_fence(&singleton_reservation_fence),
+                                Err(error) => {
+                                    let _ = response.send(Err(format!("singleton publication snapshot: {error}")));
+                                    continue;
+                                }
+                            };
+                            (generation, RelayMessage::TaskSnapshotPublish {
+                                id: id.clone(), snapshot,
+                            }, PendingDesktopRequest::PublishTaskSnapshot { response })
+                        }
                         http_api::DesktopRelayRequest::ListActive { generation, response } => (
                             generation,
                             RelayMessage::Invoke {
@@ -793,6 +814,19 @@ async fn run_relay_loop_with_timing(
                             error,
                             retryable,
                         } => {
+                            if let Some(PendingDesktopRequest::PublishTaskSnapshot { response }) =
+                                pending_desktop_requests.remove(&id)
+                            {
+                                let result = if ok {
+                                    Ok(())
+                                } else {
+                                    Err(error.unwrap_or_else(|| {
+                                        "singleton publication refused".to_string()
+                                    }))
+                                };
+                                let _ = response.send(result);
+                                continue;
+                            }
                             if let Err(message) =
                                 publisher.on_ack(&id, ok, retryable, error.clone(), Instant::now())
                             {
@@ -1253,6 +1287,9 @@ async fn send_response(
 
 fn fail_pending_desktop_request(request: PendingDesktopRequest, error: String) {
     match request {
+        PendingDesktopRequest::PublishTaskSnapshot { response } => {
+            let _ = response.send(Err(error));
+        }
         PendingDesktopRequest::ListActive { response } => {
             let _ = response.send(Err(error));
         }
@@ -1279,6 +1316,12 @@ fn resolve_pending_desktop_request(
     body: Option<serde_json::Value>,
 ) {
     match request {
+        PendingDesktopRequest::PublishTaskSnapshot { response } => {
+            let _ =
+                response.send(Err(error.unwrap_or_else(|| {
+                    "expected task publication acknowledgement".to_string()
+                })));
+        }
         PendingDesktopRequest::ListActive { response } => {
             let result = match error {
                 Some(error) => Err(error),
@@ -4005,7 +4048,7 @@ mod tests {
             let auth: serde_json::Value = serde_json::from_str(&auth).expect("parse auth");
             assert_eq!(auth["type"], "auth");
             ws.send(TungsteniteMessage::Text(
-                serde_json::json!({ "type": "auth_ok", "userId": "user-1" })
+                serde_json::json!({ "type": "auth_ok", "userId": "user-1", "capabilities": { "desktopRouting": { "version": 1 } } })
                     .to_string()
                     .into(),
             ))
@@ -4074,7 +4117,7 @@ mod tests {
         };
         let database = db::Db::open_for_tests(&db_path).expect("open test database");
         let state = Arc::new(http_api::AppState::new(config.clone()));
-        let relay_loop = run_relay_loop(config, database, state);
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
         tokio::pin!(relay_loop);
 
         let publications = tokio::time::timeout(Duration::from_secs(15), async {
@@ -4088,6 +4131,22 @@ mod tests {
                         .expect("disconnect first relay connection without ack");
                     let (second_id, second_snapshot, mut second_connection) =
                         receive_publication(&listener).await;
+                    let publication_state = Arc::clone(&state);
+                    let barrier = tokio::spawn(async move { publication_state.publish_task_snapshot_now().await });
+                    loop {
+                        let message = second_connection.next().await.expect("barrier publication").expect("valid frame");
+                        let TungsteniteMessage::Text(text) = message else { continue; };
+                        let message: serde_json::Value = serde_json::from_str(&text).expect("valid publication");
+                        let Some(id) = message["id"].as_str() else { continue; };
+                        if message["type"] != "task_snapshot_publish" || !id.starts_with("desktop-request:") { continue; }
+                        assert!(!barrier.is_finished(), "publication barrier must wait for acknowledgement");
+                        assert_eq!(message["snapshot"]["singletonReservationFence"], second_snapshot["singletonReservationFence"]);
+                        second_connection.send(TungsteniteMessage::Text(serde_json::json!({
+                            "type": "task_snapshot_ack", "id": id, "ok": true,
+                        }).to_string().into())).await.expect("ack barrier");
+                        break;
+                    }
+                    barrier.await.expect("barrier join").expect("barrier acknowledged");
                     second_connection
                         .close(None)
                         .await
