@@ -24,7 +24,7 @@ pub(crate) enum Commands {
     },
     /// Print the generated Kanna task manual for the current spawned task
     Guide {
-        /// Optional manual topic: config, workflows, agents, or tasks
+        /// Optional manual topic: config, workflows, agents, tasks, or mobile
         topic: Option<String>,
 
         /// Print machine-readable JSON

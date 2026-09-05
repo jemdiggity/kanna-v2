@@ -78,7 +78,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     assert!(guide.contains("arrays never concatenate"));
     assert!(guide.contains("https://schemas.kanna.build/config.schema.json"));
     assert!(guide.contains("## Further Topics"));
-    for topic in ["config", "workflows", "agents", "tasks"] {
+    for topic in ["config", "workflows", "agents", "tasks", "mobile"] {
         assert!(guide.contains(&format!("`kanna-cli guide {topic}`")));
     }
     for tool in kanna_tool_catalog::bundled_catalog().tools {
@@ -106,6 +106,20 @@ fn topic_guides_render_from_the_catalog_without_live_task_state() {
     assert!(json["sections"]
         .as_array()
         .is_some_and(|sections| !sections.is_empty()));
+
+    let mut mobile = Vec::new();
+    run_topic_guide_command(&catalog, "mobile", false, &mut mobile).unwrap();
+    let mobile = String::from_utf8(mobile).unwrap();
+    assert_eq!(mobile.trim_end(), catalog.render_guide("mobile").unwrap());
+    assert!(mobile.contains("LAN-only"));
+    assert!(mobile.contains("state/server-info"));
+    assert!(mobile.contains("state/events"));
+    let mobile_json = crate::commands::guide::render_topic_guide_json(&catalog, "mobile").unwrap();
+    assert_eq!(mobile_json["topic"], "mobile");
+    assert_eq!(
+        mobile_json["sections"][0]["body"],
+        catalog.guide("mobile").unwrap().sections[0].body
+    );
 
     let error = run_topic_guide_command(&catalog, "missing", false, &mut Vec::new())
         .expect_err("unknown topic");

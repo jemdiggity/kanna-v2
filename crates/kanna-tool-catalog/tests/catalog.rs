@@ -63,7 +63,7 @@ fn bundled_guides_are_topic_addressable_and_drive_schema_descriptions() {
     let catalog = bundled_catalog();
     assert_eq!(
         catalog.guide_topics(),
-        vec!["config", "workflows", "agents", "tasks"]
+        vec!["config", "workflows", "agents", "tasks", "mobile"]
     );
     let config = catalog.render_guide("config").expect("config guide");
     assert!(config.contains("# Kanna Repository Configuration"));
@@ -1345,7 +1345,7 @@ fn load_catalog_uses_override_and_falls_back_with_warning() {
     assert_eq!(loaded.catalog.tools[3].name, "kanna_test_tool");
     assert_eq!(
         loaded.catalog.guide_topics(),
-        vec!["config", "workflows", "agents", "tasks"]
+        vec!["config", "workflows", "agents", "tasks", "mobile"]
     );
     assert_eq!(
         loaded.watch_source.as_deref(),
