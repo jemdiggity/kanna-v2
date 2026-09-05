@@ -1521,6 +1521,20 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
   });
 
+  it("pins the cleared native multiline input to one line after Send", () => {
+    let tree = renderTaskScreen({
+      agentType: "agent",
+      draftInput: "First line\nSecond line\nThird line"
+    });
+    pressSend(tree);
+    tree = renderTaskScreen({ agentType: "agent" });
+    const inputAfterSend = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+
+    expect(inputAfterSend?.props?.value).toBe("");
+    expect(styleEntries(inputAfterSend)).toContainEqual({ height: 40 });
+    expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
+  });
+
   it("submits the latest composed multiline paste as one authoritative input", () => {
     const tree = renderTaskScreen({ agentType: "pty", draftInput: "" });
     const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);

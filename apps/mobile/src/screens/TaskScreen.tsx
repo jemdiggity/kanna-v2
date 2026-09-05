@@ -1206,6 +1206,11 @@ export function TaskScreen({
               scrollEnabled={false}
               style={[
                 styles.inputField,
+                // Fabric can retain a multiline TextInput's intrinsic native
+                // height after its controlled value becomes empty. Pin the
+                // empty input to one line on the existing native view; omit
+                // the height while editing so it can still report soft wraps.
+                !draftInput ? { height: TASK_COMPOSER_MIN_HEIGHT } : null,
                 isComposerDisabled ? styles.inputFieldDisabled : null
               ]}
               testID={MOBILE_E2E_IDS.taskInput}
