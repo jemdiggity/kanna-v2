@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
-import { execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
+import { getVueState, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { appendE2ePerfSummaryLine, formatDiffPerfSummary } from "../helpers/perfOutput";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
