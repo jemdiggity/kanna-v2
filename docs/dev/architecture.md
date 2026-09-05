@@ -275,8 +275,8 @@ definitions and close behavior are in [`AGENTS.md`](../../AGENTS.md) under
 and the user-facing task flows, close steps, shortcuts, and the **revision
 contracts** — provider-neutral session resume, the default budget of 5
 agent-requested rounds (`0` = unlimited), exhausted-agent parking vs. the
-human reset, and the committed task spec at `docs/task-specs/<task-id>.md`
-that later stages review against — are in
+human reset, and the prompt-plus-delivered-input terms that later stages review
+against — are in
 [Product Behavior](product-behavior.md).
 
 ### Beyond the desktop: events, inputs, and the cloud path

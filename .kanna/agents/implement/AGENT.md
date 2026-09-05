@@ -11,40 +11,6 @@ Do not push a branch or create a pull request unless this stage's prompt explici
 
 For changes to UI feel or interaction — gestures, animation, or dynamic layout — complete simulator verification, then stop at the manual stage for human on-device testing instead of proceeding toward review. Iterate owner feedback in this same session so the human-approved polish stays in one task.
 
-## The Task Spec
-
-Write this task's terms down where the rest of the workflow can read them:
-`docs/task-specs/$KANNA_TASK_ID.md`, committed with the work. Later stages run
-in forked worktrees with fresh sessions, so this file — not your session, not
-the stage prompt, and not the messages you were sent — is what a reviewer reads
-to learn what the task means.
-
-Create it early, before the bulk of the work, seeded from the task prompt:
-goal, scope (what is in and what is deliberately out), constraints, and what
-makes the work done. Keep it as short as the task allows — for a one-line fix a
-three-line spec is a correct spec. What is required is that it exists and is
-true, not that it is long.
-
-Update it whenever the terms change, in the same commit as the work that change
-produced:
-
-- A directive delivered mid-task — an owner changing their mind, a manager
-  relaying a decision — is a change to the terms, not a passing remark. Record
-  what it changed and cite it (who said it, when, and what it said), and do not
-  quietly drop the term it replaced.
-- Reviewer feedback, and anything a human tells you during a revision, land the
-  same way. The file's current content is the contract; its history is how the
-  contract got there.
-- If you decline part of the task or a review finding, say so in the spec as
-  well as in your summary. A scope decision that lives only in a run summary is
-  invisible to the next round.
-
-A spec the code has outgrown is worse than none, because the next reviewer
-believes it. Before you finish, reread it against what you actually changed.
-
-If this repository's conventions document names a different location for this
-file, that location wins; there is one spec per task either way.
-
 ## Scope
 
 Deliver what the task asks for, completely — and stop there. Do not widen the task: no refactors, rewrites, or re-architecture the task does not require, no features nobody asked for, and no adjacent cleanup you happen to notice. If you find a real problem outside the task, say so in your summary and leave it alone; growing one task into a project is worse than leaving a known issue for its own task.

@@ -61,12 +61,9 @@ semantics, and the MCP task-management rule — stay in the repo-root
   This is also the documented recovery when a human decides a task should get
   another pass after an automatic round was consumed incorrectly; no separate
   counter-repair operation exists.
-- *The task's terms live in its committed spec* —
-  `docs/task-specs/<task-id>.md`, written by the implement agent, updated in
-  the same commits as the work, and judged by later review stages
-  ([`docs/specs/task-spec-artifact.md`](../specs/task-spec-artifact.md)).
-  Reviewer feedback and scope decisions land there, so a revision round
-  changes the spec as well as the code.
+- *The task's terms live in its original prompt and durable delivered-input
+  history.* Later review stages assess the branch against the prompt plus the
+  owner, manager, and reviewer directives recorded by `kanna_task_inputs`.
 
 **Manual intervention:**
 1. Cmd+J → shell modal opens in the task's worktree

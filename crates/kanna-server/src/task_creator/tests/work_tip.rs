@@ -4,8 +4,8 @@
 //! resumes the implement run — which rewinds `pipeline_item.branch` to that
 //! run's older workspace — while the round's commit lands in the reviewer's
 //! fork. Forking the next review workspace from the rewound branch dropped the
-//! round's commit, so the next reviewer re-raised the identical finding. See
-//! `docs/task-specs/48a0da30.md`.
+//! round's commit, so the next reviewer re-raised the identical finding. The
+//! regression is covered by the tests below.
 
 use super::revision::{write_resume_transcript, RESUME_SESSION_UUID};
 use super::*;

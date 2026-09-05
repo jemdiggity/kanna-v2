@@ -253,16 +253,14 @@ with file and line, no "also consider", no open-ended "harden this area". The
 `implement` agent's half of the contract: on a revision run, fix exactly what
 the feedback names, and report anything out of scope instead of building it.
 
-What "the task" means for that bar is the branch's committed spec,
-`docs/task-specs/<task-id>.md` — not the stage prompt, and not a reviewer's
-reconstruction of intent from the prompt plus the delivered-input ledger. The
-dispatcher reads it before selecting specialties and names it in every child
-prompt, so the panel judges the change on one statement of the terms instead of
-inheriting a fresh reading each round. `kanna_task_inputs` remains the audit
-trail behind it: a spec that misstates a delivered directive is a finding
-against the spec, never grounds for a reviewer to substitute its own reading.
-A missing or stale spec is itself a blocking finding. See
-[task-spec-artifact](task-spec-artifact.md).
+What "the task" means for that bar is the original task prompt plus the
+durable owner, manager, and reviewer directives delivered during the task. The
+dispatcher reads the full `kanna_task_inputs` history before selecting
+specialties and passes the reviewed task id and prompt context to every child,
+so the panel assesses the same prompt-plus-ledger terms each round. A later
+directive supersedes an earlier term when they conflict. The ledger remains an
+audit trail of delivered input, not terminal output, and no separate committed
+task document is required.
 
 ### Incremental rounds
 
