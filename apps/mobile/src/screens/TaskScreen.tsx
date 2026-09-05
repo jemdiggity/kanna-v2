@@ -182,7 +182,7 @@ function composerInputStatusMessage(
     case "delivered":
       return "Input accepted by the desktop; agent processing is not confirmed yet.";
     case "queued":
-      return "Input queued behind the desktop’s unsent draft. It will send after that draft is submitted.";
+      return "Input queued behind an unsent draft at the desktop terminal. Kanna keeps it and sends it once that draft is submitted or cleared — don't send it again.";
     case "failed":
       return `Input was not sent: ${outcome.message} Your text is still here.`;
     case "uncertain":
