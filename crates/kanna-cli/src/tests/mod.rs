@@ -62,6 +62,43 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_list_transfer_peers",
+            TypedToolSurface {
+                command_path: &["machine", "transfer-peers"],
+                param_args: &[],
+            },
+        ),
+        (
+            "kanna_task_transfers",
+            TypedToolSurface {
+                command_path: &["task", "transfers"],
+                param_args: &[("task_id", "task_id")],
+            },
+        ),
+        (
+            "kanna_push_task",
+            TypedToolSurface {
+                command_path: &["task", "push"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("to_machine", "to_machine"),
+                    ("transport", "transport"),
+                    ("intent_key", "intent_key"),
+                ],
+            },
+        ),
+        (
+            "kanna_pull_task",
+            TypedToolSurface {
+                command_path: &["task", "pull"],
+                param_args: &[
+                    ("source_task_id", "source_task_id"),
+                    ("from_machine", "from_machine"),
+                    ("transport", "transport"),
+                ],
+            },
+        ),
+        (
             "kanna_guide",
             TypedToolSurface {
                 command_path: &["guide"],

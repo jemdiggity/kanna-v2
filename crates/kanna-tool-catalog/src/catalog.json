@@ -29,6 +29,16 @@
       ]
     },
     {
+      "name": "kanna_list_transfer_peers",
+      "description": "List the machines this Kanna machine can move a task to or from. The list is resolved in the server from its transfer peer registry and its provisioned cloud routes \u2014 the merge that used to exist only inside a signed-in desktop window \u2014 so an agent names a destination instead of scraping peer ids or relay credentials out of desktop code. Each entry carries peerId, the display name, and machineId when the machine is a same-account sibling whose cloud route this machine has provisioned; kanna_push_task and kanna_pull_task accept either spelling. transferable says whether a move can start right now and unavailableReason says what would make it possible. preferredTransport is \"lan\" whenever a LAN route exists, with cloudFallback for the same-account sibling reachable both ways. cloudRoute reports whether the cloud tunnel is usable: its Firebase credential is minted by the signed-in desktop app and can only be refreshed there, so a machine reachable only through an expired one is reported unusable here rather than accepted and failed later inside the transfer engine. Public keys and endpoints are deliberately absent. Pass machine_id to ask a sibling machine what it can reach before pushing a task from there.",
+      "method": "GET",
+      "path": "/v1/transfers/peers",
+      "response": "json",
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" }
+      ]
+    },
+    {
       "name": "kanna_list_repos",
       "description": "List repositories known to the running Kanna desktop server, including each repo's id, name, and local path.",
       "method": "GET",
@@ -188,6 +198,17 @@
       ]
     },
     {
+      "name": "kanna_task_transfers",
+      "description": "Read every machine-to-machine transfer this machine recorded for a task, newest first. This is the durable answer to whether a scheduled move actually happened: kanna_push_task and kanna_pull_task only queue intents, and the engine executes them over minutes. Each record carries the transfer id, direction (\"outgoing\" from this machine, \"incoming\" to it), the engine's own status, and state \u2014 the coarse verdict to read: \"pending\" (still in flight), \"completed\", \"failed\", or \"rejected\", with error carrying the reason for the last two. sourceTaskId is the task's id on the machine it left and localTaskId its id on the machine holding this record, which is how a moved task's two ids are tied together. A completed outgoing transfer is also when the source task closes. An empty list on the destination means nothing has arrived yet, never that a pull was not requested.",
+      "method": "GET",
+      "path": "/v1/tasks/{task_id}/transfers",
+      "response": "json",
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
       "name": "kanna_search_tasks",
       "description": "Search Kanna tasks by case-insensitive substring match against display name and full stored prompt. Inside a task session this defaults to that task's repository; pass all_repos for the rare cross-repository search. Set all_machines for the existing account-wide result. Result rows carry only a prompt bounded to 500 characters, the latest durable agent name in agent, and the session transport in agentType.",
       "method": "GET",
@@ -340,6 +361,32 @@
         { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "source", "description": "Who initiated this explicit advance: \"operator\" for a human action or \"manager\" for a task-manager agent. The server records this caller declaration without verifying it. Omit only for an older or genuinely unspecified caller.", "type": "string", "required": false, "location": "body", "enum": ["operator", "manager"] }
+      ]
+    },
+    {
+      "name": "kanna_push_task",
+      "description": "Send a Kanna task from the machine that owns it to another machine, preserving its prompt, durable delivered-input history, workflow stage, branches and committed work, and provider session, and closing the source task when the move lands. THIS CALL DOES NOT MOVE THE TASK. It queues an intent the server's transfer engine executes over minutes \u2014 bundling the repository, shipping the conversation, waiting for the source agent to wrap up \u2014 so the response always reports moved:false. state is \"scheduled\", \"already_queued\" (this exact intent_key was queued before), or \"already_in_flight\" (the task already has an outgoing transfer, reported in activeTransfer, and nothing new was queued). Read kanna_task_transfers for the durable verdict; never report a task as moved because this call succeeded. A push runs on the machine that currently owns the task, so pass machine_id to push a task that lives on a sibling machine, and name the destination with to_machine. The destination and its route are resolved and checked before anything is queued: an unknown machine, an untrusted or unreachable peer, or a cloud route whose credential the desktop app has not refreshed is refused with the reason and the fix, rather than scheduled and failed later on a relay socket.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/push-to-peer",
+      "response": "json",
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client. This is the machine the push runs on, which must be the one that currently owns the task.", "type": "string", "required": false, "location": "routing" },
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}), as the machine that owns it knows the task.", "type": "string", "required": true, "location": "path" },
+        { "name": "to_machine", "description": "Destination: a machine id from kanna_list_machines, or a transfer peer id from kanna_list_transfer_peers. Resolved by the server, which owns the peer registry and the cloud routes.", "type": "string", "required": true, "location": "body", "key": "targetMachine" },
+        { "name": "transport", "description": "Route to use. Omit or pass \"auto\" to take the route the destination prefers, which is LAN whenever one exists. \"lan\" and \"cloud\" are refused with the reason when that route is unavailable.", "type": "string", "required": false, "location": "body", "enum": ["auto", "lan", "cloud"] },
+        { "name": "intent_key", "description": "Idempotency key for a caller that retries this request and does not want the retry to become a second push. Omit it and each call is its own intent; pushing the same task to the same machine again after a failure is ordinary.", "type": "string", "required": false, "location": "body", "key": "intentKey" }
+      ]
+    },
+    {
+      "name": "kanna_pull_task",
+      "description": "Bring a Kanna task from another machine onto this one by asking the machine that owns it to push it here. THIS CALL DOES NOT MOVE THE TASK. It delivers a request the source machine turns into its own push, so the response reports moved:false with accepted:true and the source's requestId. That id is stable for repeats of the same pull within requestTtlSeconds, so an unchanged id \u2014 state \"already_requested\" \u2014 means the source is still holding the earlier request, not that a second move started. Read kanna_task_transfers on this machine for the incoming transfer, or kanna_get_task on the source task to watch it close. A pull always runs on the machine it moves the task to and therefore takes no machine_id; to move a task between two other machines, call kanna_push_task with machine_id set to the machine that owns it. The source and its route are resolved and checked here before the request is sent, and a cloud route whose credential the desktop app has not refreshed is refused with the fix rather than accepted; note that the source machine dials its own route back, so a cloud-routed pull also depends on that machine's credential being fresh.",
+      "method": "POST",
+      "path": "/v1/transfers/actions/pull-task",
+      "response": "json",
+      "params": [
+        { "name": "source_task_id", "description": "The task's id on the machine that owns it (stable across stages), or one of its branch names.", "type": "string", "required": true, "location": "body", "key": "sourceTaskId" },
+        { "name": "from_machine", "description": "Source: a machine id from kanna_list_machines, or a transfer peer id from kanna_list_transfer_peers. Resolved by the server, which owns the peer registry and the cloud routes.", "type": "string", "required": true, "location": "body", "key": "sourceMachine" },
+        { "name": "transport", "description": "Route to use. Omit or pass \"auto\" to take the route the source machine prefers, which is LAN whenever one exists. \"lan\" and \"cloud\" are refused with the reason when that route is unavailable.", "type": "string", "required": false, "location": "body", "enum": ["auto", "lan", "cloud"] }
       ]
     },
     {
@@ -549,6 +596,11 @@
         {
           "title": "Inputs and task terms",
           "body": "Delivered input is durable and readable through `kanna_task_inputs`; terminal bytes alone are not the record. A non-zero `deliveredInputCount` means instruction history exists. Assess the task against its original prompt plus the durable owner, manager, and reviewer directives delivered during the task; do not require or invent a separate committed documentation artifact. `kanna_send_task_input` sends one logical message and the daemon appends its Enter, so it answers a question but cannot move a selection: an agent CLI parked on a menu, a trust prompt or a pager needs `kanna_send_task_raw_input`, which writes discrete keys (`keys: [\"down\", \"enter\"]`) or explicit bytes (`bytes: \"1b5b42\"`) with nothing appended. Raw keys are actions, not speech: they are announced as `task.raw_input_delivered` and deliberately never appear in `kanna_task_inputs`, so never read a menu keystroke as an owner directive — or the absence of one as proof a menu was never answered.",
+          "schemaPaths": []
+        },
+        {
+          "title": "Moving a task between machines",
+          "body": "A task can be moved to another Kanna machine, carrying its prompt, durable delivered-input history, workflow stage, branches and committed work, and provider session. `kanna_list_transfer_peers` names the machines this one can reach; a destination is a machine id from `kanna_list_machines` or a transfer peer id, never a display name. `kanna_push_task` sends a task away and runs on the machine that owns it, so pass `machine_id` to push a task that lives elsewhere. `kanna_pull_task` brings a task here and always runs on the destination, so it takes no `machine_id`. Both only queue an intent: they answer `moved: false`, and the transfer engine then bundles the repository, ships the conversation, waits for the source agent to wrap up, and finally closes the source task. Never report a task as moved because a push or pull succeeded \u2014 read `kanna_task_transfers` until the transfer reports `state` `completed` or `failed`. Routes are checked before anything is queued, and a cloud route is only usable while the signed-in desktop app keeps its credential fresh; that credential cannot be refreshed through this API, so a stale one is refused with the fix instead of scheduled.",
           "schemaPaths": []
         }
       ]

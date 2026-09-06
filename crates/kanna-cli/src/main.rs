@@ -529,6 +529,78 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Move a task to another machine, preserving its prompt, delivered input
+    /// history, workflow stage, committed work, and agent session
+    ///
+    /// This schedules the transfer; it does not perform it. Read
+    /// `kanna-cli task transfers` until the outgoing transfer reports
+    /// completed or failed before reporting the task as moved.
+    Push {
+        /// Task to send, as the machine that owns it knows it
+        #[arg(long)]
+        task_id: String,
+
+        /// Destination: a machine id from `kanna-cli machine list`, or a
+        /// transfer peer id from `kanna-cli machine transfer-peers`
+        #[arg(long)]
+        to_machine: String,
+
+        /// Route to use; omit for the destination's preferred route, which is
+        /// LAN whenever one exists
+        #[arg(long, value_parser = ["auto", "lan", "cloud"])]
+        transport: Option<String>,
+
+        /// Idempotency key, so a retried request does not become a second push
+        #[arg(long)]
+        intent_key: Option<String>,
+
+        /// Machine the push runs on, which must be the one that currently owns
+        /// the task. Omit for this machine.
+        #[arg(long)]
+        machine_id: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Ask another machine to send one of its tasks to this one
+    ///
+    /// This delivers the request; the source machine performs the move. Read
+    /// `kanna-cli task transfers` for the incoming transfer before reporting
+    /// the task as moved. A pull always runs on the machine it moves the task
+    /// to, so it takes no --machine-id.
+    Pull {
+        /// The task's id on the machine that owns it
+        #[arg(long)]
+        source_task_id: String,
+
+        /// Source: a machine id from `kanna-cli machine list`, or a transfer
+        /// peer id from `kanna-cli machine transfer-peers`
+        #[arg(long)]
+        from_machine: String,
+
+        /// Route to use; omit for the source machine's preferred route
+        #[arg(long, value_parser = ["auto", "lan", "cloud"])]
+        transport: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Print the machine-to-machine transfers recorded for a task
+    Transfers {
+        /// The task ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Machine to read from. Omit for this machine.
+        #[arg(long)]
+        machine_id: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Rerun the current workflow stage for a task
     RerunStage {
         /// The task ID to rerun
@@ -791,6 +863,17 @@ pub(crate) enum ToolCommands {
 pub(crate) enum MachineCommands {
     /// List the current machine and reachable sibling machines
     List {
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// List the machines a task can be moved to or from, with the route each
+    /// one currently has
+    TransferPeers {
+        /// Machine whose transfer peers to list. Omit for this machine.
+        #[arg(long)]
+        machine_id: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,

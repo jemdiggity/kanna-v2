@@ -273,3 +273,310 @@ async fn incoming_intents_require_an_incoming_transfer_and_are_idempotent() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["scheduled"], true);
 }
+
+/// A push answers what actually happened, and never lets a queued intent read
+/// as a finished move.
+///
+/// A task manager on 2026-09-06 read `scheduled: true` from this route as a
+/// completed transfer while the move was in fact dying on a relay socket the
+/// caller could not see. The intent is still just an intent, so the response
+/// says so in the same breath it says the work was queued.
+#[tokio::test]
+async fn a_push_response_states_that_nothing_has_moved_yet() {
+    let app = super::test_router("desktop-push-intent", "Studio Mac");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-source/actions/push-to-peer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "peerId": "peer-target", "transport": "lan" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = from_slice::<serde_json::Value>(&body).unwrap();
+
+    assert_eq!(body["scheduled"], true);
+    assert_eq!(body["state"], "scheduled");
+    assert_eq!(body["moved"], false);
+    assert_eq!(body["sourceTaskId"], "task-source");
+    assert_eq!(body["target"]["peerId"], "peer-target");
+    assert_eq!(body["target"]["transport"], "lan");
+    assert!(
+        body["nextStep"]
+            .as_str()
+            .is_some_and(|step| step.contains("kanna_task_transfers")),
+        "{body}"
+    );
+    // No peer registry is reachable in this fixture, so the desktop's own
+    // spelling — a peer it already resolved — still schedules, and says the
+    // resolution was the caller's.
+    assert!(
+        body["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("caller's own peer id")),
+        "{body}"
+    );
+}
+
+/// A destination has to be named. Before this route resolved one centrally the
+/// only spelling was a raw peer id an agent had to find in desktop source, so
+/// the refusal names the argument that replaces that.
+#[tokio::test]
+async fn a_push_with_no_destination_is_refused_rather_than_queued() {
+    let app = super::test_router("desktop-push-nodest", "Studio Mac");
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-source/actions/push-to-peer")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("targetMachine"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+/// The duplicate an agent is most likely to create: asking for a move that is
+/// already running. The engine would skip it silently, so the route reports the
+/// transfer that owns the task instead of a fresh `scheduled: true` the caller
+/// would read as a second move.
+#[tokio::test]
+async fn a_push_at_a_task_already_in_flight_names_the_transfer_that_owns_it() {
+    let app = super::test_router("desktop-push-dup", "Studio Mac");
+    let (status, _) = post_transfer(&app, "transfer-live", "task-source").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-source/actions/push-to-peer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "peerId": "peer-target" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = from_slice::<serde_json::Value>(&body).unwrap();
+
+    assert_eq!(body["scheduled"], false);
+    assert_eq!(body["state"], "already_in_flight");
+    assert_eq!(body["moved"], false);
+    assert_eq!(body["activeTransfer"]["id"], "transfer-live");
+    assert_eq!(body["activeTransfer"]["state"], "pending");
+    assert_eq!(body["activeTransfer"]["direction"], "outgoing");
+}
+
+/// The observation half. A move is two rows on two machines tied together by
+/// the task's ids, and this is the surface that answers "did it actually
+/// happen?" — with the coarse verdict, because the engine's own status
+/// vocabulary is longer than an agent should have to learn.
+#[tokio::test]
+async fn task_transfers_report_each_recorded_move_with_a_coarse_verdict() {
+    let app = super::test_router("desktop-task-transfers", "Studio Mac");
+
+    let read = |task_id: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::get(format!("/v1/tasks/{task_id}/transfers"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            from_slice::<serde_json::Value>(&body).unwrap()
+        }
+    };
+
+    // A task nothing has happened to reports an empty list, which is not the
+    // same claim as "no move was requested".
+    assert_eq!(
+        read("task-source").await["transfers"],
+        serde_json::json!([])
+    );
+
+    let (status, _) = post_transfer(&app, "transfer-live", "task-source").await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = read("task-source").await;
+    assert_eq!(listed["taskId"], "task-source");
+    assert_eq!(listed["transfers"][0]["id"], "transfer-live");
+    assert_eq!(listed["transfers"][0]["status"], "pending");
+    assert_eq!(listed["transfers"][0]["state"], "pending");
+    assert_eq!(listed["transfers"][0]["sourceMachineId"], "desktop-source");
+    assert_eq!(listed["transfers"][0]["targetMachineId"], "desktop-target");
+    assert!(read("task-other").await["transfers"]
+        .as_array()
+        .is_some_and(|transfers| transfers.is_empty()));
+
+    // The destination side of the same move: found by the id the task carries
+    // there, and reported as incoming.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "transfer": {
+                            "id": "transfer-incoming",
+                            "direction": "incoming",
+                            "status": "completed",
+                            "source_peer_id": "peer-source",
+                            "target_peer_id": "peer-target",
+                            "source_desktop_id": "desktop-source",
+                            "target_desktop_id": "desktop-target",
+                            "source_task_id": "task-source",
+                            "local_task_id": "task-arrived",
+                            "error": null,
+                            "payload_json": "{}",
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let arrived = read("task-arrived").await;
+    assert_eq!(arrived["transfers"][0]["id"], "transfer-incoming");
+    assert_eq!(arrived["transfers"][0]["direction"], "incoming");
+    assert_eq!(arrived["transfers"][0]["state"], "completed");
+    assert_eq!(arrived["transfers"][0]["sourceTaskId"], "task-source");
+    assert_eq!(arrived["transfers"][0]["localTaskId"], "task-arrived");
+
+    // Asked by the durable source id, both halves answer.
+    let both = read("task-source").await;
+    let ids = both["transfers"]
+        .as_array()
+        .expect("transfers")
+        .iter()
+        .map(|transfer| transfer["id"].as_str().unwrap_or_default().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        ["transfer-incoming", "transfer-live"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+}
+
+/// A failed transfer must read as failed, not as "not completed yet". The
+/// distinction is the whole reason the coarse verdict exists.
+#[tokio::test]
+async fn a_failed_transfer_reports_failed_with_its_reason() {
+    let app = super::test_router("desktop-failed-transfer", "Studio Mac");
+    let (status, _) = post_transfer(&app, "transfer-doomed", "task-source").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-doomed/actions/fail-outgoing")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "reason": "cloud transfer relay rejected tunnel" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-source/transfers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = from_slice::<serde_json::Value>(&body).unwrap();
+    assert_eq!(body["transfers"][0]["state"], "failed");
+    assert_eq!(
+        body["transfers"][0]["error"],
+        "cloud transfer relay rejected tunnel"
+    );
+}
+
+/// A pull moves a task onto *this* machine, so it is expressed only by a
+/// process running on it — the same `DesktopLocalAccess` boundary the rest of
+/// the sidecar control plane keeps, and deliberately narrower than the push it
+/// asks the other machine to perform. Neither an authenticated relay tunnel nor
+/// anything short of a direct connection to this desktop's own listener may
+/// move a task here.
+#[tokio::test]
+async fn a_pull_is_reachable_only_from_this_desktop_s_own_loopback_connection() {
+    let response = crate::http_api::routes::dispatch_authenticated_http_invoke(
+        super::test_state_with_seed("desktop-pull-tunnel", "Studio Mac", |_| {}),
+        "POST",
+        "/v1/transfers/actions/pull-task",
+        serde_json::json!({ "sourceTaskId": "task-source", "sourceMachine": "peer-primary" }),
+    )
+    .await;
+    assert_eq!(response.status, 401, "{response:?}");
+    assert!(
+        response
+            .error
+            .as_deref()
+            .into_iter()
+            .chain(response.body.as_ref().and_then(|body| body.as_str()))
+            .any(|message| message.contains("direct desktop loopback connection")),
+        "{response:?}"
+    );
+
+    // The same route on a request with no connection identity at all, which is
+    // what a synthesized in-process caller is. It must not be admitted either:
+    // the guard is positive proof of a direct desktop connection, never the
+    // absence of evidence against one.
+    let app = super::test_router("desktop-pull-guard", "Studio Mac");
+    let response = app
+        .oneshot(
+            Request::post("/v1/transfers/actions/pull-task")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sourceTaskId": "task-source",
+                        "sourceMachine": "peer-primary",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

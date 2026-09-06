@@ -320,6 +320,24 @@ impl Db {
         rows.collect()
     }
 
+    /// Every transfer this task took part in, newest first.
+    ///
+    /// A task is named by `source_task_id` on the machine it left and by
+    /// `local_task_id` on the machine it arrived at — and by both on the
+    /// source, whose `local_task_id` is its own id. Matching either is what
+    /// lets one durable task id answer "where has this been?" from whichever
+    /// side is asked, which is the question an agent has after scheduling a
+    /// move.
+    pub fn list_task_transfers(&self, task_id: &str) -> Result<Vec<TaskTransfer>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{TASK_TRANSFER_COLUMNS}
+             WHERE source_task_id = ?1 OR local_task_id = ?1
+             ORDER BY started_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map([task_id], read_task_transfer)?;
+        rows.collect()
+    }
+
     pub fn list_terminal_incoming_transfer_ids(&self) -> Result<Vec<String>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id

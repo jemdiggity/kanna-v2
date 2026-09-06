@@ -10,6 +10,7 @@ export const unattendedRealE2eFiles = [
   "free-model-agent-writes-file.test.ts",
   "kanna-cli-path.test.ts",
   "local-transfer-accept-import.test.ts",
+  "local-transfer-agent-surfaces.test.ts",
   "local-transfer-busy-agent-wrapup.test.ts",
   "local-transfer-first-milestone.test.ts",
   "local-transfer-headless-engine.test.ts",

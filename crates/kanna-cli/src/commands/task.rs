@@ -70,6 +70,38 @@ pub(crate) fn resolve_task_event_exclusions(
     exclusions
 }
 
+fn insert_optional(args: &mut Value, key: &str, value: Option<String>) {
+    if let (Some(object), Some(value)) = (args.as_object_mut(), value) {
+        object.insert(key.to_string(), Value::String(value));
+    }
+}
+
+/// Run a task-transfer tool through the shared catalog.
+///
+/// These four commands deliberately have no typed HTTP path of their own. The
+/// transfer surface is the one an agent reaches for when a task has to change
+/// machines, and the CLI and MCP answers to "did it move?" must be the same
+/// object — so both resolve the same catalog declaration and print what the
+/// server returned, rather than each rendering its own idea of the result.
+async fn run_transfer_tool(name: &str, args: &Value, server_url: Option<&str>) {
+    let catalog =
+        crate::commands::tool::load_tool_catalog_from_current_dir().unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            process::exit(1);
+        });
+    let base_url = resolve_server_base_url_from_env(server_url);
+    let (_, value) = crate::commands::tool::call_catalog_tool(&base_url, &catalog, name, args)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            process::exit(1);
+        });
+    if let Err(error) = print_json(&value) {
+        eprintln!("Error: {error}");
+        process::exit(1);
+    }
+}
+
 fn current_task_id_from_env() -> Option<String> {
     std::env::var("KANNA_TASK_ID")
         .ok()
@@ -776,6 +808,45 @@ pub(crate) async fn run(command: TaskCommands) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }
+        }
+        TaskCommands::Push {
+            task_id,
+            to_machine,
+            transport,
+            intent_key,
+            machine_id,
+            server_url,
+        } => {
+            let mut args = serde_json::json!({
+                "task_id": task_id,
+                "to_machine": to_machine,
+            });
+            insert_optional(&mut args, "transport", transport);
+            insert_optional(&mut args, "intent_key", intent_key);
+            insert_optional(&mut args, "machine_id", machine_id);
+            run_transfer_tool("kanna_push_task", &args, server_url.as_deref()).await;
+        }
+        TaskCommands::Pull {
+            source_task_id,
+            from_machine,
+            transport,
+            server_url,
+        } => {
+            let mut args = serde_json::json!({
+                "source_task_id": source_task_id,
+                "from_machine": from_machine,
+            });
+            insert_optional(&mut args, "transport", transport);
+            run_transfer_tool("kanna_pull_task", &args, server_url.as_deref()).await;
+        }
+        TaskCommands::Transfers {
+            task_id,
+            machine_id,
+            server_url,
+        } => {
+            let mut args = serde_json::json!({ "task_id": task_id });
+            insert_optional(&mut args, "machine_id", machine_id);
+            run_transfer_tool("kanna_task_transfers", &args, server_url.as_deref()).await;
         }
         TaskCommands::SignalMerge {
             task_id,

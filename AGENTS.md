@@ -427,6 +427,24 @@ park must bound its own retry loop on a non-`busy` `runtimeState` with a
 `running` `latestRun` instead of re-calling on `timeout` forever. See
 `docs/kanna-server-boundary.md`.
 
+**A scheduled transfer is not a moved task.** Moving a task between machines is
+a first-class agent surface — `kanna_push_task` / `kanna_pull_task` /
+`kanna_task_transfers` / `kanna_list_transfer_peers`, with matching
+`kanna-cli task push|pull|transfers` and `kanna-cli machine transfer-peers` —
+because the alternative was reading desktop source for a peer id, which is
+exactly what happened. Destinations are named by canonical machine (desktop) id
+or transfer peer id; `transfer_targets.rs` resolves the route in the server, so
+no agent surface handles a key, an endpoint, or a relay credential. Push runs on
+the machine that owns the task and is routable with `machine_id`; pull runs on
+the machine the task moves to and keeps the `DesktopLocalAccess` boundary, so it
+declares none. Both only queue an intent for the transfer engine: they answer
+`moved: false`, and **a task is moved when `kanna_task_transfers` says
+`completed`, never because a push or pull succeeded.** A route is checked before
+anything is queued — including the cloud tunnel's Firebase credential, which
+only the signed-in renderer can mint, so a stale one is refused with the fix
+instead of scheduled and failed later on a relay socket. See
+`docs/kanna-server-boundary.md`.
+
 ## E2E coverage expectation
 
 Any behavior that crosses component or system boundaries should add or update

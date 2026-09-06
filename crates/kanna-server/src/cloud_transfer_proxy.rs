@@ -254,6 +254,140 @@ pub async fn clear_cloud_transfer_proxies_in_state(
     }
 }
 
+/// How close to expiry a pushed Firebase credential is already too close.
+///
+/// The relay authenticates every tunnel dial, not the proxy binding, so a token
+/// that expires mid-transfer fails the *next* dial rather than the one that
+/// checked. A transfer opens several over minutes, so a credential inside this
+/// margin is reported unusable rather than optimistically accepted.
+const CLOUD_CREDENTIAL_EXPIRY_MARGIN_SECS: i64 = 120;
+
+/// What one cloud peer's outbound route looks like right now.
+///
+/// The renderer owns the Firebase session, so it — and only it — can mint the
+/// credential this proxy dials the relay with (see this module's header). The
+/// server can therefore never *repair* a stale route, which makes reporting one
+/// accurately the whole job: a transfer scheduled over an expired credential
+/// fails later, inside the engine, as `expected auth_ok text frame` on a socket
+/// nobody asked about.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTransferRoute {
+    pub peer_id: String,
+    /// Loopback address this machine's proxy listens on for that peer, and the
+    /// endpoint it registered with the sidecar as an "external peer".
+    ///
+    /// Never serialized: it is how `transfer_targets` tells a merged peer entry
+    /// that came from LAN discovery from one that is only this proxy, and an
+    /// agent-facing payload deliberately carries no endpoints.
+    #[serde(skip)]
+    pub endpoint: String,
+    /// The canonical machine (desktop) id this peer is, which is the only
+    /// place peer identity and machine identity are tied together in this
+    /// process.
+    pub machine_id: String,
+    /// `ready`, `proxy_stopped`, `credential_expired`, or
+    /// `credential_unreadable`.
+    pub status: String,
+    /// Unix seconds the pushed credential expires at, when it could be read.
+    pub credential_expires_at: Option<i64>,
+    pub detail: Option<String>,
+}
+
+impl CloudTransferRoute {
+    pub fn ready(&self) -> bool {
+        self.status == "ready"
+    }
+}
+
+/// Snapshot every provisioned cloud route and whether it can currently carry a
+/// transfer.
+pub async fn cloud_transfer_routes(state: &CloudTransferProxyState) -> Vec<CloudTransferRoute> {
+    let now = unix_seconds_now();
+    let proxies = state.lock().await;
+    let mut routes = proxies
+        .iter()
+        .map(|(peer_id, handle)| {
+            let (status, credential_expires_at, detail) = if handle.listener_task.is_finished() {
+                (
+                    "proxy_stopped".to_string(),
+                    None,
+                    Some(
+                        "the cloud transfer proxy for this machine stopped; the desktop app \
+                             must re-provision it"
+                            .to_string(),
+                    ),
+                )
+            } else {
+                credential_status(&handle.id_token.borrow(), now)
+            };
+            CloudTransferRoute {
+                peer_id: peer_id.clone(),
+                endpoint: handle.endpoint.endpoint.clone(),
+                machine_id: handle.desktop_id.clone(),
+                status,
+                credential_expires_at,
+                detail,
+            }
+        })
+        .collect::<Vec<_>>();
+    routes.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+    routes
+}
+
+fn unix_seconds_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Read the pushed credential's own expiry.
+///
+/// The claim set is read, never verified: the relay is the only party that
+/// verifies this token, and the one question here is whether it is already too
+/// old to be worth dialling with. An unreadable token is reported as such
+/// rather than assumed good, because "assumed good" is exactly what turns into
+/// a transfer that schedules and then dies on a socket.
+fn credential_status(id_token: &str, now_secs: i64) -> (String, Option<i64>, Option<String>) {
+    let Some(expires_at) = credential_expiry(id_token) else {
+        return (
+            "credential_unreadable".to_string(),
+            None,
+            Some(
+                "the cloud credential the desktop pushed for this machine has no readable \
+                 expiry, so it cannot be confirmed usable"
+                    .to_string(),
+            ),
+        );
+    };
+    if expires_at <= now_secs + CLOUD_CREDENTIAL_EXPIRY_MARGIN_SECS {
+        return (
+            "credential_expired".to_string(),
+            Some(expires_at),
+            Some(format!(
+                "the cloud credential the desktop pushed for this machine expires in {}s; the \
+                 signed-in desktop app refreshes it when it reconciles machines or a person \
+                 starts a transfer from the UI",
+                expires_at - now_secs
+            )),
+        );
+    }
+    ("ready".to_string(), Some(expires_at), None)
+}
+
+fn credential_expiry(id_token: &str) -> Option<i64> {
+    use base64::Engine as _;
+    let claims = id_token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(claims)
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&decoded)
+        .ok()?
+        .get("exp")
+        .and_then(serde_json::Value::as_i64)
+}
+
 fn validate_nonblank(name: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         Err(format!("{name} must not be blank"))
@@ -605,6 +739,60 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::{credential_status, CLOUD_CREDENTIAL_EXPIRY_MARGIN_SECS};
+    use base64::Engine as _;
+
+    fn token(exp: i64) -> String {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({ "exp": exp }).to_string());
+        format!("header.{claims}.signature")
+    }
+
+    /// The 2026-09-06 failure, in the only place this process can see it
+    /// coming.
+    ///
+    /// The relay authenticates each tunnel dial, so a credential that has run
+    /// out produces `expected auth_ok text frame` on a socket the caller never
+    /// asked about — long after the API answered `scheduled: true`. Nothing
+    /// here can mint a replacement (only the signed-in renderer can), so
+    /// reading the expiry the renderer already pushed is the whole warning
+    /// system.
+    #[test]
+    fn a_credential_that_has_run_out_is_reported_rather_than_dialled_with() {
+        let now = 1_800_000_000;
+
+        let (status, expires_at, detail) = credential_status(&token(now + 3_600), now);
+        assert_eq!(status, "ready");
+        assert_eq!(expires_at, Some(now + 3_600));
+        assert_eq!(detail, None);
+
+        let (status, _, detail) = credential_status(&token(now - 1), now);
+        assert_eq!(status, "credential_expired");
+        assert!(
+            detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("signed-in desktop app")),
+            "the report has to name who can fix it: {detail:?}"
+        );
+
+        // A token inside the margin is treated as spent: a transfer opens
+        // several dials over minutes, so "valid right now" is not the question.
+        let (status, _, _) =
+            credential_status(&token(now + CLOUD_CREDENTIAL_EXPIRY_MARGIN_SECS - 1), now);
+        assert_eq!(status, "credential_expired");
+
+        // Anything unreadable is reported as unknown rather than assumed good,
+        // because assuming good is exactly what schedules the doomed transfer.
+        for unreadable in ["", "not-a-jwt", "header.!!!.signature", "header..signature"] {
+            let (status, expires_at, _) = credential_status(unreadable, now);
+            assert_eq!(status, "credential_unreadable", "{unreadable}");
+            assert_eq!(expires_at, None, "{unreadable}");
+        }
+    }
 }
 
 #[cfg(test)]

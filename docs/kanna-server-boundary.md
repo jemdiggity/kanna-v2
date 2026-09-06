@@ -925,15 +925,84 @@ Clients express **intent**; the engine executes. These routes are ordinary
 intents:
 
 - `POST /v1/tasks/{source_task_id}/actions/push-to-peer` —
-  `{peerId, transport?, cloudFallback?, targetDesktopId?, intentKey?}`.
+  `{targetMachine | peerId, transport?, cloudFallback?, targetDesktopId?, intentKey?}`.
   `intentKey` distinguishes a deliberate re-push from a retried request; the
-  response's `scheduled: false` means the intent was already queued.
+  response's `scheduled: false` means the intent was already queued, or that the
+  task already has a transfer in flight (`state: "already_in_flight"`, with the
+  transfer named in `activeTransfer`).
+- `POST /v1/transfers/actions/pull-task` — `DesktopLocalAccess` only; see
+  "Agent-facing task transfer" below.
 - `POST /v1/transfers/{transfer_id}/actions/approve`
 - `POST /v1/transfers/{transfer_id}/actions/reject-incoming`
 
 Progress reaches the UI through the snapshot's `transfer_status`, which the
 sidebar already renders. There is no bespoke event protocol between the engine
 and a window, and no window is required for a transfer to complete.
+
+### Agent-facing task transfer
+
+Choosing *where* a task goes used to be arithmetic only a signed-in renderer
+could do. `desktopTransferMachines.ts` merged the sidecar's LAN peer list with
+the account's cloud machine list, decided which transport each machine
+preferred, and handed `push-to-peer` a peer id plus three routing options —
+so `push-to-peer` was reachable by an agent but not *usable* by one. On
+2026-09-06 a task manager asked to move a task between two of the operator's
+own machines found no MCP transfer tool and no `kanna-cli task push`, read the
+desktop source, posted a scraped peer id at the route, and reported the task
+moved on a `scheduled: true` while the transfer was dying on a relay socket.
+
+`transfer_targets.rs` performs that merge in the server, over the two things
+this process already owns — the sidecar's peer registry and the cloud transfer
+proxies it binds — and four catalog tools expose it. Every one has a matching
+`kanna-cli` command, because the CLI is the fallback surface for a client
+without MCP:
+
+| Tool | CLI | Route |
+|---|---|---|
+| `kanna_list_transfer_peers` | `machine transfer-peers` | `GET /v1/transfers/peers` |
+| `kanna_push_task` | `task push` | `POST /v1/tasks/{id}/actions/push-to-peer` |
+| `kanna_pull_task` | `task pull` | `POST /v1/transfers/actions/pull-task` |
+| `kanna_task_transfers` | `task transfers` | `GET /v1/tasks/{id}/transfers` |
+
+Four things are contract rather than convenience:
+
+- **A destination is canonical identity.** `to_machine` / `from_machine` accept
+  a machine (desktop) id from `kanna_list_machines` or a transfer peer id from
+  `kanna_list_transfer_peers`, and nothing else. A display name is not identity.
+  A peer trusted only by LAN pairing has no account-wide machine id, which is
+  why both spellings resolve; a same-account sibling carries the machine id its
+  provisioned cloud route names. Public keys, endpoints and relay credentials
+  are never in an agent-facing payload.
+- **Direction decides where the call runs.** A push runs on the machine that
+  owns the task, so it is routable with `machine_id` — that is how a task moves
+  between two *other* machines. A pull moves a task onto the calling machine and
+  keeps the `DesktopLocalAccess` boundary the rest of the sidecar control plane
+  has, so it declares no `machine_id` at all. `GET /v1/transfers/peers` is
+  `PrivilegedTaskAccess` and routable, so an agent can ask a sibling what it can
+  reach before pushing from there.
+- **A scheduled intent is never a completed move.** Both answers carry
+  `moved: false`, a `state` (`scheduled` / `already_queued` /
+  `already_in_flight`, and `requested` / `already_requested`), and a `nextStep`
+  naming `kanna_task_transfers`. That surface reports each transfer's raw
+  engine `status` alongside the coarse `pending` / `completed` / `failed` /
+  `rejected` verdict, and ties the task's two ids together through
+  `sourceTaskId` and `localTaskId`. A pull's `requestId` is stable for repeats
+  within the sidecar's five-minute window, so an unchanged id is a duplicate
+  rather than a second move.
+- **A route that cannot carry the transfer is refused before anything is
+  queued.** The relay authenticates every tunnel dial, and the Firebase
+  credential it dials with is minted by the signed-in renderer and pushed to
+  `POST /v1/transfers/cloud-proxies`; nothing in the server can refresh it. A
+  cloud route whose credential has expired therefore produced `scheduled: true`
+  followed by `expected auth_ok text frame` on a socket nobody was watching. The
+  server now reads that credential's own `exp` (`cloud_transfer_proxy.rs`), and
+  a cloud route inside the expiry margin is reported unusable — with the fix,
+  which is opening the signed-in desktop app on that machine, or using the LAN
+  while both machines share a network. A stale cloud route behind a healthy LAN
+  route costs only the fallback, and the response says so rather than
+  downgrading silently. A cloud-routed *pull* additionally depends on the source
+  machine's own credential, which this machine cannot see; the tool description
+  says so.
 
 ### Source finalization
 
@@ -1956,6 +2025,10 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It accepts a latest `cancelled` or `failed` run whose daemon session is dead. It also accepts a latest `running` run only after a daemon `List` proves the run's recorded session is absent; the desktop uses that form when an attach after restart discovers a session lost with the old daemon. It resumes the provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; unsupported or missing provider context starts fresh and records `resumeFallbackReason`, while task-state precondition failures return an explanatory conflict. A present session returns a conflict for a running run and restores a false interruption for a previously interrupted run, so the route never creates a duplicate provider process. An empty route-level 404 identifies an older server that does not provide the action. Callers may use `rerun-stage` when recovery is unavailable or a deliberately fresh conversation is acceptable.
 - `kanna-cli task rerun-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/rerun-stage`. This is always an explicit fresh provider conversation, not recovery.
 - `kanna-cli task children --task-id <TASK_ID> [--server-url <URL>]` calls `GET /v1/tasks/{task_id}/children` and prints the direct-child history as JSON. It is the typed no-MCP fallback for `kanna_list_task_children`, so it reproduces the route's field set rather than summarizing it.
+- `kanna-cli machine transfer-peers [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/transfers/peers` and prints the machines a task can be moved to or from, with each one's current route.
+- `kanna-cli task push --task-id <TASK_ID> --to-machine <MACHINE_OR_PEER_ID> [--transport auto|lan|cloud] [--intent-key <KEY>] [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/push-to-peer`. It runs on the machine that owns the task, so `--machine-id` is how a task is pushed off a sibling machine. It schedules the transfer; the response reports `moved: false`.
+- `kanna-cli task pull --source-task-id <TASK_ID> --from-machine <MACHINE_OR_PEER_ID> [--transport auto|lan|cloud] [--server-url <URL>]` calls `POST /v1/transfers/actions/pull-task`. It always runs on the machine the task is moving to and takes no `--machine-id`. It delivers the request; the response reports `moved: false` and a `requestId` that is stable for repeats inside the source's request window.
+- `kanna-cli task transfers --task-id <TASK_ID> [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/tasks/{task_id}/transfers` and prints the recorded moves with the coarse `pending` / `completed` / `failed` / `rejected` verdict. This is the surface that answers whether a scheduled move happened; a push or pull result never does.
 
 The provider support and daemon-loss trigger matrix is documented in
 [`2026-07-30-session-death-recovery.md`](2026-07-30-session-death-recovery.md).
