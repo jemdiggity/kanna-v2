@@ -28,6 +28,15 @@ interface KannaTerminalBuffersE2EApi {
     sessionId: string,
     text: string,
   ) => { column: number; row: number; columns: number; rows: number } | null;
+  cursor: (
+    sessionId: string,
+  ) => {
+    column: number;
+    row: number;
+    visible: boolean;
+    columns: number;
+    rows: number;
+  };
   cellAttributes: (
     sessionId: string,
     row: number,

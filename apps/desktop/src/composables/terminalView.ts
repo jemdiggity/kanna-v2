@@ -62,15 +62,20 @@ export function initializeTerminalView(params: {
   })
   term.loadAddon(params.fitAddon)
   term.loadAddon(new WebLinksAddon(params.handleLinkActivate))
-  try {
-    const webgl = new WebglAddon()
-    webgl.onContextLoss(() => {
-      console.warn("[terminal] WebGL context lost, falling back to DOM renderer")
-      webgl.dispose()
-    })
-    term.loadAddon(webgl)
-  } catch (e) {
-    console.warn("[terminal] WebGL addon failed, falling back to DOM renderer:", e)
+  // Keep E2E screenshots tied to xterm's painted DOM rows. WKWebView can
+  // report the WebGL-backed logical buffer while capturing a blank native
+  // surface when a second desktop window is open; production keeps WebGL.
+  if (!window.__KANNA_E2E__) {
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => {
+        console.warn("[terminal] WebGL context lost, falling back to DOM renderer")
+        webgl.dispose()
+      })
+      term.loadAddon(webgl)
+    } catch (e) {
+      console.warn("[terminal] WebGL addon failed, falling back to DOM renderer:", e)
+    }
   }
   term.loadAddon(new ImageAddon())
 

@@ -36,19 +36,45 @@ export function createTerminalLayoutController(params: {
   getContainer: () => HTMLElement | null
   getTerminalStreamClient: () => Promise<StreamClient>
 }): TerminalLayoutController {
-  /** Wait for the container to have non-zero dimensions, then fit the terminal. */
+  /** Wait for a settled visible container, then fit the terminal. */
   async function ensureFitted() {
-    const container = params.getContainer()
-    if (container && container.offsetWidth > 0 && container.offsetHeight > 0) {
-      params.fitAddon.fit()
-      return
+    let lastWidth = -1
+    let lastHeight = -1
+    // A task slot can be mounted while its flex layout is still changing. Two
+    // consecutive measurements prevent the first viewer registration from
+    // publishing xterm's default grid (or an intermediate zero-sized grid).
+    // The bound also covers occluded WKWebView windows where rAF stops ticking.
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const container = params.getContainer()
+      const width = container?.offsetWidth ?? 0
+      const height = container?.offsetHeight ?? 0
+      const proposal = width > 0 && height > 0
+        ? params.fitAddon.proposeDimensions?.()
+        : undefined
+      if (
+        width > 0 &&
+        height > 0 &&
+        width === lastWidth &&
+        height === lastHeight &&
+        proposal &&
+        proposal.cols > 0 &&
+        proposal.rows > 0
+      ) {
+        params.fitAddon.fit()
+        return
+      }
+      lastWidth = width
+      lastHeight = height
+      await nextFrameOrTimeout()
     }
-    // Container not yet laid out — wait one animation frame (bounded, since
-    // frames stop ticking while the window is not composited) for the
-    // browser to compute layout.
-    await nextFrameOrTimeout()
+
     const settledContainer = params.getContainer()
-    if (settledContainer && settledContainer.offsetWidth > 0 && settledContainer.offsetHeight > 0) {
+    if (
+      settledContainer &&
+      settledContainer.offsetWidth > 0 &&
+      settledContainer.offsetHeight > 0 &&
+      params.fitAddon.proposeDimensions?.()
+    ) {
       params.fitAddon.fit()
     }
   }

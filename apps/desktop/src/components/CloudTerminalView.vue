@@ -305,6 +305,10 @@ function applyRemoteSnapshot(
   terminal.write(data, () => {
     if (!terminal || unmounted || generation !== lifecycleGeneration) return;
     status.value = "live";
+    // A snapshot may include scrollback from a source grid larger than the
+    // follower viewport. Always paint the authoritative top-of-grid origin;
+    // local presentation scrolling can be restored by the viewer afterward.
+    terminal.scrollToTop?.();
     terminal.refresh(0, terminal.rows - 1);
     void fitAndResizeRemoteAfterLayout(generation);
   });
@@ -485,7 +489,8 @@ function registerTerminalBufferForE2E() {
     : null;
 }
 
-onMounted(() => {
+function initializeTerminal() {
+  if (terminal) return;
   terminal = new Terminal({
     allowProposedApi: true,
     cursorBlink: false,
@@ -532,18 +537,25 @@ onMounted(() => {
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(new WebLinksAddon(handleLinkActivate));
-  try {
-    const webgl = new WebglAddon();
-    webgl.onContextLoss(() => {
-      console.warn("[cloud-terminal] WebGL context lost, falling back to DOM renderer");
-      webgl.dispose();
-    });
-    terminal.loadAddon(webgl);
-  } catch (error) {
-    console.warn(
-      "[cloud-terminal] WebGL addon failed, falling back to DOM renderer:",
-      error,
-    );
+  // Native WKWebView screenshots can capture an unfurled WebGL surface when
+  // two isolated desktop instances are running side by side. Keep the real
+  // renderer in production, while the E2E lane deliberately uses xterm's DOM
+  // renderer so its screenshot and cell/cursor assertions observe painted
+  // content rather than only the logical buffer.
+  if (!window.__KANNA_E2E__) {
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        console.warn("[cloud-terminal] WebGL context lost, falling back to DOM renderer");
+        webgl.dispose();
+      });
+      terminal.loadAddon(webgl);
+    } catch (error) {
+      console.warn(
+        "[cloud-terminal] WebGL addon failed, falling back to DOM renderer:",
+        error,
+      );
+    }
   }
   terminal.loadAddon(new ImageAddon());
   if (containerRef.value) {
@@ -584,6 +596,30 @@ onMounted(() => {
   }
   void start();
   void focusWhenActive();
+}
+
+async function initializeTerminalWhenVisible() {
+  if (terminal || unmounted || !props.active) return;
+  for (let frame = 0; frame < 30; frame += 1) {
+    await nextTick();
+    const container = containerRef.value;
+    const rect = container?.getBoundingClientRect();
+    if (container && container.getClientRects().length > 0 && rect && rect.width > 0 && rect.height > 0) {
+      initializeTerminal();
+      return;
+    }
+    await nextFrameOrTimeout();
+  }
+}
+
+onMounted(() => {
+  // Vitest's DOM has no layout engine, so a visibility wait would prevent the
+  // component's normal mount contract from being exercised by unit tests.
+  if (import.meta.env.MODE === "test") {
+    initializeTerminal();
+  } else if (props.active) {
+    void initializeTerminalWhenVisible();
+  }
 });
 
 watch(
@@ -598,6 +634,11 @@ watch(
   () => props.active,
   async (active) => {
     if (!active) return;
+    if (import.meta.env.MODE === "test") {
+      initializeTerminal();
+    } else {
+      await initializeTerminalWhenVisible();
+    }
     await fitAndResizeRemoteAfterLayout(lifecycleGeneration);
     await focusWhenActive();
   },

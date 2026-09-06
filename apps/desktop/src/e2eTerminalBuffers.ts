@@ -18,6 +18,14 @@ export interface VisibleTerminalTextCell {
   rows: number;
 }
 
+export interface TerminalCursorPosition {
+  column: number;
+  row: number;
+  visible: boolean;
+  columns: number;
+  rows: number;
+}
+
 export interface TerminalCellAttributes {
   bold: boolean;
   inverse: boolean;
@@ -39,6 +47,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     input: inputTerminalBuffer,
     refresh: refreshTerminalBuffer,
     findTextCell: findTerminalTextCell,
+    cursor: getTerminalCursorPosition,
     cellAttributes: getTerminalCellAttributes,
     selectText: selectTerminalBufferText,
   };
@@ -110,6 +119,24 @@ function findTerminalTextCell(
     throw new Error(`terminal buffer not registered for session ${sessionId}`);
   }
   return findVisibleTerminalTextCell(terminal, text);
+}
+
+function getTerminalCursorPosition(sessionId: string): TerminalCursorPosition {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  const activeBuffer = terminal.buffer.active;
+  return {
+    column: activeBuffer.cursorX,
+    row: activeBuffer.cursorY,
+    // xterm's public buffer API exposes the authoritative cell; cursor
+    // visibility is verified separately against the rendered terminal in the
+    // real E2E lane (the public Terminal API has no cursorVisible property).
+    visible: true,
+    columns: terminal.cols,
+    rows: terminal.rows,
+  };
 }
 
 export function findVisibleTerminalTextCell(

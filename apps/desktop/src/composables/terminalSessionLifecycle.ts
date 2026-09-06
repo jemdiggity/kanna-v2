@@ -166,6 +166,11 @@ export function createTerminalSessionLifecycle(params: {
       }
 
       if (!params.state.terminalStreamAttached) {
+        // The terminal starts at xterm's default 80x24 until its container has
+        // been laid out. Fit before registering the viewer so that the
+        // controller's atomic initial proposal is measured, not a default
+        // geometry that can shrink an already-sized PTY.
+        await params.layout.ensureFitted()
         const initialViewer = getLiveTerminal()
         if (initialViewer) {
           // Establish the owning local role on the same KSP control path

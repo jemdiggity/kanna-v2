@@ -8,10 +8,18 @@ opened a real PTY task, rendered the authoritative source grid with overflow,
 and exercised phone takeover and release. Screenshots are in
 `docs/task-screenshots/12f567e9-screenshots/`.
 
-The only remaining gap is a true two-machine desktop-remote-follower journey:
-this single Mac can run the owning desktop and the phone simulator, but cannot
-provide a second independent desktop owner/viewer identity for the relay/LAN
-remote-view path. The narrower real coverage is the wide desktop owner task
-selection plus phone attachment, and the automated desktop CloudTerminalView,
-KSP/server, daemon, stream-client, and mobile controller tests. A second
-desktop identity and relay/LAN fixture are required to close this gap.
+The real desktop companion lane now runs two isolated desktop instances on this
+Mac, each with its own identity, database, daemon, and reserved ports. It covers
+the authenticated KSP/control path, wide owner plus narrow follower, viewport
+changes, takeover/release, typed repaint output, disconnect/reconnect, and
+snapshot/live-tail ordering. It asserts the actual PTY winsize and both xterm
+renderers' source-grid/cursor state; the corresponding owner/follower and
+takeover/reconnect screenshots are saved above. The local two-window lane in
+`pty-session.test.ts` covers the same controller/follower policy without the
+remote transport.
+
+Remaining gaps are a physical two-machine LAN/relay journey and physical-device
+mobile plus legacy mixed-version matrices. The existing LAN emulator scenarios
+remain blocked by the emulator rejecting the generated canonical desktop
+credentials during reconnect; the narrower authenticated relay lane above and
+the daemon/server/KSP integration coverage remain runnable here.
