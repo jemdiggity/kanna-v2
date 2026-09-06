@@ -478,24 +478,65 @@ describe("cloud task publication validation", () => {
 });
 
 describe("repository singleton directory", () => {
-  it("fails closed when a registered desktop has not published singleton metadata", async () => {
-    const db = {
+  function legacyDesktopDb(taskRows: Array<Record<string, unknown>>): Firestore {
+    const documents = taskRows.map((data) => ({ data: () => data }));
+    return {
       collection: vi.fn(() => ({
         get: async () => ({
           docs: [{
             id: "desktop-old",
             data: () => ({ desktopId: "desktop-old" }),
-            ref: { collection: () => ({ get: async () => ({ docs: [] }) }) },
+            ref: { collection: () => ({ get: async () => ({ docs: documents }) }) },
           }],
         }),
       })),
     } as unknown as Firestore;
+  }
+
+  it("excludes a desktop that cannot mark singletons but published nothing for this repo", async () => {
+    // Its rows predate per-task singletonAgent, so it can never contribute an
+    // owner — but each row still carries a repository hash, which is enough to
+    // prove it holds nothing that could be a singleton here.
     await expect(listRepoSingletonOwners({
       userId: "user-1",
       remoteUrlHash: "remote-hash",
       agent: "merge",
-      db,
-    })).rejects.toThrow(/incomplete.*desktop-old/);
+      db: legacyDesktopDb([
+        { ...task(), closedAt: null, repo: { remoteUrlHash: "other-hash" } },
+        { ...task(), closedAt: "2026-08-01T00:00:00Z", repo: { remoteUrlHash: "remote-hash" } },
+      ]),
+    })).resolves.toEqual({ owners: [], illegible: [] });
+  });
+
+  it("reports a desktop illegible when it holds an open task for this repo", async () => {
+    await expect(listRepoSingletonOwners({
+      userId: "user-1",
+      remoteUrlHash: "remote-hash",
+      agent: "merge",
+      db: legacyDesktopDb([{ ...task(), closedAt: null, repo: { remoteUrlHash: "remote-hash" } }]),
+    })).resolves.toEqual({ owners: [], illegible: ["desktop-old"] });
+  });
+
+  it("reports a desktop illegible when an open task names no repository", async () => {
+    // Unattributable, so it could belong to this repository. Absence of
+    // evidence is never permission to create.
+    await expect(listRepoSingletonOwners({
+      userId: "user-1",
+      remoteUrlHash: "remote-hash",
+      agent: "merge",
+      db: legacyDesktopDb([{ ...task(), closedAt: null, repo: {} }]),
+    })).resolves.toEqual({ owners: [], illegible: ["desktop-old"] });
+  });
+
+  it("treats a row with no closedAt field as still open", async () => {
+    const row = { ...task(), repo: { remoteUrlHash: "remote-hash" } };
+    delete (row as Record<string, unknown>).closedAt;
+    await expect(listRepoSingletonOwners({
+      userId: "user-1",
+      remoteUrlHash: "remote-hash",
+      agent: "merge",
+      db: legacyDesktopDb([row]),
+    })).resolves.toEqual({ owners: [], illegible: ["desktop-old"] });
   });
 
   it("finds and deduplicates persisted owners across desktop task snapshots", async () => {
@@ -528,7 +569,10 @@ describe("repository singleton directory", () => {
       remoteUrlHash: "remote-hash",
       agent: "merge",
       db,
-    })).resolves.toEqual([{ machineId: "desktop-1", taskId: "task-1" }]);
+    })).resolves.toEqual({
+      owners: [{ machineId: "desktop-1", taskId: "task-1" }],
+      illegible: [],
+    });
   });
 });
 

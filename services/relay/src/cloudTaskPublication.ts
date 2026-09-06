@@ -396,14 +396,65 @@ interface StoredRepoSingletonClaim extends RepoSingletonOwner {
   creatorFence: string | null;
 }
 
-/** Read the durable cloud task index as the account-wide singleton directory. */
+/**
+ * What one directory read could establish about the account.
+ *
+ * `illegible` names the machines whose published index cannot answer this
+ * repository's question. It is deliberately per-lookup: a machine that
+ * published before per-task `singletonAgent` existed cannot say which of its
+ * tasks are singletons, but its index still carries each task's repository
+ * hash, so it can still prove it holds nothing that could be a singleton
+ * *here*. A machine proven irrelevant to this repository is not listed.
+ */
+export interface RepoSingletonDirectoryRead {
+  owners: RepoSingletonOwner[];
+  illegible: string[];
+}
+
+/** A task row that is not provably finished, and so may still own a singleton. */
+function publishedTaskIsOpen(task: FirebaseFirestore.DocumentData): boolean {
+  return !(typeof task.closedAt === "string" && task.closedAt.trim().length > 0);
+}
+
+/**
+ * Whether a machine that cannot mark its singletons has nonetheless proven,
+ * from its own last published index, that it holds nothing for this repository.
+ *
+ * Any open task it published for this repository could be a singleton, and so
+ * could any open task whose repository is unattributable — absence of evidence
+ * is never permission to create, so both keep the machine illegible.
+ */
+function legacyIndexExcludesRepo(
+  snapshot: FirebaseFirestore.QuerySnapshot,
+  remoteUrlHash: string,
+): boolean {
+  for (const document of snapshot.docs) {
+    const task = document.data();
+    if (!publishedTaskIsOpen(task)) continue;
+    const repo = isRecord(task.repo) ? task.repo : null;
+    const hash = repo?.remoteUrlHash;
+    if (typeof hash !== "string" || hash.length === 0) return false;
+    if (hash === remoteUrlHash) return false;
+  }
+  return true;
+}
+
+/**
+ * Read the durable cloud task index as the account-wide singleton directory.
+ *
+ * Legibility is a property of one machine and one repository, never of the
+ * account: refusing every repository and every agent because one machine
+ * published before the current schema turned a single stale record into a
+ * permanent account-wide outage with no recovery that did not require physical
+ * access to that machine.
+ */
 export async function listRepoSingletonOwners(input: {
   userId: string;
   remoteUrlHash: string;
   agent: string;
   db?: Firestore;
   transaction?: FirebaseFirestore.Transaction;
-}): Promise<RepoSingletonOwner[]> {
+}): Promise<RepoSingletonDirectoryRead> {
   const db = input.db ?? getFirebaseServices().db;
   const desktopsRef = db.collection(`users/${input.userId}/desktops`);
   const desktops = input.transaction
@@ -415,23 +466,26 @@ export async function listRepoSingletonOwners(input: {
     const machineId = desktop.data().desktopId;
     return typeof machineId === "string" && desktop.id === cloudDesktopDocumentId(machineId);
   });
-  for (const desktop of canonicalDesktops) {
-    if (desktop.data().singletonDirectoryVersion !== 1) {
-      const machineId = desktop.data().desktopId;
-      throw new Error(
-        `repository singleton directory is incomplete for machine ${
-          typeof machineId === "string" ? machineId : desktop.id
-        }`,
-      );
-    }
-  }
   const taskSnapshots = await Promise.all(
     canonicalDesktops.map(async (desktop) => input.transaction
       ? await input.transaction.get(desktop.ref.collection("tasks"))
       : await desktop.ref.collection("tasks").get()),
   );
   const owners: RepoSingletonOwner[] = [];
-  for (const snapshot of taskSnapshots) {
+  const illegible: string[] = [];
+  for (const [index, desktop] of canonicalDesktops.entries()) {
+    const snapshot = taskSnapshots[index];
+    if (!snapshot) continue;
+    const data = desktop.data();
+    const machineId = typeof data.desktopId === "string" ? data.desktopId : desktop.id;
+    if (data.singletonDirectoryVersion !== 1) {
+      // Its rows carry no singleton marker, so it can never contribute an
+      // owner — only silence this lookup, or prove itself irrelevant to it.
+      if (!legacyIndexExcludesRepo(snapshot, input.remoteUrlHash)) {
+        illegible.push(machineId);
+      }
+      continue;
+    }
     for (const document of snapshot.docs) {
       const task = document.data();
       if (
@@ -453,10 +507,41 @@ export async function listRepoSingletonOwners(input: {
   owners.sort((left, right) =>
     left.machineId.localeCompare(right.machineId)
       || left.taskId.localeCompare(right.taskId));
-  return owners.filter((owner, index) =>
-    index === 0
-    || owner.machineId !== owners[index - 1]?.machineId
-    || owner.taskId !== owners[index - 1]?.taskId);
+  illegible.sort();
+  return {
+    owners: owners.filter((owner, index) =>
+      index === 0
+      || owner.machineId !== owners[index - 1]?.machineId
+      || owner.taskId !== owners[index - 1]?.taskId),
+    illegible: illegible.filter((machineId, index) => index === 0 || machineId !== illegible[index - 1]),
+  };
+}
+
+/**
+ * A directory that cannot answer whether this repository's singleton already
+ * exists somewhere. Creation refuses; reuse of a known owner does not.
+ *
+ * This stays an error rather than a claim status on purpose: `machineId` and
+ * `taskId` are required on the claim the desktop parses, so a new status could
+ * not be expressed without a desktop release.
+ */
+export class RepoSingletonDirectoryIncomplete extends Error {
+  readonly machineIds: string[];
+  readonly remoteUrlHash: string;
+  readonly agent: string;
+
+  constructor(machineIds: string[], remoteUrlHash: string, agent: string) {
+    super(
+      `repository singleton directory is incomplete for `
+      + `machine${machineIds.length === 1 ? "" : "s"} ${machineIds.join(", ")}: `
+      + `cannot tell whether a ${agent} singleton for repository ${remoteUrlHash} `
+      + `already exists there, so none was created`,
+    );
+    this.name = "RepoSingletonDirectoryIncomplete";
+    this.machineIds = machineIds;
+    this.remoteUrlHash = remoteUrlHash;
+    this.agent = agent;
+  }
 }
 
 /** Atomically reserve an account-wide singleton before its local task exists. */
@@ -474,11 +559,11 @@ export async function claimRepoSingleton(input: {
   // The test barrier models callers that discovered absence simultaneously.
   // Re-read inside the transaction: a publication/close can race discovery.
   if (input.afterAbsenceDiscovery) {
-    if ((await listRepoSingletonOwners(input)).length === 0) await input.afterAbsenceDiscovery();
+    if ((await listRepoSingletonOwners(input)).owners.length === 0) await input.afterAbsenceDiscovery();
   }
   const claimRef = repoSingletonClaimRef(db, input.userId, input.remoteUrlHash, input.agent);
   return await db.runTransaction(async (transaction) => {
-    const owners = await listRepoSingletonOwners({ ...input, db, transaction });
+    const { owners, illegible } = await listRepoSingletonOwners({ ...input, db, transaction });
     if (owners.length > 1) {
       const first = owners[0];
       if (!first) throw new Error("singleton owners disappeared");
@@ -492,13 +577,22 @@ export async function claimRepoSingleton(input: {
     }
     if (stored?.state === "owned" && !owners.some((owner) =>
       owner.machineId === stored?.machineId && owner.taskId === stored?.taskId)) {
-      // Only a complete authoritative publication can prove an old task gone.
-      // An offline owner with a published open task remains owned indefinitely.
+      // Only that machine's own publication can prove an old task gone. An
+      // offline owner with a published open task remains owned indefinitely,
+      // and a missing desktop document proves nothing at all.
+      //
+      // A machine that cannot mark its singletons still disproves this claim
+      // when its own index holds nothing open for this repository — that is a
+      // positive answer from the owner, not an inference from reachability or
+      // age, so it clears the claim exactly as a complete publication does.
       const desktop = await transaction.get(db.doc(
         `users/${input.userId}/desktops/${cloudDesktopDocumentId(stored.machineId)}`,
       ));
-      if (desktop.data()?.desktopId === stored.machineId
-        && desktop.data()?.singletonDirectoryVersion === 1) stored = null;
+      const data = desktop.data();
+      const namesMachine = data?.desktopId === stored.machineId;
+      const provenAbsentHere = namesMachine
+        && (data?.singletonDirectoryVersion === 1 || !illegible.includes(stored.machineId));
+      if (provenAbsentHere) stored = null;
     }
     const published = owners[0];
     if (published) {
@@ -518,6 +612,12 @@ export async function claimRepoSingleton(input: {
       return { status: "owned", ...published };
     }
     if (stored) return { status: stored.state, machineId: stored.machineId, taskId: stored.taskId };
+    // Nothing is known to own this singleton, but a machine that could not be
+    // read might. Reserving here is the one decision that genuinely depends on
+    // the unreadable index, so it is the only one that refuses.
+    if (illegible.length > 0) {
+      throw new RepoSingletonDirectoryIncomplete(illegible, input.remoteUrlHash, input.agent);
+    }
     const owner = { machineId: input.machineId, taskId: input.taskId };
     transaction.set(
       claimRef,

@@ -368,22 +368,34 @@ describe("remote task listing, creation, and actions E2E", () => {
     );
     expect(commandIds).toContain("custom:task-manager");
 
-    // A sibling desktop that has not published a complete directory makes the
-    // account-wide lookup unanswerable. That is uncertainty, never permission
-    // to elect a rival singleton.
+    // A sibling desktop that cannot mark its singletons. The hazard is not
+    // that it is offline — it is that it published an open task for THIS
+    // repository, which could be this repository's manager. That is
+    // uncertainty, never permission to elect a rival.
     const strandedDesktopUrl =
       `${firestoreBaseUrl(harness)}/users/${BUFFY_UID}/desktops/stranded-directory-desktop`;
-    const strandedWrite = await fetch(strandedDesktopUrl, {
-      method: "PATCH",
-      headers: { Authorization: "Bearer owner", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        fields: {
-          desktopId: { stringValue: "stranded-directory-desktop" },
-          singletonDirectoryVersion: { integerValue: "0" }
-        }
-      })
+    const strandedTaskUrl = `${strandedDesktopUrl}/tasks/stranded-open-task`;
+    const writeFirestore = async (url: string, fields: unknown): Promise<void> => {
+      const response = await fetch(url, {
+        method: "PATCH",
+        headers: { Authorization: "Bearer owner", "Content-Type": "application/json" },
+        body: JSON.stringify({ fields })
+      });
+      expect(response.ok).toBe(true);
+    };
+    await writeFirestore(strandedDesktopUrl, {
+      desktopId: { stringValue: "stranded-directory-desktop" },
+      singletonDirectoryVersion: { integerValue: "0" }
     });
-    expect(strandedWrite.ok).toBe(true);
+    const strandedTaskFields = (hash: string) => ({
+      ownerDesktopId: { stringValue: "stranded-directory-desktop" },
+      ownerLocalTaskId: { stringValue: "stranded-open-task" },
+      closedAt: { nullValue: null },
+      repo: {
+        mapValue: { fields: { remoteUrlHash: { stringValue: hash } } }
+      }
+    });
+    await writeFirestore(strandedTaskUrl, strandedTaskFields(remoteUrlHash));
 
     const runPath =
       `/v1/repos/${commandTask.repoId}/commands/${encodeURIComponent("custom:task-manager")}/run`;
@@ -392,16 +404,19 @@ describe("remote task listing, creation, and actions E2E", () => {
     }).then(() => null, (error: unknown) => error);
     expect(refusal).toBeInstanceOf(Error);
     // The desktop explains the refusal in the body, which is what the phone
-    // now shows instead of a bare status code.
+    // now shows instead of a bare status code, and it names the machine that
+    // could not be read.
     expect((refusal as Error).message).toContain("(503)");
     expect((refusal as Error).message).toContain("account directory");
+    expect((refusal as Error).message).toContain("stranded-directory-desktop");
     expect((refusal as Error).message).toContain("no singleton was created");
     expect(await openManagers()).toEqual([]);
 
-    await fetch(strandedDesktopUrl, {
-      method: "DELETE",
-      headers: { Authorization: "Bearer owner" }
-    });
+    // The same unreadable machine, now holding an open task for a different
+    // repository only. Its own index proves it holds nothing that could be
+    // this repository's manager, so this repository is no longer blocked —
+    // the desktop document stays exactly where it is, untouched.
+    await writeFirestore(strandedTaskUrl, strandedTaskFields("unrelated-remote-hash"));
 
     const created = asRecord(await invokeLanJson(harness, "POST", runPath, {
       catalogRevision: revision
@@ -447,6 +462,10 @@ describe("remote task listing, creation, and actions E2E", () => {
       30_000,
       "closing the singleton did not release it"
     );
+
+    for (const url of [strandedTaskUrl, strandedDesktopUrl]) {
+      await fetch(url, { method: "DELETE", headers: { Authorization: "Bearer owner" } });
+    }
   }, 180_000);
 
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {
