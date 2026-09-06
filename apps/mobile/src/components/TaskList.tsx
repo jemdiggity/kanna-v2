@@ -19,6 +19,8 @@ interface TaskListProps {
   loading?: boolean;
   /** Nest subtasks under their visible parent (desktop sidebar parity). */
   nestSubtasks?: boolean;
+  compact?: boolean;
+  selectedTaskId?: string | null;
   repoLabelForTask?: (task: TaskSummary) => string | null;
   /** Task ids this phone has pinned, in its own pin order. */
   pinnedTaskIds?: readonly string[];
@@ -34,6 +36,8 @@ export function TaskList({
   errorLabel = null,
   loading = false,
   nestSubtasks = false,
+  compact = false,
+  selectedTaskId = null,
   pinnedTaskIds = [],
   repoLabelForTask,
   testID,
@@ -59,12 +63,18 @@ export function TaskList({
     : taskSlots.map((slot) => ({ slot, depth: 0 }));
 
   return (
-    <View collapsable={false} style={styles.list} testID={testID}>
+    <View
+      collapsable={false}
+      style={[styles.list, compact ? styles.listCompact : null]}
+      testID={testID}
+    >
       {rows.map(({ slot, depth }) => {
         const task = taskUiSlotToTaskSummary(slot);
         const commonProps = {
+          compact,
           isSubtask: depth > 0,
           pinned: pinnedTaskIds.includes(task.id),
+          selected: slot.slotId === selectedTaskId || task.id === selectedTaskId,
           repoLabel: repoLabelForTask?.(task) ?? null,
           // A slot still being created has no durable id yet — only the local
           // slot id, which is not something the owner can cross-check — so it
@@ -119,6 +129,9 @@ export function TaskList({
 const styles = StyleSheet.create({
   list: {
     gap: 12
+  },
+  listCompact: {
+    gap: 6
   },
   subtaskRow: {
     borderLeftColor: "#2E4368",

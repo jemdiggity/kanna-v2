@@ -104,6 +104,7 @@ const EMPTY_MENTIONED_FILES: TerminalFileMentionHistory = {
 
 interface TaskScreenProps {
   task: TaskSummary;
+  desktopWorkspace?: boolean;
   blockerTasks?: readonly BlockerTaskRef[];
   e2eTaskSnapshotMarker?: string;
   terminalOutput: TerminalOutputLike;
@@ -216,6 +217,7 @@ function composerInputStatusIcon(
 
 export function TaskScreen({
   task,
+  desktopWorkspace = false,
   blockerTasks = [],
   e2eTaskSnapshotMarker,
   terminalOutput,
@@ -1047,13 +1049,17 @@ export function TaskScreen({
 
       <View
         pointerEvents="box-none"
-        style={styles.topChrome}
+        style={[
+          styles.topChrome,
+          desktopWorkspace ? styles.desktopTopChrome : null
+        ]}
         testID={MOBILE_E2E_IDS.taskTopChrome}
         onLayout={(event) => {
           const { y, height } = event.nativeEvent.layout;
           setTopChromeBottom(y + height);
         }}
       >
+        {!desktopWorkspace ? (
         <Pressable
           accessibilityHint="Returns to the previous screen"
           accessibilityLabel={isBackPending ? "Going back" : "Back"}
@@ -1079,6 +1085,7 @@ export function TaskScreen({
             <Text accessible={false} style={styles.backLabel}>{"<"}</Text>
           )}
         </Pressable>
+        ) : null}
         <Pressable
           accessible
           accessibilityHint={
@@ -1096,6 +1103,7 @@ export function TaskScreen({
           accessibilityValue={{ text: effectiveActivity }}
           style={[
             styles.titleChip,
+            desktopWorkspace ? styles.desktopTitleChip : null,
             {
               borderColor: stageTheme.border,
               borderLeftColor: stageTheme.accent
@@ -1174,6 +1182,44 @@ export function TaskScreen({
             </>
           )}
         </Pressable>
+        {desktopWorkspace ? (
+          <View style={styles.desktopWorkspaceTabs}>
+            <View
+              accessibilityRole="tab"
+              accessibilityState={{ selected: true }}
+              style={[styles.desktopWorkspaceTab, styles.desktopWorkspaceTabSelected]}
+              testID={MOBILE_E2E_IDS.taskWorkspaceTerminalTab}
+            >
+              <Text style={styles.desktopWorkspaceTabSelectedLabel}>Terminal</Text>
+            </View>
+            <Pressable
+              accessibilityRole="tab"
+              style={styles.desktopWorkspaceTab}
+              testID={MOBILE_E2E_IDS.taskWorkspaceFilesTab}
+              onPress={() => setExplorerTaskId(task.id)}
+            >
+              <Text style={styles.desktopWorkspaceTabLabel}>Files</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="tab"
+              style={styles.desktopWorkspaceTab}
+              testID={MOBILE_E2E_IDS.taskWorkspaceDiffTab}
+              onPress={() => setDiffModalTaskId(task.id)}
+            >
+              <Text style={styles.desktopWorkspaceTabLabel}>Diff</Text>
+            </Pressable>
+            {previewAvailable ? (
+              <Pressable
+                accessibilityRole="tab"
+                style={styles.desktopWorkspaceTab}
+                testID={MOBILE_E2E_IDS.taskPreviewButton}
+                onPress={() => setPreviewModalTaskId(task.id)}
+              >
+                <Text style={styles.desktopWorkspaceTabLabel}>Preview</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
       </View>
 
       <View
@@ -1186,7 +1232,7 @@ export function TaskScreen({
         ]}
       >
         <View style={styles.composerActions}>
-          {previewAvailable ? (
+          {previewAvailable && !desktopWorkspace ? (
             <Pressable
               accessibilityLabel="Preview dev server"
               accessibilityRole="button"
@@ -1607,6 +1653,18 @@ const styles = StyleSheet.create({
     elevation: 6,
     zIndex: 5
   },
+  desktopTopChrome: {
+    alignItems: "center",
+    backgroundColor: "rgba(11, 21, 37, 0.97)",
+    borderBottomColor: "#22304D",
+    borderBottomWidth: 1,
+    gap: 8,
+    left: 0,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    right: 0,
+    top: 0
+  },
   backButton: {
     alignItems: "center",
     backgroundColor: "rgba(13, 21, 36, 0.78)",
@@ -1644,6 +1702,38 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingLeft: 14 - (TASK_STAGE_STRIPE_WIDTH - 1),
     paddingVertical: 10
+  },
+  desktopTitleChip: {
+    backgroundColor: "transparent",
+    borderRadius: 6,
+    maxWidth: 310,
+    paddingHorizontal: 10,
+    paddingVertical: 7
+  },
+  desktopWorkspaceTabs: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 3
+  },
+  desktopWorkspaceTab: {
+    alignItems: "center",
+    borderRadius: 6,
+    justifyContent: "center",
+    minHeight: 36,
+    paddingHorizontal: 11
+  },
+  desktopWorkspaceTabSelected: {
+    backgroundColor: "#22304D"
+  },
+  desktopWorkspaceTabLabel: {
+    color: "#8FA4C4",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  desktopWorkspaceTabSelectedLabel: {
+    color: "#F5F7FB",
+    fontSize: 12,
+    fontWeight: "800"
   },
   titleChipExpanded: {
     alignItems: "stretch",

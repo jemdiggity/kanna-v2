@@ -380,8 +380,17 @@ function TabletTaskSidebar() {
 
   return (
     <View style={styles.tabletSidebarContent}>
+      <View style={styles.tabletBrand}>
+        <View style={styles.tabletBrandMark}>
+          <Text style={styles.tabletBrandMarkText}>K</Text>
+        </View>
+        <View style={styles.tabletBrandCopy}>
+          <Text style={styles.tabletBrandName}>Kanna</Text>
+          <Text style={styles.tabletBrandEyebrow}>TASK WORKSPACE</Text>
+        </View>
+      </View>
       <View style={styles.tabletSidebarHeader}>
-        <Text style={styles.tabletSidebarTitle}>Workspace</Text>
+        <Text style={styles.tabletSidebarTitle}>Tasks</Text>
         <AccountBadge auth={state.auth} onPress={onOpenAccount} />
       </View>
       <View style={styles.tabletSidebarActions}>
@@ -402,9 +411,11 @@ function TabletTaskSidebar() {
       </View>
       <View style={styles.tabletTaskList}>
         <TasksScreen
+          sidebarMode
           needsDesktopSetup={needsDesktopSetup}
           repos={state.repos}
           selectedRepoId={state.selectedRepoId}
+          selectedTaskId={state.selectedTaskId}
           taskCollectionStatus={state.taskCollectionStatus}
           repoCommandErrorMessage={
             state.pendingRepoCommandTask ? state.repoCommandErrorMessage : null
@@ -658,6 +669,7 @@ function TaskDetailRoute({
   const {
     controller,
     e2eTaskSnapshotMarker,
+    isTabletWorkspace,
     quickReplies,
     quickRepliesHydrated,
     state,
@@ -754,6 +766,7 @@ function TaskDetailRoute({
   return (
     <TaskScreen
       blockerTasks={resolveBlockerTasks(task, visibleTasks(state))}
+      desktopWorkspace={isTabletWorkspace}
       e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
       task={task}
       terminalErrorMessage={state.taskTerminalErrorMessage}
@@ -1106,8 +1119,46 @@ const styles = StyleSheet.create({
   },
   tabletSidebarContent: {
     flex: 1,
-    paddingHorizontal: 14,
-    paddingTop: 16
+    paddingHorizontal: 10,
+    paddingTop: 12
+  },
+  tabletBrand: {
+    alignItems: "center",
+    borderBottomColor: "#22304D",
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 14,
+    paddingBottom: 12,
+    paddingHorizontal: 4
+  },
+  tabletBrandMark: {
+    alignItems: "center",
+    backgroundColor: "#E8F1FF",
+    borderRadius: 9,
+    height: 34,
+    justifyContent: "center",
+    width: 34
+  },
+  tabletBrandMarkText: {
+    color: "#0B1220",
+    fontSize: 18,
+    fontWeight: "900"
+  },
+  tabletBrandCopy: {
+    flex: 1
+  },
+  tabletBrandName: {
+    color: "#F5F7FB",
+    fontSize: 17,
+    fontWeight: "800"
+  },
+  tabletBrandEyebrow: {
+    color: "#7186A7",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    marginTop: 1
   },
   tabletSidebarHeader: {
     alignItems: "center",
@@ -1117,7 +1168,7 @@ const styles = StyleSheet.create({
   },
   tabletSidebarTitle: {
     color: "#F5F7FB",
-    fontSize: 24,
+    fontSize: 16,
     fontWeight: "800"
   },
   tabletSidebarActions: {
@@ -1129,7 +1180,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "#17243A",
     borderColor: "#2B3C5C",
-    borderRadius: 10,
+    borderRadius: 7,
     borderWidth: 1,
     flex: 1,
     minHeight: 44,
@@ -1138,7 +1189,7 @@ const styles = StyleSheet.create({
   },
   tabletSidebarActionText: {
     color: "#DCE7F8",
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "700"
   },
   tabletTaskList: {
