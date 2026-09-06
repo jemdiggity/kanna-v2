@@ -44,6 +44,35 @@ export interface LineageResetRecord {
 }
 
 /**
+ * A deliberate move of an unreleased release branch to a newer main tip.
+ * The record is written to the desktop-staging release and matched only by
+ * the next candidate from this exact branch epoch.
+ */
+export interface LineageRecutRecord {
+  recutId: string;
+  recutAt: string;
+  series: string;
+  branch: string;
+  oldTip: string;
+  newTip: string;
+  archiveTag: string;
+  fromVersion: string | null;
+  fromCommit: string | null;
+  fromSourceBranch: string | null;
+  priorEpoch: string;
+  requester: string;
+  reason: string;
+}
+
+export interface LineageRecutApplicationRecord {
+  recutId: string;
+  version: string;
+  commit: string;
+  appliedAt: string;
+  tag: string;
+}
+
+/**
  * Audit evidence for the one ordinary divergence caused by the release-branch
  * model: after an RC is promoted, trunk may resume from the branch point even
  * though it cannot contain the branch's cherry-picked commit SHAs.
@@ -59,6 +88,8 @@ export interface PostPromotionTrunkRecord {
 }
 
 export const LINEAGE_RESET_MARKER = "Lineage-Reset:";
+export const LINEAGE_RECUT_MARKER = "Lineage-Recut:";
+export const LINEAGE_RECUT_APPLIED_MARKER = "Lineage-Recut-Applied:";
 export const POST_PROMOTION_TRUNK_MARKER = "Post-Promotion-Trunk-Resumption:";
 export const STAGING_CHANNEL_BODY_HEADER = "Pointer-only desktop staging updater channel.";
 
@@ -76,6 +107,32 @@ export function formatLineageResetBlock(record: LineageResetRecord): string {
     `Reset-From: ${record.fromVersion} (${record.fromCommit ?? "unknown-commit"}) source ${record.fromSourceBranch ?? "unknown"}`,
     `Reset-To: ${record.toBranch}`,
     `Reset-Reason: ${record.reason}`
+  ].join("\n");
+}
+
+export function formatLineageRecutBlock(record: LineageRecutRecord): string {
+  return [
+    `${LINEAGE_RECUT_MARKER} ${record.recutAt}`,
+    `Recut-Id: ${record.recutId}`,
+    `Recut-Series: ${record.series}`,
+    `Recut-Branch: ${record.branch}`,
+    `Recut-Old-Tip: ${record.oldTip}`,
+    `Recut-New-Tip: ${record.newTip}`,
+    `Recut-Archive-Tag: ${record.archiveTag}`,
+    `Recut-From: ${record.fromVersion ?? "empty-channel"} (${record.fromCommit ?? "unknown-commit"}) source ${record.fromSourceBranch ?? "unknown"}`,
+    `Recut-Prior-Epoch: ${record.priorEpoch}`,
+    `Recut-Requester: ${record.requester}`,
+    `Recut-Reason: ${record.reason}`
+  ].join("\n");
+}
+
+export function formatLineageRecutApplicationBlock(record: LineageRecutApplicationRecord): string {
+  return [
+    `${LINEAGE_RECUT_APPLIED_MARKER} ${record.appliedAt}`,
+    `Recut-Applied-Id: ${record.recutId}`,
+    `Recut-Applied-Version: ${record.version}`,
+    `Recut-Applied-Commit: ${record.commit}`,
+    `Recut-Applied-Tag: ${record.tag}`
   ].join("\n");
 }
 
@@ -113,6 +170,66 @@ export function parseLineageResetRecord(body: string): LineageResetRecord | null
     fromSourceBranch: fromSourceBranch && fromSourceBranch !== "unknown" ? fromSourceBranch : null,
     toBranch: (to[1] ?? "").trim(),
     reason: reason?.[1]?.trim() ?? ""
+  };
+}
+
+/** Reads the newest recut block, preserving older blocks below it. */
+export function parseLineageRecutRecord(body: string): LineageRecutRecord | null {
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim().startsWith(LINEAGE_RECUT_MARKER));
+  if (start < 0) return null;
+  const recutAt = lines[start]?.trim().slice(LINEAGE_RECUT_MARKER.length).trim() ?? "";
+  const block = lines.slice(start + 1, start + 12).join("\n");
+  const id = /^Recut-Id:[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const series = /^Recut-Series:[ \t]*(\d+\.\d+)[ \t]*$/m.exec(block);
+  const branch = /^Recut-Branch:[ \t]*(release\/\d+\.\d+)[ \t]*$/m.exec(block);
+  const oldTip = /^Recut-Old-Tip:[ \t]*([0-9a-f]{40})[ \t]*$/im.exec(block);
+  const newTip = /^Recut-New-Tip:[ \t]*([0-9a-f]{40})[ \t]*$/im.exec(block);
+  const archiveTag = /^Recut-Archive-Tag:[ \t]*(recut\/release\/\d+\.\d+-\d+)[ \t]*$/m.exec(block);
+  const from = /^Recut-From:[ \t]*(\S+)[ \t]*\(([^)]*)\)[ \t]*source[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const priorEpoch = /^Recut-Prior-Epoch:[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const requester = /^Recut-Requester:[ \t]*(.+?)[ \t]*$/m.exec(block);
+  const reason = /^Recut-Reason:[ \t]*(.+?)[ \t]*$/m.exec(block);
+  if (!recutAt || !id?.[1] || !series?.[1] || !branch?.[1] || !oldTip?.[1] || !newTip?.[1] || !archiveTag?.[1] || !from?.[1] || !priorEpoch?.[1] || !requester?.[1] || !reason?.[1]) {
+    return null;
+  }
+  const fromVersion = from[1] === "empty-channel" ? null : normalizeStagingVersion(from[1]);
+  const fromCommit = from[2] !== "unknown-commit" ? from[2] : null;
+  const fromSourceBranch = from[3] !== "unknown" ? from[3] : null;
+  return {
+    recutId: id[1],
+    recutAt,
+    series: series[1],
+    branch: branch[1],
+    oldTip: oldTip[1].toLowerCase(),
+    newTip: newTip[1].toLowerCase(),
+    archiveTag: archiveTag[1],
+    fromVersion,
+    fromCommit,
+    fromSourceBranch,
+    priorEpoch: priorEpoch[1].trim(),
+    requester: requester[1].trim(),
+    reason: reason[1].trim()
+  };
+}
+
+export function parseLineageRecutApplicationRecord(body: string): LineageRecutApplicationRecord | null {
+  const lines = body.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim().startsWith(LINEAGE_RECUT_APPLIED_MARKER));
+  if (start < 0) return null;
+  const appliedAt = lines[start]?.trim().slice(LINEAGE_RECUT_APPLIED_MARKER.length).trim() ?? "";
+  const block = lines.slice(start + 1, start + 6).join("\n");
+  const id = /^Recut-Applied-Id:[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const version = /^Recut-Applied-Version:[ \t]*(\S+)[ \t]*$/m.exec(block);
+  const commit = /^Recut-Applied-Commit:[ \t]*([0-9a-f]{40})[ \t]*$/im.exec(block);
+  const tag = /^Recut-Applied-Tag:[ \t]*(recut-applied\/\S+)[ \t]*$/m.exec(block);
+  if (!appliedAt || !id?.[1] || !version?.[1] || !commit?.[1] || !tag?.[1]) return null;
+  return {
+    recutId: id[1],
+    version: normalizeStagingVersion(version[1]),
+    commit: commit[1].toLowerCase(),
+    appliedAt,
+    tag: tag[1]
   };
 }
 
@@ -154,6 +271,14 @@ export function composeStagingChannelBody(existingBody: string, record: LineageR
   return composeStagingChannelAuditBlock(existingBody, formatLineageResetBlock(record));
 }
 
+export function composeStagingChannelRecutBody(existingBody: string, record: LineageRecutRecord): string {
+  return composeStagingChannelAuditBlock(existingBody, formatLineageRecutBlock(record));
+}
+
+export function composeStagingChannelRecutApplicationBody(existingBody: string, record: LineageRecutApplicationRecord): string {
+  return composeStagingChannelAuditBlock(existingBody, formatLineageRecutApplicationBlock(record));
+}
+
 export function composePostPromotionTrunkBody(existingBody: string, record: PostPromotionTrunkRecord): string {
   return composeStagingChannelAuditBlock(existingBody, formatPostPromotionTrunkBlock(record));
 }
@@ -171,6 +296,21 @@ export function resetAuthorizes(
   if (!reset) return false;
   if (normalizeStagingVersion(reset.fromVersion) !== normalizeStagingVersion(args.fromVersion)) return false;
   return reset.toBranch === args.toBranch;
+}
+
+/** A recut authorizes one exact next candidate from the moved branch. */
+export function recutAuthorizes(
+  recut: LineageRecutRecord | null,
+  args: { fromVersion: string; fromCommit: string | null; toCommit: string | null; toBranch: string | null; application?: LineageRecutApplicationRecord | null }
+): boolean {
+  if (!recut || !args.fromCommit || !args.toCommit || !args.toBranch || !recut.fromVersion || !recut.fromCommit) return false;
+  if (args.application?.recutId === recut.recutId) return false;
+  return (
+    normalizeStagingVersion(recut.fromVersion) === normalizeStagingVersion(args.fromVersion) &&
+    recut.fromCommit.toLowerCase() === args.fromCommit.toLowerCase() &&
+    recut.newTip.toLowerCase() === args.toCommit.toLowerCase() &&
+    recut.branch === args.toBranch
+  );
 }
 
 export function promotionAuthorizes(
@@ -206,6 +346,8 @@ export interface StagingPublishGateInput {
   /** Whether the active candidate's metadata could be resolved at all. */
   activeMetadataError: string | null;
   reset: LineageResetRecord | null;
+  recut?: LineageRecutRecord | null;
+  recutApplication?: LineageRecutApplicationRecord | null;
   /** Present only after GitHub/tag identity and forward-trunk ancestry were verified. */
   postPromotion: PostPromotionTrunkRecord | null;
 }
@@ -215,6 +357,7 @@ export interface StagingPublishGateDecision {
   reason: string | null;
   waivedByReset: boolean;
   authorizedByPromotion: boolean;
+  authorizedByRecut: boolean;
   frozenBy: string | null;
 }
 
@@ -295,6 +438,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
       allowed: false,
       waivedByReset: false,
       authorizedByPromotion: false,
+      authorizedByRecut: false,
       frozenBy: null,
       reason:
         `Cannot verify staging lineage: ${active ? `the active candidate ${active.tag}` : "the staging channel"} ` +
@@ -304,7 +448,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
   }
 
   if (!active) {
-    return { allowed: true, reason: null, waivedByReset: false, authorizedByPromotion: false, frozenBy: null };
+    return { allowed: true, reason: null, waivedByReset: false, authorizedByPromotion: false, authorizedByRecut: false, frozenBy: null };
   }
 
   const freeze = evaluateStagingFreeze({
@@ -314,7 +458,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
     reset: input.reset
   });
   if (freeze.resetAuthorizesPublish) {
-    return { allowed: true, reason: null, waivedByReset: true, authorizedByPromotion: false, frozenBy: null };
+    return { allowed: true, reason: null, waivedByReset: true, authorizedByPromotion: false, authorizedByRecut: false, frozenBy: null };
   }
 
   if (freeze.active) {
@@ -322,20 +466,30 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
       allowed: false,
       waivedByReset: false,
       authorizedByPromotion: false,
+      authorizedByRecut: false,
       frozenBy: freeze.branch,
       reason: freeze.reason
     };
   }
 
+  const authorizedByRecut = recutAuthorizes(input.recut ?? null, {
+    fromVersion: active.version,
+    fromCommit: active.commit,
+    toCommit: input.proposedCommit,
+    toBranch: input.proposedSourceBranch,
+    application: input.recutApplication
+  });
+
   switch (input.relationship) {
     case "same-commit":
     case "descendant":
-      return { allowed: true, reason: null, waivedByReset: false, authorizedByPromotion: false, frozenBy: null };
+      return { allowed: true, reason: null, waivedByReset: false, authorizedByPromotion: false, authorizedByRecut, frozenBy: null };
     case "behind":
       return {
         allowed: false,
         waivedByReset: false,
         authorizedByPromotion: false,
+        authorizedByRecut: false,
         frozenBy: null,
         reason:
           `Refusing to roll the staging channel back. ${input.proposedCommit} is an ancestor of the active candidate ` +
@@ -358,15 +512,17 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
           reason: null,
           waivedByReset: false,
           authorizedByPromotion: true,
+          authorizedByRecut: false,
           frozenBy: null
         };
       }
       return {
-        allowed: false,
+        allowed: authorizedByRecut,
         waivedByReset: false,
         authorizedByPromotion: false,
+        authorizedByRecut,
         frozenBy: null,
-        reason:
+        reason: authorizedByRecut ? null :
           `Refusing to publish a staging candidate whose history diverged from the active channel. ` +
           `${input.proposedCommit} (${input.proposedSourceBranch}) and the active candidate ${active.tag} ` +
           `(${active.commit ?? "unknown"}, source ${active.sourceBranch ?? "unknown"}) share only an older merge base, ` +
@@ -380,6 +536,7 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
         allowed: false,
         waivedByReset: false,
         authorizedByPromotion: false,
+        authorizedByRecut: false,
         frozenBy: null,
         reason:
           `Cannot compare ${input.proposedCommit} with the active candidate ${active.tag} ` +
@@ -395,7 +552,10 @@ export interface CandidateLineage {
   valid: boolean;
   authorizedByReset: boolean;
   authorizedByPromotion: boolean;
+  authorizedByRecut: boolean;
   reset: LineageResetRecord | null;
+  recut: LineageRecutRecord | null;
+  recutApplication?: LineageRecutApplicationRecord | null;
   postPromotion: PostPromotionTrunkRecord | null;
   detail: string;
 }
@@ -410,9 +570,12 @@ export function evaluateCandidateLineage(args: {
   previous: { version: string; tag: string; commit: string | null } | null;
   relationship: StagingLineageRelationship;
   reset: LineageResetRecord | null;
+  recut?: LineageRecutRecord | null;
+  recutApplication?: LineageRecutApplicationRecord | null;
   postPromotion: PostPromotionTrunkRecord | null;
 }): CandidateLineage {
   const { candidate, previous, relationship, reset, postPromotion } = args;
+  const recut = args.recut ?? null;
   if (!previous) {
     return {
       relationship: "initial",
@@ -420,7 +583,9 @@ export function evaluateCandidateLineage(args: {
       valid: true,
       authorizedByReset: false,
       authorizedByPromotion: false,
+      authorizedByRecut: false,
       reset,
+      recut,
       postPromotion,
       detail: `${candidate.tag} is the first staging candidate on this channel; there is no prior lineage to compare.`
     };
@@ -437,6 +602,15 @@ export function evaluateCandidateLineage(args: {
       toCommit: candidate.commit,
       toBranch: candidate.sourceBranch
     });
+  const authorizedByRecut =
+    (relationship === "same-commit" || relationship === "descendant" || relationship === "diverged") &&
+    recutAuthorizes(recut, {
+      fromVersion: previous.version,
+      fromCommit: previous.commit,
+      toCommit: candidate.commit,
+      toBranch: candidate.sourceBranch,
+      application: args.recutApplication
+    });
 
   switch (relationship) {
     case "same-commit":
@@ -446,7 +620,9 @@ export function evaluateCandidateLineage(args: {
         valid: true,
         authorizedByReset: false,
         authorizedByPromotion: false,
+        authorizedByRecut,
         reset,
+        recut,
         postPromotion,
         detail: `${candidate.tag} rebuilt the same commit as ${previous.tag}.`
       };
@@ -457,7 +633,9 @@ export function evaluateCandidateLineage(args: {
         valid: true,
         authorizedByReset: false,
         authorizedByPromotion: false,
+        authorizedByRecut,
         reset,
+        recut,
         postPromotion,
         detail: `${candidate.tag} (${candidate.commit ?? "unknown"}) is a descendant of ${previous.tag} (${previous.commit ?? "unknown"}).`
       };
@@ -468,7 +646,9 @@ export function evaluateCandidateLineage(args: {
         valid: authorizedByReset,
         authorizedByReset,
         authorizedByPromotion: false,
+        authorizedByRecut: false,
         reset,
+        recut,
         postPromotion,
         detail: authorizedByReset
           ? `${candidate.tag} moved the channel backwards from ${previous.tag}, authorized by the recorded lineage reset of ${reset?.resetAt}.`
@@ -478,10 +658,12 @@ export function evaluateCandidateLineage(args: {
       return {
         relationship,
         previous,
-        valid: authorizedByReset || authorizedByPromotion,
+        valid: authorizedByReset || authorizedByPromotion || authorizedByRecut,
         authorizedByReset,
         authorizedByPromotion,
+        authorizedByRecut,
         reset,
+        recut,
         postPromotion,
         detail: authorizedByReset
           ? `${candidate.tag} diverged from ${previous.tag}, authorized by the recorded lineage reset of ${reset?.resetAt}.`
@@ -498,7 +680,9 @@ export function evaluateCandidateLineage(args: {
         valid: false,
         authorizedByReset: false,
         authorizedByPromotion: false,
+        authorizedByRecut: false,
         reset,
+        recut,
         postPromotion,
         detail: `Could not compare ${candidate.tag} with ${previous.tag}; one of the commits is unavailable locally.`
       };

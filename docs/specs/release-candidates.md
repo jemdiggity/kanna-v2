@@ -87,6 +87,7 @@ version gate still applies, so an explicit flag cannot roll the channel back.
 | ancestor (a rollback) | refused — use `--rollback-to` or a reset |
 | diverged, promoted release-branch RC → forward main | allowed — promotion identity and branch-point ancestry verified; provenance recorded |
 | diverged (the incident) | refused — ship a descendant, or record a reset |
+| diverged, explicit unreleased-series recut | allowed only for the one next RC from the recut branch, with matching `Lineage-Recut` evidence |
 | unresolvable / active candidate metadata unreadable | refused — fail closed |
 | channel unreadable (network, rate limit, 5xx, bad manifest) | refused — fail closed |
 | no active candidate (channel uninitialized) | allowed — channel initialization |
@@ -155,6 +156,50 @@ Three paths may move the channel against raw commit ancestry:
   may diverge.
 
 Nothing else may. There is no flag on an ordinary ship that weakens the gates.
+
+### Recutting an unreleased series
+
+An unreleased release branch may be moved when the owner decides that a later
+main feature belongs in the same series. This is an explicit, audited branch
+move, not an implicit main ship or an abandonment:
+
+```sh
+./kd release cut --version 0.3.0 --recut \
+  --reason "include the feature in 0.3" \
+  --confirm-recut 0.3.0-staging.10 \
+  --confirm-old-tip <origin/release/0.3-sha>
+```
+
+`--recut` is mutually exclusive with bump and abandonment options. It requires
+the observed active staging version (or `empty`) and the old branch SHA, and
+`--dry-run` performs all checks without mutation. It refuses unreadable channel
+state, any production tag in the `X.Y` series, an abandoned or missing branch,
+unknown git comparisons, and branch-only commits. Patch-equivalent backports
+are safe; branch-exclusive merge commits are rejected conservatively. The main
+tip and old branch tip are pinned, the old tip is archived first as a unique
+annotated `recut/release/X.Y-N` tag with structured provenance, and the branch
+moves only with an exact old-SHA `--force-with-lease`. A same-tip request is a
+no-op.
+
+The move prepends a `Lineage-Recut:` block to `desktop-staging`. Only the next
+RC from that branch and exact new tip may use it; that RC receives a durable
+`recut-applied/<id>` tag and a matching application note. The replacement RC
+starts a new soak, and a rollback cannot revive the authorization. `status`
+reports the actual git relationship separately from `authorizedByRecut` and
+the archived recut tags, with `pending`, `applied`, `incomplete`, or
+`superseded` status. Records are retained independently of the five-RC display
+retention window. Release mutations assume one operator at a time; kd does not
+implement a cross-machine writer reservation. Instead, recut re-fetches and
+revalidates the pinned main tip, old branch tip, active channel candidate, and
+production tags before the archive tag, branch move, and channel write. The
+branch move also requires an exact old-SHA `--force-with-lease`, so a concurrent
+writer is detected and refused rather than overwritten. Older kd binaries do
+not understand these recut records, so operators must use a current binary.
+
+Bare main RCs remain supported and retain their existing freeze and provenance
+gates. This change deliberately rejects making every main ship an implicit
+recut: that would silently replace an active branch soak and would require a
+separate product decision about old main-RC promotion.
 
 ## The reset / abandon operation
 
@@ -298,10 +343,11 @@ Safety state is separate from mechanics. The result carries:
   commits behind `origin/main`, publication time, and age in hours.
 - `lineage` — `relationship` (`initial` / `same-commit` / `descendant` /
   `behind` / `diverged` / `unknown`), the `previous` candidate it is compared
-  against, `valid`, `authorizedByReset`, `authorizedByPromotion`, the parsed
-  `reset` / `postPromotion` audit records, and a human-readable `detail`.
+  against, `valid`, `authorizedByReset`, `authorizedByPromotion`,
+  `authorizedByRecut`, the parsed `reset` / `recut` / `postPromotion` audit
+  records, and a human-readable `detail`.
 - `releaseBranch` — the series branch when one exists, plus `unmergedCommits` /
-  `unmergedCommitCount` (below).
+  `unmergedCommitCount` and archived `recuts` (below).
 - `freeze` — whether main staging publishes are currently frozen, by which
   branch, and why.
 - `policy` — the resolved soak policy.
@@ -353,6 +399,14 @@ bugfixes.
 - **The branch goes dormant after release.** Reuse it for `X.Y.1` hotfix RCs
   (the series versioning picks the next patch automatically); cut `release/X.(Y+1)`
   for the next feature release.
+
+The current 0.3 migration is a recut-shaped repair: `release/0.3` remains at
+the `2d0e50d0…` commit used by `v0.3.0-staging.9`, while `desktop-staging` serves
+`v0.3.0-staging.10` from main. Archive the old branch tip and recut it to the
+freshly fetched main tip, preserving the September 4 reset and both historical
+`Source-Branch` values. Do not move the channel or retroactively authorize
+`.10`; it remains served until a fresh `release/0.3` RC, normally `.11`, is
+published and soaks from its new publication time.
 
 Until the bare-main default described above is available in a shipped `kd`, the
 next main staging ship after a promotion must pass `--minor` explicitly.
@@ -542,7 +596,10 @@ five-minute decision about a build that already proved itself, not a project.
 - `kd release cut [--major|--minor|--patch] [--version X.Y.0]
   [--abandon-series X.Y[,X.Y]] [--reason <why>]` / MCP `release_cut` — push
   `release/X.Y` at `origin/main`, naming the target series explicitly when a
-  series is being abandoned rather than released.
+  series is being abandoned rather than released. For an unreleased existing
+  series, add `--recut`, `--confirm-recut <active-version|empty>`, and
+  `--confirm-old-tip <sha>`; this moves the branch under the audited recut
+  rules above. Bare main RCs remain a separate, supported path.
 - `kd release promote <staging-version> [--dry-run] [--arm64|--x86_64]
   [--override-soak <reason>]` / MCP `release_promote` — implemented as a
   promotion preflight feeding the existing `shipRelease` production path

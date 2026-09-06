@@ -5,18 +5,23 @@ import { describe, expect, it } from "vitest";
 import {
   composePostPromotionTrunkBody,
   composeStagingChannelBody,
+  composeStagingChannelRecutBody,
   evaluateCandidateLineage,
   evaluatePromotionGate,
   evaluateSoak,
   evaluateStagingPublishGate,
   formatLineageResetBlock,
+  formatLineageRecutBlock,
   formatPostPromotionTrunkBlock,
   isReleaseBranchName,
   parseLineageResetRecord,
+  parseLineageRecutRecord,
   parsePostPromotionTrunkRecord,
   promotionAuthorizes,
   resetAuthorizes,
+  recutAuthorizes,
   type LineageResetRecord,
+  type LineageRecutRecord,
   type PostPromotionTrunkRecord,
   type StagingCandidate
 } from "../src/runtime/release-lineage";
@@ -38,6 +43,22 @@ const RESET: LineageResetRecord = {
   fromSourceBranch: "main",
   toBranch: "release/0.1",
   reason: "hotfix the 0.1 series"
+};
+
+const RECUT: LineageRecutRecord = {
+  recutId: "0.1-1",
+  recutAt: "2026-07-03T00:00:00Z",
+  series: "0.1",
+  branch: "release/0.1",
+  oldTip: ACTIVE.commit ?? "",
+  newTip: "8888888888888888888888888888888888888888",
+  archiveTag: "recut/release/0.1-1",
+  fromVersion: ACTIVE.version,
+  fromCommit: ACTIVE.commit,
+  fromSourceBranch: ACTIVE.sourceBranch,
+  priorEpoch: ACTIVE.version,
+  requester: "test-user",
+  reason: "include the latest feature"
 };
 
 const POST_PROMOTION: PostPromotionTrunkRecord = {
@@ -162,6 +183,40 @@ describe("staging publish gate", () => {
       }).allowed
     ).toBe(false);
   });
+
+  it("allows exactly the next candidate authorized by a recut", () => {
+    const authorized = gate({
+      relationship: "diverged",
+      proposedSourceBranch: "release/0.1",
+      proposedCommit: RECUT.newTip,
+      recut: RECUT
+    });
+    expect(authorized).toMatchObject({ allowed: true, authorizedByRecut: true });
+    expect(gate({ relationship: "diverged", proposedSourceBranch: "release/0.2", recut: RECUT }).allowed).toBe(false);
+    expect(recutAuthorizes(RECUT, {
+      fromVersion: ACTIVE.version,
+      fromCommit: ACTIVE.commit,
+      toCommit: RECUT.newTip,
+      toBranch: "release/0.1"
+    })).toBe(true);
+  });
+
+  it("does not reuse a recut after its destination application is recorded", () => {
+    const applied = gate({
+      relationship: "diverged",
+      proposedSourceBranch: "release/0.1",
+      proposedCommit: RECUT.newTip,
+      recut: RECUT,
+      recutApplication: {
+        recutId: RECUT.recutId,
+        version: "0.1.0-staging.8",
+        commit: RECUT.newTip,
+        appliedAt: "2026-07-04T00:00:00Z",
+        tag: "recut-applied/0.1-1"
+      }
+    });
+    expect(applied).toMatchObject({ allowed: false, authorizedByRecut: false });
+  });
 });
 
 describe("lineage reset records", () => {
@@ -189,6 +244,15 @@ describe("lineage reset records", () => {
   it("matches a version with or without its leading v", () => {
     expect(resetAuthorizes(RESET, { fromVersion: "v0.1.0-staging.7", toBranch: "release/0.1" })).toBe(true);
     expect(resetAuthorizes(null, { fromVersion: "0.1.0-staging.7", toBranch: "release/0.1" })).toBe(false);
+  });
+});
+
+describe("lineage recut records", () => {
+  it("round-trips the recut audit block and preserves the old reset", () => {
+    const body = composeStagingChannelRecutBody(composeStagingChannelBody("Pointer-only desktop staging updater channel.", RESET), RECUT);
+    expect(parseLineageRecutRecord(body)).toEqual(RECUT);
+    expect(parseLineageResetRecord(body)).toEqual(RESET);
+    expect(formatLineageRecutBlock(RECUT)).toContain("Recut-New-Tip: 8888888888888888888888888888888888888888");
   });
 });
 

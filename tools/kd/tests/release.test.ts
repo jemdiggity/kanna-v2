@@ -45,6 +45,7 @@ import {
   type ReleaseResetStagingInput,
   type ReleaseShipInput
 } from "../src/runtime/release";
+import { parseLineageRecutRecord } from "../src/runtime/release-lineage";
 
 interface CommandCall {
   command: string;
@@ -2487,6 +2488,71 @@ describe("release status", () => {
   const PREVIOUS_RC_COMMIT = "9999999999999999999999999999999999999999";
   const NOW = Date.parse("2026-07-08T00:00:00Z");
 
+  it("reports a recut migration as authorized provenance without hiding the git relationship", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-status-recut-"));
+    try {
+      const oldTip = PREVIOUS_RC_COMMIT;
+      const before = await releaseStatus({
+        repoRoot: root,
+        env: {},
+        now: NOW,
+        runner: statusRunner({
+          activeVersion: "0.3.0-staging.10",
+          activeSourceBranch: "main",
+          candidateTags: ["v0.3.0-staging.10"],
+          releaseBranchSha: oldTip,
+          recutTags: [],
+          previousCommit: "8888888888888888888888888888888888888888",
+          channelBody: "Pointer-only desktop staging updater channel."
+        })
+      });
+      expect(before.staging).toMatchObject({ version: "0.3.0-staging.10", sourceBranch: "main" });
+      expect(before.releaseBranch).toMatchObject({ commit: oldTip, recuts: [] });
+
+      const body = [
+        "Pointer-only desktop staging updater channel.",
+        "",
+        "Lineage-Recut: 2026-09-05T23:00:00.000Z",
+        "Recut-Id: 0.3-1",
+        "Recut-Series: 0.3",
+        "Recut-Branch: release/0.3",
+        `Recut-Old-Tip: ${oldTip}`,
+        `Recut-New-Tip: ${MAIN_COMMIT}`,
+        "Recut-Archive-Tag: recut/release/0.3-1",
+        `Recut-From: 0.3.0-staging.10 (${oldTip}) source main`,
+        "Recut-Prior-Epoch: 0.3.0-staging.10",
+        "Recut-Requester: migration-test",
+        "Recut-Reason: include the latest feature"
+      ].join("\n");
+      const result = await releaseStatus({
+        repoRoot: root,
+        env: {},
+        now: NOW,
+        runner: statusRunner({
+          activeVersion: "0.3.0-staging.11",
+          activeSourceBranch: "release/0.3",
+          candidateTags: ["v0.3.0-staging.11", "v0.3.0-staging.10"],
+          releaseBranchSha: MAIN_COMMIT,
+          recutTags: ["recut/release/0.3-1"],
+          previousCommit: oldTip,
+          channelBody: body
+        })
+      });
+      expect(parseLineageRecutRecord(body)?.recutId).toBe("0.3-1");
+      expect(result.lineage?.recut?.recutId).toBe("0.3-1");
+      expect(result.lineage).toMatchObject({ relationship: "descendant", valid: true, authorizedByRecut: true });
+      expect(result.releaseBranch?.recuts).toEqual([{
+        id: "0.3-1",
+        archiveTag: "recut/release/0.3-1",
+        status: "pending",
+        oldTip,
+        newTip: MAIN_COMMIT
+      }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   interface StatusFixture {
     activeVersion: string | null;
     activeCommit?: string | null;
@@ -2515,6 +2581,7 @@ describe("release status", () => {
     /** Raw manifest on the immutable versioned prerelease. */
     versionedManifestBody?: string;
     abandonedSeries?: Record<string, string>;
+    recutTags?: string[];
     cherry?: string;
     behindMain?: number;
     commitsSinceProduction?: number;
@@ -2627,6 +2694,13 @@ describe("release status", () => {
         }
         if (command === "git" && args[0] === "ls-remote" && args[1] === "--tags") {
           const pattern = args[3] ?? "";
+          if (pattern.startsWith("recut/release/")) {
+            return {
+              exitCode: 0,
+              stdout: (fixture.recutTags ?? []).map((tag) => `sha\trefs/tags/${tag}\n`).join(""),
+              stderr: ""
+            };
+          }
           if (fixture.activeVersion && pattern === `refs/tags/v${fixture.activeVersion}`) {
             const tagCommit = fixture.activeTagCommit ?? activeCommit ?? "";
             return {
@@ -2896,6 +2970,7 @@ describe("release status", () => {
         name: "release/1.3",
         commit: rcCommit,
         abandoned: null,
+        recuts: [],
         unmergedCommits: [{ sha: "1111111111111111111111111111111111111111", subject: "fix: only on the branch" }],
         unmergedCommitCount: 1
       });
@@ -4214,6 +4289,135 @@ describe("staging lineage reset", () => {
 
       expect(result.applied).toBe(false);
       expect(calls.some((call) => call.command === "gh" && call.args[1] === "edit")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("release branch recut", () => {
+  const OLD_TIP = "2222222222222222222222222222222222222222";
+  const MAIN_TIP = "3333333333333333333333333333333333333333";
+
+  function recutRunner(calls: CommandCall[], options: { branchOnly?: boolean; productionTag?: boolean; unreadableChannel?: boolean; branchChangedDuringBuild?: boolean } = {}): CommandRunner {
+    let branchTip = OLD_TIP;
+    return {
+      async run(command, args, runOptions) {
+        calls.push({ command, args, options: runOptions });
+        const key = `${command} ${args.join(" ")}`;
+        if (key === "git remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+        if (command === "git" && args[0] === "fetch") return { exitCode: 0, stdout: "", stderr: "" };
+        if (key === "git rev-parse origin/main") return { exitCode: 0, stdout: `${MAIN_TIP}\n`, stderr: "" };
+        if (key === "git show origin/main:VERSION") return { exitCode: 0, stdout: "0.3.0\n", stderr: "" };
+        if (key === "git rev-parse FETCH_HEAD^{commit}") return { exitCode: 0, stdout: `${MAIN_TIP}\n`, stderr: "" };
+        if (key === "git ls-remote origin refs/heads/release/0.3") return { exitCode: 0, stdout: `${branchTip}\trefs/heads/release/0.3\n`, stderr: "" };
+        if (command === "git" && args[0] === "ls-remote" && args[1] === "--tags") {
+          const pattern = args.at(-1) ?? "";
+          if (pattern === "refs/tags/v0.3.*") {
+            return options.productionTag
+              ? { exitCode: 0, stdout: "deadbeef\trefs/tags/v0.3.0\n", stderr: "" }
+              : { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (pattern.includes("v0.3.0-staging.10")) return { exitCode: 0, stdout: `${MAIN_TIP}\t${pattern}\n`, stderr: "" };
+          if (pattern.startsWith("recut/release/0.3-")) return { exitCode: 0, stdout: "", stderr: "" };
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (isStagingChannelAssetsQuery(command, args)) {
+          return options.unreadableChannel
+            ? { exitCode: 1, stdout: "", stderr: "HTTP 503: Service unavailable" }
+            : stagingChannelAssetsResponse(["latest-staging.json"]);
+        }
+        if (command === "gh" && args[0] === "release" && args[1] === "download") {
+          const dirIndex = args.indexOf("--dir");
+          writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), '{"version":"0.3.0-staging.10"}\n');
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("gh release view v0.3.0-staging.10 ")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              tagName: "v0.3.0-staging.10",
+              targetCommitish: MAIN_TIP,
+              publishedAt: "2026-09-05T00:00:00Z",
+              body: "Staging updater manifest for v0.3.0-staging.10\n\nSource-Branch: main",
+              isPrerelease: true
+            }),
+            stderr: ""
+          };
+        }
+        if (key.startsWith("git log --no-merges")) {
+          return options.branchOnly ? { exitCode: 0, stdout: `${OLD_TIP} branch-only fix\n`, stderr: "" } : { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("git log --merges")) return { exitCode: 0, stdout: "", stderr: "" };
+        if (key.startsWith("gh release view desktop-staging")) return { exitCode: 0, stdout: "", stderr: "" };
+        if (key.startsWith("gh release edit desktop-staging")) return { exitCode: 0, stdout: "", stderr: "" };
+        if (key.startsWith("git push origin --force-with-lease=")) {
+          branchTip = MAIN_TIP;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("git push origin refs/tags/recut/")) {
+          if (options.branchChangedDuringBuild) branchTip = "4444444444444444444444444444444444444444";
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("git tag -a") || key.startsWith("git push origin")) return { exitCode: 0, stdout: "", stderr: "" };
+        throw new Error(`unexpected command ${key}`);
+      }
+    };
+  }
+
+  it("archives the old tip before moving the branch and records the recut", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-"));
+    try {
+      const calls: CommandCall[] = [];
+      const result = await cutReleaseBranch({
+        repoRoot: root,
+        bump: "minor",
+        version: "0.3.0",
+        recut: true,
+        reason: "include the latest feature",
+        confirmRecut: "0.3.0-staging.10",
+        confirmOldTip: OLD_TIP,
+        env: {},
+        runner: recutRunner(calls)
+      });
+      expect(result.recut).toMatchObject({ archiveTag: "recut/release/0.3-1", oldTip: OLD_TIP, newTip: MAIN_TIP, applied: true });
+      const tagPush = calls.findIndex((call) => call.command === "git" && call.args.includes("refs/tags/recut/release/0.3-1"));
+      const branchPush = calls.findIndex((call) => call.command === "git" && call.args.some((arg) => arg.includes("refs/heads/release/0.3")) && call.args.includes("--force-with-lease=refs/heads/release/0.3:" + OLD_TIP));
+      expect(tagPush).toBeGreaterThanOrEqual(0);
+      expect(branchPush).toBeGreaterThan(tagPush);
+      const edit = calls.find((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "edit");
+      expect(edit?.args.at(-1)).toContain("Lineage-Recut: 2026-09");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses branch-only work, production history, and unreadable channel state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-"));
+    try {
+      const input = { repoRoot: root, bump: "minor" as const, version: "0.3.0", recut: true, reason: "move", confirmRecut: "0.3.0-staging.10", confirmOldTip: OLD_TIP, env: {} };
+      await expect(cutReleaseBranch({ ...input, runner: recutRunner([], { branchOnly: true }) })).rejects.toThrow(/branch-only commit/);
+      await expect(cutReleaseBranch({ ...input, runner: recutRunner([], { productionTag: true }) })).rejects.toThrow(/production release/);
+      await expect(cutReleaseBranch({ ...input, runner: recutRunner([], { unreadableChannel: true }) })).rejects.toThrow(/channel is unreadable/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when a pinned branch moves during the recut", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-"));
+    try {
+      await expect(cutReleaseBranch({
+        repoRoot: root,
+        bump: "minor",
+        version: "0.3.0",
+        recut: true,
+        reason: "include the latest feature",
+        confirmRecut: "0.3.0-staging.10",
+        confirmOldTip: OLD_TIP,
+        env: {},
+        runner: recutRunner([], { branchChangedDuringBuild: true })
+      })).rejects.toThrow(/release refs changed before branch move/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

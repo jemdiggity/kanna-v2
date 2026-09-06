@@ -1442,6 +1442,30 @@ describe("kd CLI", () => {
       taskId: "release.cut",
       input: { version: "0.2.0", abandonSeries: "0.1", reason: "0.1 diverged from main" }
     });
+    expect(parseCliArgs([
+      "release",
+      "cut",
+      "--version",
+      "0.3.0",
+      "--recut",
+      "--reason",
+      "include the latest feature",
+      "--confirm-recut",
+      "0.3.0-staging.10",
+      "--confirm-old-tip",
+      "2222222222222222222222222222222222222222",
+      "--dry-run"
+    ])).toEqual({
+      taskId: "release.cut",
+      input: {
+        version: "0.3.0",
+        recut: true,
+        reason: "include the latest feature",
+        confirmRecut: "0.3.0-staging.10",
+        confirmOldTip: "2222222222222222222222222222222222222222",
+        dryRun: true
+      }
+    });
     expect(() => parseCliArgs(["release", "cut", "--abandon-series"])).toThrow(/--abandon-series requires a value/);
     expect(parseCliArgs(["release", "ship", "--staging", "--release", "--branch", "release/1.3"])).toEqual({
       taskId: "release.ship",

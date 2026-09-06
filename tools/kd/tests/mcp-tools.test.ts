@@ -55,4 +55,16 @@ describe("MCP tool registry", () => {
     const parsed = tool?.schema.parse({ version: "1.2.4-staging.3" }) as { overrideSoak?: string };
     expect(parsed.overrideSoak).toBeUndefined();
   });
+
+  it("requires the recut confirmations and reason in the MCP schema", () => {
+    const tool = buildMcpToolDefinitions().find((definition) => definition.name === "release_cut");
+    expect(() => tool?.schema.parse({ version: "0.3.0", recut: true, reason: "move" })).toThrow();
+    expect(tool?.schema.parse({
+      version: "0.3.0",
+      recut: true,
+      reason: "move",
+      confirmRecut: "0.3.0-staging.10",
+      confirmOldTip: "2222222222222222222222222222222222222222"
+    })).toMatchObject({ recut: true });
+  });
 });

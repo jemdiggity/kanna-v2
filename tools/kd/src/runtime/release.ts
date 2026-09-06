@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandRunner } from "./process";
 import {
+  composeStagingChannelRecutBody,
   composePostPromotionTrunkBody,
+  composeStagingChannelRecutApplicationBody,
   composeStagingChannelBody,
   evaluateCandidateLineage,
   evaluatePromotionGate,
@@ -13,9 +15,13 @@ import {
   isReleaseBranchName,
   normalizeStagingVersion,
   parseLineageResetRecord,
+  parseLineageRecutApplicationRecord,
+  parseLineageRecutRecord,
   parsePostPromotionTrunkRecord,
   type CandidateLineage,
   type LineageResetRecord,
+  type LineageRecutRecord,
+  type LineageRecutApplicationRecord,
   type PostPromotionTrunkRecord,
   type SoakEvaluation,
   type StagingCandidate,
@@ -621,10 +627,12 @@ async function readLineageReset(context: ReleaseCommandContext, repoSlug: string
 async function readLineageAudit(
   context: ReleaseCommandContext,
   repoSlug: string
-): Promise<{ reset: LineageResetRecord | null; postPromotion: PostPromotionTrunkRecord | null }> {
+): Promise<{ reset: LineageResetRecord | null; recut: LineageRecutRecord | null; recutApplication: LineageRecutApplicationRecord | null; postPromotion: PostPromotionTrunkRecord | null }> {
   const body = await readStagingChannelBody(context, repoSlug);
   return {
     reset: parseLineageResetRecord(body),
+    recut: parseLineageRecutRecord(body),
+    recutApplication: parseLineageRecutApplicationRecord(body),
     postPromotion: parsePostPromotionTrunkRecord(body)
   };
 }
@@ -1026,8 +1034,23 @@ async function resolveCandidateLineage(
   repoSlug: string,
   candidate: StagingCandidate,
   reset: LineageResetRecord | null,
-  postPromotion: PostPromotionTrunkRecord | null = null
+  recut: LineageRecutRecord | null,
+  postPromotion: PostPromotionTrunkRecord | null = null,
+  recutApplication: LineageRecutApplicationRecord | null = null
 ): Promise<CandidateLineage> {
+  const recutPrevious = recut && recut.fromVersion && candidate.version !== recut.fromVersion &&
+      candidate.commit?.toLowerCase() === recut.newTip.toLowerCase() &&
+      candidate.sourceBranch === recut.branch
+    ? {
+        version: recut.fromVersion,
+        tag: stagingTag(recut.fromVersion),
+        commit: recut.fromCommit
+      }
+    : null;
+  if (recutPrevious) {
+    const recutRelationship = await commitRelationship(context, recutPrevious.commit, candidate.commit);
+    return evaluateCandidateLineage({ candidate, previous: recutPrevious, relationship: recutRelationship, reset, recut, recutApplication, postPromotion });
+  }
   const { previous, found } = await resolvePreviousCandidate(context, repoSlug, candidate.tag);
   if (!found) {
     return {
@@ -1036,13 +1059,16 @@ async function resolveCandidateLineage(
       valid: false,
       authorizedByReset: false,
       authorizedByPromotion: false,
+      authorizedByRecut: false,
       reset,
+      recut,
+      recutApplication,
       postPromotion,
       detail: `${candidate.tag} is not listed among this repository's staging prereleases, so its lineage cannot be established.`
     };
   }
   if (!previous) {
-    return evaluateCandidateLineage({ candidate, previous: null, relationship: "initial", reset, postPromotion });
+    return evaluateCandidateLineage({ candidate, previous: null, relationship: "initial", reset, recut, recutApplication, postPromotion });
   }
   const relationship = await commitRelationship(context, previous.commit, candidate.commit);
   return evaluateCandidateLineage({
@@ -1050,6 +1076,8 @@ async function resolveCandidateLineage(
     previous: { version: previous.version, tag: previous.tag, commit: previous.commit },
     relationship,
     reset,
+    recut,
+    recutApplication,
     postPromotion
   });
 }
@@ -1062,13 +1090,13 @@ async function resolveCandidateLineage(
 async function assertStagingPublishAllowed(
   input: ReleaseShipInput,
   proposed: { sourceBranch: string; commit: string }
-): Promise<{ active: StagingCandidate | null; postPromotion: PostPromotionTrunkRecord | null }> {
+): Promise<{ active: StagingCandidate | null; postPromotion: PostPromotionTrunkRecord | null; recut: LineageRecutRecord | null }> {
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const active = await resolveActiveStagingCandidate(input, repoSlug);
   // A candidate we could not read still has to reach the gate: only a channel
   // positively known to be empty skips the comparison.
-  if (!active.candidate && !active.error) return { active: null, postPromotion: null };
+  if (!active.candidate && !active.error) return { active: null, postPromotion: null, recut: null };
 
   if (active.candidate) await fetchStagingHistory(input);
   const relationship = active.candidate
@@ -1080,7 +1108,7 @@ async function assertStagingPublishAllowed(
   const postPromotion = active.candidate && relationship === "diverged" && productionTagPresent
     ? await resolvePostPromotionTrunkRecord(input, repoSlug, active.candidate, proposed)
     : null;
-  const audit = active.candidate ? await readLineageAudit(input, repoSlug) : { reset: null, postPromotion: null };
+  const audit = active.candidate ? await readLineageAudit(input, repoSlug) : { reset: null, recut: null, recutApplication: null, postPromotion: null };
   const decision = evaluateStagingPublishGate({
     proposedSourceBranch: proposed.sourceBranch,
     proposedCommit: proposed.commit,
@@ -1089,6 +1117,8 @@ async function assertStagingPublishAllowed(
     activeProductionTagExists: productionTagPresent,
     activeMetadataError: active.error,
     reset: audit.reset,
+    recut: audit.recut,
+    recutApplication: audit.recutApplication,
     postPromotion
   });
   if (!decision.allowed) {
@@ -1096,7 +1126,8 @@ async function assertStagingPublishAllowed(
   }
   return {
     active: active.candidate,
-    postPromotion: decision.authorizedByPromotion ? postPromotion : null
+    postPromotion: decision.authorizedByPromotion ? postPromotion : null,
+    recut: decision.authorizedByRecut ? audit.recut : null
   };
 }
 
@@ -1213,12 +1244,15 @@ async function resolvePromotion(input: ReleaseShipInput, promoteFrom: string): P
   // from — so a dry-run rehearsal, a status check, and the real promotion can
   // never disagree about whether a candidate may ship.
   await fetchStagingHistory(input);
-  const reset = await readLineageReset(input, repoSlug);
+  const audit = await readLineageAudit(input, repoSlug);
   const lineage = await resolveCandidateLineage(
     input,
     repoSlug,
     { version: stagingVersion, tag: stagingTag, commit, sourceBranch, publishedAt },
-    reset
+    audit.reset,
+    audit.recut,
+    audit.postPromotion,
+    audit.recutApplication
   );
   const soak = evaluateSoak({
     requiredHours: readReleasePolicy(input.repoRoot).productionSoakHours,
@@ -1485,6 +1519,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   let pushBranch = "main";
   let stagingSourceBranch = "main";
   let postPromotionTrunk: PostPromotionTrunkRecord | null = null;
+  let recutAuthorization: LineageRecutRecord | null = null;
   let versionFloor: MainStagingVersionFloor | null = null;
   if (input.promoteFrom) {
     const promotion = await resolvePromotion(input, input.promoteFrom);
@@ -1499,6 +1534,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
       commit: stagingContext.commit
     });
     postPromotionTrunk = publishGate.postPromotion;
+    recutAuthorization = publishGate.recut;
     const activeBaseVersion = publishGate.active &&
         publishGate.active.sourceBranch === stagingContext.sourceBranch &&
         !(await activeProductionTagExists(input, publishGate.active.version))
@@ -1567,7 +1603,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   const notes = input.release && environment === "production"
     ? await mustRun(input.runner, "gh", ["api", `repos/${releaseRepoSlug(remoteUrl)}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", `target_commitish=${pushBranch}`, "--jq", ".body"], input.repoRoot, input.env)
     : environment === "staging"
-      ? `Staging updater manifest for v${version}\n\n${SOURCE_BRANCH_TRAILER} ${stagingSourceBranch}`
+      ? `Staging updater manifest for v${version}\n\n${SOURCE_BRANCH_TRAILER} ${stagingSourceBranch}${recutAuthorization ? `\nLineage-Recut-Authorization: ${recutAuthorization.recutId}` : ""}`
       : `Dry-run updater manifest for v${version}`;
   const pubDate = new Date().toISOString();
   writeLatestJson(latestJson, version, notes, pubDate, platforms);
@@ -1592,6 +1628,31 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
       latestJson
     ], input.repoRoot, input.env);
     await ensureStagingGithubRelease(input, repoSlug);
+    if (recutAuthorization) {
+      const appliedTag = `recut-applied/${recutAuthorization.recutId}`;
+      const application: LineageRecutApplicationRecord = {
+        recutId: recutAuthorization.recutId,
+        version,
+        commit: targetCommit.toLowerCase(),
+        appliedAt: pubDate,
+        tag: appliedTag
+      };
+      const existing = await input.runner.run(
+        "git",
+        ["ls-remote", "--tags", "origin", `refs/tags/${appliedTag}`, `refs/tags/${appliedTag}^{}`],
+        { cwd: input.repoRoot, env: input.env }
+      );
+      const existingCommit = existing.exitCode === 0 ? parseRemoteTagCommit(existing.stdout, appliedTag) : null;
+      if (existingCommit && existingCommit.toLowerCase() !== targetCommit.toLowerCase()) {
+        throw new Error(`Recut application tag ${appliedTag} resolves to ${existingCommit}, not destination ${targetCommit}.`);
+      }
+      if (!existingCommit) {
+        await mustRun(input.runner, "git", ["tag", "-a", appliedTag, targetCommit, "-m", `kanna-recut-application-schema: 1\nrecut-id: ${application.recutId}\nversion: ${application.version}\ncommit: ${application.commit}\napplied-at: ${application.appliedAt}`], input.repoRoot, input.env);
+        await mustRun(input.runner, "git", ["push", "origin", `refs/tags/${appliedTag}`], input.repoRoot, input.env);
+      }
+      const appliedBody = composeStagingChannelRecutApplicationBody(await readStagingChannelBody(input, repoSlug), application);
+      await mustRun(input.runner, "gh", ["release", "edit", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--notes", appliedBody], input.repoRoot, input.env);
+    }
     if (postPromotionTrunk) {
       const channelBody = composePostPromotionTrunkBody(
         await readStagingChannelBody(input, repoSlug),
@@ -1639,6 +1700,11 @@ export interface ReleaseCutInput {
   abandonSeries?: string[];
   /** Why those series are being abandoned. Required whenever any is named. */
   reason?: string;
+  /** Move an existing unreleased release branch to origin/main explicitly. */
+  recut?: boolean;
+  dryRun?: boolean;
+  confirmRecut?: string;
+  confirmOldTip?: string;
   now?: number;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
@@ -1662,10 +1728,234 @@ export interface ReleaseCutResult {
   /** The `VERSION` recorded at `origin/main` when the branch was cut. */
   trunkVersion: string;
   abandoned: AbandonedSeries[];
+  recut?: {
+    id: string;
+    archiveTag: string;
+    oldTip: string;
+    newTip: string;
+    applied: boolean;
+  };
 }
 
 export function abandonedSeriesTag(branch: string): string {
   return `abandoned/${branch}`;
+}
+
+function recutArchiveTag(branch: string, ordinal: number): string {
+  return `recut/${branch}-${ordinal}`;
+}
+
+function recutArchiveMessage(record: LineageRecutRecord, repoSlug: string): string {
+  return [
+    "kanna-recut-schema: 1",
+    `repository: ${repoSlug}`,
+    `recut-id: ${record.recutId}`,
+    `series: ${record.series}`,
+    `branch: ${record.branch}`,
+    `old-tip: ${record.oldTip}`,
+    `new-tip: ${record.newTip}`,
+    `main-tip: ${record.newTip}`,
+    `active-version: ${record.fromVersion ?? "empty-channel"}`,
+    `active-commit: ${record.fromCommit ?? "unknown-commit"}`,
+    `active-source: ${record.fromSourceBranch ?? "unknown"}`,
+    `prior-epoch: ${record.priorEpoch}`,
+    `timestamp: ${record.recutAt}`,
+    `requester-provenance: ${record.requester}`,
+    `reason: ${record.reason}`
+  ].join("\n");
+}
+
+function parseRecutArchiveOrdinals(output: string, branch: string): number[] {
+  const escaped = branch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^(?:refs/tags/)?recut/${escaped}-(\\d+)(?:\\^\\{\\})?$`);
+  return output.split(/\r?\n/).flatMap((line) => {
+    const ref = line.trim().split(/\s+/).at(-1) ?? "";
+    const match = pattern.exec(ref);
+    if (!match?.[1]) return [];
+    const ordinal = Number.parseInt(match[1], 10);
+    return Number.isNaN(ordinal) ? [] : [ordinal];
+  });
+}
+
+function normalizedRemoteRefs(output: string): string {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort()
+    .join("\n");
+}
+
+async function revalidateRecutPlan(
+  input: ReleaseCommandContext,
+  repoSlug: string,
+  branch: string,
+  expectedMainTip: string,
+  expectedBranchTip: string,
+  expectedProductionTags: string,
+  expectedActive: StagingCandidate | null,
+  phase: string
+): Promise<void> {
+  await mustRun(input.runner, "git", ["fetch", "origin", "main", branch], input.repoRoot, input.env);
+  const mainTip = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
+  const branchRefs = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${branch}`], input.repoRoot, input.env);
+  const branchTip = branchRefs.split(/\s+/)[0] ?? "";
+  if (mainTip.toLowerCase() !== expectedMainTip.toLowerCase() || branchTip.toLowerCase() !== expectedBranchTip.toLowerCase()) {
+    throw new Error(
+      `Cannot recut ${branch}: release refs changed ${phase}; expected main ${expectedMainTip} and ${branch} ${expectedBranchTip}, ` +
+        `observed main ${mainTip} and ${branch} ${branchTip || "missing"}.`
+    );
+  }
+  const branchSeries = parseReleaseBranchSeries(branch);
+  if (!branchSeries) throw new Error(`Cannot recut ${branch}: invalid release branch identity.`);
+  const productionTags = await mustRun(
+    input.runner,
+    "git",
+    ["ls-remote", "--tags", "origin", `refs/tags/v${branchSeries.major}.${branchSeries.minor}.*`],
+    input.repoRoot,
+    input.env
+  );
+  if (normalizedRemoteRefs(productionTags) !== normalizedRemoteRefs(expectedProductionTags)) {
+    throw new Error(`Cannot recut ${branch}: production tags changed ${phase}; refusing to use stale release facts.`);
+  }
+
+  const active = await resolveActiveStagingCandidate(input, repoSlug);
+  if (active.error) throw new Error(`Cannot recut ${branch}: the ${STAGING_CHANNEL_TAG} channel changed or became unreadable ${phase}: ${active.error}`);
+  if (!expectedActive && !active.candidate) return;
+  if (!expectedActive || !active.candidate || expectedActive.version !== active.candidate.version || expectedActive.commit?.toLowerCase() !== active.candidate.commit?.toLowerCase() || expectedActive.sourceBranch !== active.candidate.sourceBranch) {
+    throw new Error(`Cannot recut ${branch}: the active ${STAGING_CHANNEL_TAG} candidate changed ${phase}; refusing to use stale release facts.`);
+  }
+  const verified = await readVerifiedStagingCandidate(input, repoSlug, active.candidate.version);
+  if (verified.error || !verified.candidate) {
+    throw new Error(`Cannot recut ${branch}: the active ${STAGING_CHANNEL_TAG} candidate could not be re-verified ${phase}: ${verified.error ?? "unknown error"}`);
+  }
+  await verifyImmutableStagingCandidate(input, repoSlug, verified.candidate);
+}
+
+async function recutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseCutResult> {
+  const requested = input.version?.trim().replace(/^v/, "") ?? "";
+  if (!/^\d+\.\d+\.0$/.test(requested)) {
+    throw new Error("release cut --recut requires --version X.Y.0.");
+  }
+  if (input.abandonSeries && input.abandonSeries.length > 0) {
+    throw new Error("release cut --recut cannot be combined with --abandon-series.");
+  }
+  const reason = input.reason?.trim() ?? "";
+  if (!reason) throw new Error("release cut --recut requires --reason \"<why the series is moving>\".");
+  if (/[\r\n]/.test(reason)) throw new Error("release cut --recut reason must be a single line.");
+  const series = releaseSeriesFromVersion(requested);
+  const branch = releaseSeriesBranch(series);
+  const seriesLabel = `${series.major}.${series.minor}`;
+  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+  const repoSlug = releaseRepoSlug(remoteUrl);
+
+  await mustRun(input.runner, "git", ["fetch", "origin", "main", branch], input.repoRoot, input.env);
+  const mainTip = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
+  const branchRefs = await mustRun(input.runner, "git", ["ls-remote", "origin", `refs/heads/${branch}`], input.repoRoot, input.env);
+  const oldTip = branchRefs.split(/\s+/)[0] ?? "";
+  if (!/^[0-9a-f]{40}$/i.test(oldTip)) {
+    throw new Error(`${branch} does not exist on origin. Cut it first (kd release cut --version ${requested}).`);
+  }
+  if (input.confirmOldTip?.trim().toLowerCase() !== oldTip.toLowerCase()) {
+    throw new Error(`release cut --recut requires --confirm-old-tip ${oldTip} for the observed ${branch} tip.`);
+  }
+  const productionTags = await mustRun(
+    input.runner,
+    "git",
+    ["ls-remote", "--tags", "origin", `refs/tags/v${seriesLabel}.*`],
+    input.repoRoot,
+    input.env
+  );
+  if (hasProductionTagForSeries(productionTags, series)) {
+    throw new Error(`Cannot recut ${branch}: production release v${seriesLabel}.* already exists. Continue with patch fixes only; cut the next series.`);
+  }
+
+  const active = await resolveActiveStagingCandidate(input, repoSlug);
+  if (active.error) throw new Error(`Cannot recut ${branch} while the ${STAGING_CHANNEL_TAG} channel is unreadable: ${active.error}`);
+  let activeCandidate = active.candidate;
+  if (activeCandidate) {
+    const verified = await readVerifiedStagingCandidate(input, repoSlug, activeCandidate.version);
+    if (verified.error || !verified.candidate) {
+      throw new Error(`Cannot recut ${branch}: active staging candidate could not be verified (${verified.error ?? "unknown error"}).`);
+    }
+    await verifyImmutableStagingCandidate(input, repoSlug, verified.candidate);
+    activeCandidate = verified.candidate;
+  }
+  const confirmedActive = input.confirmRecut?.trim().replace(/^v/, "") ?? "";
+  const observedActive = activeCandidate?.version ?? "empty";
+  if (confirmedActive !== observedActive) {
+    throw new Error(`release cut --recut requires --confirm-recut ${observedActive}; the observed staging channel is ${observedActive}.`);
+  }
+  if (oldTip.toLowerCase() === mainTip.toLowerCase()) {
+    return {
+      branch,
+      version: requested,
+      commit: mainTip,
+      trunkVersion: (await mustRun(input.runner, "git", ["show", "origin/main:VERSION"], input.repoRoot, input.env)).trim(),
+      abandoned: [],
+      recut: { id: "no-op", archiveTag: "", oldTip, newTip: mainTip, applied: false }
+    };
+  }
+
+  const unmerged = await resolveUnmergedReleaseCommitsAtTips(input, mainTip, oldTip);
+  if (!unmerged.commits || unmerged.count === null) {
+    throw new Error(`Cannot recut ${branch}: release-branch hygiene could not be verified against the pinned origin/main and branch tips.`);
+  }
+  const merges = await input.runner.run(
+    "git",
+    ["log", "--merges", "--right-only", "--format=%H %s", `${mainTip}...${oldTip}`],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  const mergeOnly = merges.exitCode === 0 ? parseStrictReleaseCommitLog(merges.stdout) : null;
+  if (mergeOnly === null) {
+    throw new Error(`Cannot recut ${branch}: merge-resolution hygiene could not be verified; refusing to risk losing branch-only work.`);
+  }
+  const offending = [...unmerged.commits, ...mergeOnly];
+  if (offending.length > 0) {
+    const listed = offending.slice(0, UNMERGED_COMMIT_REPORT_LIMIT).map((commit) => `${commit.sha} ${commit.subject}`).join("\n");
+    throw new Error(`Cannot recut ${branch}: it contains ${offending.length} branch-only commit(s) not present on origin/main by patch identity. Backport them first; recut would lose:\n${listed}`);
+  }
+
+  const archiveRefs = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `recut/${branch}-*`], input.repoRoot, input.env);
+  const ordinal = Math.max(0, ...parseRecutArchiveOrdinals(archiveRefs, branch)) + 1;
+  const archiveTag = recutArchiveTag(branch, ordinal);
+  const recutAt = new Date(input.now ?? Date.now()).toISOString();
+  const record: LineageRecutRecord = {
+    recutId: `${seriesLabel}-${ordinal}`,
+    recutAt,
+    series: seriesLabel,
+    branch,
+    oldTip: oldTip.toLowerCase(),
+    newTip: mainTip.toLowerCase(),
+    archiveTag,
+    fromVersion: activeCandidate?.version ?? null,
+    fromCommit: activeCandidate?.commit ?? null,
+    fromSourceBranch: activeCandidate?.sourceBranch ?? null,
+    priorEpoch: activeCandidate?.version ?? "empty",
+    requester: input.env.KANNA_RELEASE_REQUESTER ?? input.env.USER ?? "unknown",
+    reason
+  };
+  const trunkVersion = (await mustRun(input.runner, "git", ["show", "origin/main:VERSION"], input.repoRoot, input.env)).trim();
+  if (input.dryRun) {
+    return { branch, version: requested, commit: mainTip, trunkVersion, abandoned: [], recut: { id: record.recutId, archiveTag, oldTip, newTip: mainTip, applied: false } };
+  }
+
+  await revalidateRecutPlan(input, repoSlug, branch, mainTip, oldTip, productionTags, activeCandidate, "before archive tag");
+  await mustRun(input.runner, "git", ["tag", "-a", archiveTag, oldTip, "-m", recutArchiveMessage(record, repoSlug)], input.repoRoot, input.env);
+  await mustRun(input.runner, "git", ["push", "origin", `refs/tags/${archiveTag}`], input.repoRoot, input.env);
+  await revalidateRecutPlan(input, repoSlug, branch, mainTip, oldTip, productionTags, activeCandidate, "before branch move");
+  await mustRun(
+    input.runner,
+    "git",
+    ["push", "origin", `--force-with-lease=refs/heads/${branch}:${oldTip}`, `${mainTip}:refs/heads/${branch}`],
+    input.repoRoot,
+    input.env
+  );
+  await revalidateRecutPlan(input, repoSlug, branch, mainTip, mainTip, productionTags, activeCandidate, "before channel write");
+  await ensureStagingGithubRelease(input, repoSlug);
+  const body = composeStagingChannelRecutBody(await readStagingChannelBody(input, repoSlug), record);
+  await mustRun(input.runner, "gh", ["release", "edit", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--notes", body], input.repoRoot, input.env);
+  return { branch, version: requested, commit: mainTip, trunkVersion, abandoned: [], recut: { id: record.recutId, archiveTag, oldTip, newTip: mainTip, applied: true } };
 }
 
 export function compareVersions(left: string, right: string): number {
@@ -1794,6 +2084,7 @@ export async function readAbandonedSeries(
  * someone wrote down, never a side effect of a flag.
  */
 export async function cutReleaseBranch(input: ReleaseCutInput): Promise<ReleaseCutResult> {
+  if (input.recut) return recutReleaseBranch(input);
   await mustRun(input.runner, "git", ["fetch", "origin", "main"], input.repoRoot, input.env);
   const commit = await mustRun(input.runner, "git", ["rev-parse", "origin/main"], input.repoRoot, input.env);
   // The caller's worktree can be stale (Kanna task worktrees fork from older
@@ -2106,6 +2397,16 @@ export interface ReleaseStatusReleaseBranch {
    */
   unmergedCommits: ReleaseBranchCommit[] | null;
   unmergedCommitCount: number | null;
+  /** Archived recut tags for this release branch, newest ordinal last. */
+  recuts: ReleaseStatusRecut[] | null;
+}
+
+export interface ReleaseStatusRecut {
+  id: string;
+  archiveTag: string;
+  status: "pending" | "applied" | "incomplete" | "superseded";
+  oldTip: string | null;
+  newTip: string | null;
 }
 
 export interface ReleaseStatusLineage {
@@ -2114,6 +2415,8 @@ export interface ReleaseStatusLineage {
   valid: boolean;
   authorizedByReset: boolean;
   authorizedByPromotion: boolean;
+  authorizedByRecut: boolean;
+  recut: LineageRecutRecord | null;
   reset: LineageResetRecord | null;
   postPromotion: PostPromotionTrunkRecord | null;
   detail: string;
@@ -2316,6 +2619,66 @@ async function resolveUnmergedReleaseCommits(
   return { commits: commits.slice(0, UNMERGED_COMMIT_REPORT_LIMIT), count: commits.length };
 }
 
+async function resolveUnmergedReleaseCommitsAtTips(
+  input: ReleaseCommandContext,
+  mainTip: string,
+  branchTip: string
+): Promise<{ commits: ReleaseBranchCommit[] | null; count: number | null }> {
+  const log = await input.runner.run(
+    "git",
+    ["log", "--no-merges", "--cherry-pick", "--right-only", "--format=%H %s", `${mainTip}...${branchTip}`],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (log.exitCode !== 0) return { commits: null, count: null };
+  const commits = parseStrictReleaseCommitLog(log.stdout);
+  if (!commits) return { commits: null, count: null };
+  return { commits: commits.slice(0, UNMERGED_COMMIT_REPORT_LIMIT), count: commits.length };
+}
+
+function parseStrictReleaseCommitLog(output: string): ReleaseBranchCommit[] | null {
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const commits = parseUnmergedReleaseCommits(output);
+  return commits.length === lines.length ? commits : null;
+}
+
+async function resolveRecutTags(input: ReleaseCommandContext, branchName: string): Promise<string[] | null> {
+  const result = await input.runner.run(
+    "git",
+    ["ls-remote", "--tags", "origin", `recut/${branchName}-*`],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (result.exitCode !== 0) return null;
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/).at(-1) ?? "")
+    .filter((ref) => ref.startsWith("refs/tags/recut/") && !ref.endsWith("^{}"))
+    .map((ref) => ref.slice("refs/tags/".length));
+}
+
+function describeRecutTags(
+  tags: string[] | null,
+  record: LineageRecutRecord | null,
+  application: LineageRecutApplicationRecord | null
+): ReleaseStatusRecut[] | null {
+  if (!tags) return null;
+  const described: ReleaseStatusRecut[] = tags.map((archiveTag) => {
+    const id = archiveTag.slice("recut/".length).replace(/^release\//, "");
+    const isApplied = application?.recutId === id;
+    const isPending = record?.recutId === id || record?.archiveTag === archiveTag;
+    return {
+      id,
+      archiveTag,
+      status: isApplied ? "applied" : isPending ? "pending" : record ? "superseded" : "incomplete",
+      oldTip: isPending ? record?.oldTip ?? null : null,
+      newTip: isPending ? record?.newTip ?? null : null
+    };
+  });
+  if (record && !tags.includes(record.archiveTag)) {
+    described.unshift({ id: record.recutId, archiveTag: record.archiveTag, status: "incomplete", oldTip: record.oldTip, newTip: record.newTip });
+  }
+  return described;
+}
+
 export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseStatusResult> {
   const nowMs = input.now ?? Date.now();
   const policy = readReleasePolicy(input.repoRoot);
@@ -2380,12 +2743,14 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
     const branchSha = branchRefs.exitCode === 0 ? branchRefs.stdout.trim().split(/\s+/)[0] ?? "" : "";
     if (branchSha) {
       const unmerged = await resolveUnmergedReleaseCommits(input, branchName);
+      const audit = staging && activeCandidate ? await readLineageAudit(input, repoSlug) : { reset: null, recut: null, recutApplication: null, postPromotion: null };
       releaseBranch = {
         name: branchName,
         commit: branchSha,
         abandoned: await readAbandonedSeries(input, branchName),
         unmergedCommits: unmerged.commits,
-        unmergedCommitCount: unmerged.count
+        unmergedCommitCount: unmerged.count,
+        recuts: describeRecutTags(await resolveRecutTags(input, branchName), audit.recut, audit.recutApplication)
       };
     }
   }
@@ -2417,7 +2782,14 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
   if (staging && activeCandidate) {
     await fetchStagingHistory(input);
     const audit = await readLineageAudit(input, repoSlug);
-    lineage = await resolveCandidateLineage(input, repoSlug, activeCandidate, audit.reset, audit.postPromotion);
+    if (releaseBranch?.recuts && audit.recut) {
+      releaseBranch.recuts = releaseBranch.recuts.map((recut) =>
+        recut.archiveTag === audit.recut?.archiveTag
+          ? { ...recut, id: audit.recut.recutId, status: audit.recutApplication?.recutId === audit.recut.recutId ? "applied" : "pending", oldTip: audit.recut.oldTip, newTip: audit.recut.newTip }
+          : recut
+      );
+    }
+    lineage = await resolveCandidateLineage(input, repoSlug, activeCandidate, audit.reset, audit.recut, audit.postPromotion, audit.recutApplication);
 
     const promoted = await activeProductionTagExists(input, staging.version);
     const freezeDecision = evaluateStagingFreeze({

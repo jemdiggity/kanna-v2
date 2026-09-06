@@ -30,6 +30,7 @@ const booleanFlagMap: Record<string, string> = {
   "--major": "major",
   "--minor": "minor",
   "--patch": "patch",
+  "--recut": "recut",
   "--arm64": "arm64",
   "--x86_64": "x86_64",
   "--staging": "staging",
@@ -615,6 +616,24 @@ function parseFlagInput(
         throw new Error("--confirm-abandon requires a value");
       }
       input.confirmAbandon = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--confirm-recut") {
+      const value = rest[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("--confirm-recut requires a value");
+      }
+      input.confirmRecut = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--confirm-old-tip") {
+      const value = rest[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("--confirm-old-tip requires a value");
+      }
+      input.confirmOldTip = value;
       index += 1;
       continue;
     }

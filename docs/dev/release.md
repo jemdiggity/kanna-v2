@@ -123,6 +123,17 @@ short:
 - While an **unpromoted** `release/X.Y` candidate is soaking, main staging
   publishes are refused. Main resumes after promotion, or after an explicit
   reset.
+- An unreleased series can be explicitly recut to the current main tip with
+  `kd release cut --version X.Y.0 --recut --reason <why> --confirm-recut
+  <active-version|empty> --confirm-old-tip <sha>`. The old branch tip is
+  archived before an exact guarded move, and branch-only work blocks the
+  operation. The next branch RC is the only one authorized by that recut and
+  starts a fresh soak. Bare main RCs remain supported; a main ship never
+  performs an implicit recut.
+- Release mutations assume one operator at a time. Recut re-fetches and
+  revalidates its pinned refs, active channel candidate, and production tags,
+  and the branch update uses an exact old-SHA `--force-with-lease`; kd does not
+  provide a cross-machine writer reservation.
 - Three paths may move the channel non-linearly: `--rollback-to`,
   `kd release reset-staging`, and — automatically, with no operator action —
   the post-promotion trunk resumption: once a `release/X.Y` candidate has been
@@ -134,6 +145,10 @@ short:
 ./kd release status                                   # channel state and every promotion blocker
 ./kd release cut --minor                              # cut release/X.Y at origin/main
                                                       # (--version must be strictly ahead of origin/main's VERSION)
+./kd release cut --version 0.3.0 --recut \
+  --reason "include the latest feature" \
+  --confirm-recut 0.3.0-staging.10 \
+  --confirm-old-tip <origin/release/0.3-sha>           # move an unreleased series
 ./kd release promote 1.2.4-staging.3                  # promote a soaked candidate
 ./kd release reset-staging --to main \
   --reason "<why>" --confirm-abandon 1.3.0-staging.2   # abandon a lineage (audited, never implicit)
