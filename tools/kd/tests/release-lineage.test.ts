@@ -19,6 +19,7 @@ import {
   parsePostPromotionTrunkRecord,
   promotionAuthorizes,
   resetAuthorizes,
+  recutApplicationAuthorizes,
   recutAuthorizes,
   type LineageResetRecord,
   type LineageRecutRecord,
@@ -222,20 +223,55 @@ describe("staging publish gate", () => {
   });
 
   it("does not reuse a recut after its destination application is recorded", () => {
+    const application = {
+      recutId: RECUT.recutId,
+      version: "0.1.0-staging.8",
+      commit: RECUT.newTip,
+      appliedAt: "2026-07-04T00:00:00Z",
+      tag: "recut-applied/0.1-1"
+    };
     const applied = gate({
       relationship: "diverged",
       proposedSourceBranch: "release/0.1",
       proposedCommit: RECUT.newTip,
       recut: RECUT,
-      recutApplication: {
-        recutId: RECUT.recutId,
-        version: "0.1.0-staging.8",
-        commit: RECUT.newTip,
-        appliedAt: "2026-07-04T00:00:00Z",
-        tag: "recut-applied/0.1-1"
-      }
+      recutApplication: application
     });
     expect(applied).toMatchObject({ allowed: false, authorizedByRecut: false });
+
+    const later = gate({
+      relationship: "diverged",
+      proposedSourceBranch: RECUT.branch,
+      proposedCommit: "9999999999999999999999999999999999999999",
+      recut: RECUT,
+      recutApplication: application,
+      recutDestinationRelationship: "descendant",
+      recutDestinationIsBranchTip: true
+    });
+    expect(later).toMatchObject({ allowed: false, authorizedByRecut: false });
+  });
+
+  it("keeps the exact applied candidate authorized for lineage", () => {
+    const application = {
+      recutId: RECUT.recutId,
+      version: "0.1.0-staging.8",
+      commit: RECUT.newTip,
+      appliedAt: "2026-07-04T00:00:00Z",
+      tag: "recut-applied/0.1-1"
+    };
+    expect(recutApplicationAuthorizes(RECUT, application, { version: application.version, commit: application.commit })).toBe(true);
+    const lineage = evaluateCandidateLineage({
+      candidate: { ...ACTIVE, version: application.version, tag: `v${application.version}`, commit: application.commit, sourceBranch: RECUT.branch },
+      previous: { version: ACTIVE.version, tag: ACTIVE.tag, commit: ACTIVE.commit },
+      relationship: "diverged",
+      reset: null,
+      recut: RECUT,
+      recutApplication: application,
+      recutDestinationRelationship: "same-commit",
+      recutDestinationIsBranchTip: true,
+      postPromotion: null
+    });
+    expect(lineage).toMatchObject({ valid: true, authorizedByRecut: true });
   });
 });
 

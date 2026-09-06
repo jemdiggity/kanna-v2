@@ -330,6 +330,26 @@ export function recutAuthorizes(
   );
 }
 
+/**
+ * Reports whether an already-consumed recut grant is durable evidence for this
+ * exact candidate. This is intentionally separate from `recutAuthorizes`: the
+ * latter answers whether a staging publish may consume the grant and therefore
+ * rejects every application of the grant, while this records why that one
+ * completed publish remains valid for status and promotion.
+ */
+export function recutApplicationAuthorizes(
+  recut: LineageRecutRecord | null,
+  application: LineageRecutApplicationRecord | null,
+  candidate: { version: string; commit: string | null }
+): boolean {
+  if (!recut || !application || !candidate.commit) return false;
+  return (
+    application.recutId === recut.recutId &&
+    normalizeStagingVersion(application.version) === normalizeStagingVersion(candidate.version) &&
+    application.commit.toLowerCase() === candidate.commit.toLowerCase()
+  );
+}
+
 export function promotionAuthorizes(
   record: PostPromotionTrunkRecord | null,
   args: {
@@ -627,17 +647,27 @@ export function evaluateCandidateLineage(args: {
       toCommit: candidate.commit,
       toBranch: candidate.sourceBranch
     });
-  const authorizedByRecut =
+  const recutCandidateMatches =
     (relationship === "same-commit" || relationship === "descendant" || relationship === "diverged") &&
     recutAuthorizes(recut, {
       fromVersion: previous.version,
       fromCommit: previous.commit,
       toCommit: candidate.commit,
       toBranch: candidate.sourceBranch,
-      application: args.recutApplication,
       toCommitRelationshipToNewTip: args.recutDestinationRelationship,
       toCommitIsBranchTip: args.recutDestinationIsBranchTip
     });
+  const recutPublishAuthorized = recutAuthorizes(recut, {
+    fromVersion: previous.version,
+    fromCommit: previous.commit,
+    toCommit: candidate.commit,
+    toBranch: candidate.sourceBranch,
+    application: args.recutApplication,
+    toCommitRelationshipToNewTip: args.recutDestinationRelationship,
+    toCommitIsBranchTip: args.recutDestinationIsBranchTip
+  });
+  const recutApplicationAuthorized = recutApplicationAuthorizes(recut, args.recutApplication ?? null, candidate);
+  const authorizedByRecut = recutCandidateMatches && (recutPublishAuthorized || recutApplicationAuthorized);
 
   switch (relationship) {
     case "same-commit":

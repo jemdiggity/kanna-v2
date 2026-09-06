@@ -2611,6 +2611,73 @@ describe("release status", () => {
     }
   });
 
+  it("keeps a recut candidate promotable after its application is recorded", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-status-recut-applied-"));
+    try {
+      const oldTip = PREVIOUS_RC_COMMIT;
+      const recutTip = MAIN_COMMIT;
+      const candidateCommit = "beef000000000000000000000000000000000000";
+      const body = [
+        "Pointer-only desktop staging updater channel.",
+        "",
+        "Lineage-Recut: 2026-09-05T23:00:00.000Z",
+        "Recut-Id: 0.3-1",
+        "Recut-Series: 0.3",
+        "Recut-Branch: release/0.3",
+        `Recut-Old-Tip: ${oldTip}`,
+        `Recut-New-Tip: ${recutTip}`,
+        "Recut-Archive-Tag: recut/release/0.3-1",
+        `Recut-From: 0.3.0-staging.7 (${oldTip}) source release/0.3`,
+        "Recut-Prior-Epoch: 0.3.0-staging.7",
+        "Recut-Requester: promotion-test",
+        "Recut-Reason: include the latest feature",
+        "",
+        "Lineage-Recut-Applied: 2026-09-06T00:00:00.000Z",
+        "Recut-Applied-Id: 0.3-1",
+        "Recut-Applied-Version: 0.3.0-staging.8",
+        `Recut-Applied-Commit: ${candidateCommit}`,
+        "Recut-Applied-Tag: recut-applied/0.3-1"
+      ].join("\n");
+      const result = await releaseStatus({
+        repoRoot: root,
+        env: {},
+        now: NOW,
+        runner: statusRunner({
+          activeVersion: "0.3.0-staging.8",
+          activeCommit: candidateCommit,
+          activeSourceBranch: "release/0.3",
+          candidateTags: ["v0.3.0-staging.8", "v0.3.0-staging.7"],
+          previousCommit: oldTip,
+          previousIsAncestor: 1,
+          activeIsAncestor: 1,
+          releaseBranchSha: candidateCommit,
+          recutTags: ["recut/release/0.3-1"],
+          recutNewTip: recutTip,
+          recutNewTipIsAncestor: 0,
+          productionTag: "v0.2.0",
+          channelBody: body
+        })
+      });
+
+      expect(result.lineage).toMatchObject({
+        relationship: "diverged",
+        valid: true,
+        authorizedByRecut: true
+      });
+      expect(result.releaseBranch?.recuts).toEqual([{
+        id: "0.3-1",
+        archiveTag: "recut/release/0.3-1",
+        status: "applied",
+        oldTip,
+        newTip: recutTip
+      }]);
+      expect(result.promotion.allowed).toBe(true);
+      expect(result.promotion.blockers).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   interface StatusFixture {
     activeVersion: string | null;
     activeCommit?: string | null;
