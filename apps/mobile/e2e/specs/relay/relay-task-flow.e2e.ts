@@ -1372,9 +1372,12 @@ async function renderedTaskRowIds(
 export async function verifyTasksTabNewestFirst(
   ui: Pick<RelayUi, "getTasksTab" | "getTaskRows" | "waitUntil">,
   fixture: RelayTaskOrderingFixture,
+  selectTasksTab = true,
 ): Promise<void> {
-  const tasksTab = await ui.getTasksTab();
-  await tasksTab.click();
+  if (selectTasksTab) {
+    const tasksTab = await ui.getTasksTab();
+    await tasksTab.click();
+  }
 
   const fixtureIds = new Set(fixture.expectedVisualOrderTaskIds);
   let lastRenderedTaskIds: string[] = [];
@@ -1408,6 +1411,50 @@ export async function verifyTasksTabNewestFirst(
         `native visual order was ${JSON.stringify(actualVisualOrder)}`,
     );
   }
+}
+
+async function verifyTabletWorkspaceSelection(
+  driver: Browser,
+  ui: Pick<RelayUi, "getTaskRowById" | "waitUntil">,
+  fixtureTaskId: string,
+  ordering: RelayTaskOrderingFixture,
+): Promise<boolean> {
+  const shell = await driver.$(selectors.tabletWorkspaceShell);
+  if (!(await shell.isExisting().catch(() => false))) return false;
+
+  await shell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await (await driver.$(selectors.tabletWorkspaceSidebar)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS,
+  });
+  await (await driver.$(selectors.tabletWorkspaceEmpty)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS,
+  });
+
+  const alternateTaskId = ordering.expectedVisualOrderTaskIds.find(
+    (taskId) => taskId !== fixtureTaskId,
+  );
+  if (!alternateTaskId) {
+    throw new Error("Expected a second relay task for tablet workspace switching");
+  }
+
+  for (const taskId of [alternateTaskId, fixtureTaskId]) {
+    const row = await ui.getTaskRowById(taskId);
+    await row.scrollIntoView({ direction: "down", maxScrolls: 5 });
+    await row.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await row.click();
+    const detailTaskId = await driver.$(selectors.taskDetailTaskId);
+    await detailTaskId.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+    await ui.waitUntil(
+      async () => (await detailTaskId.getText()).includes(taskId.slice(0, 8)),
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: `Expected tablet workspace to select task ${taskId}`,
+      },
+    );
+  }
+
+  return true;
 }
 
 async function returnToTaskListShell(ui: RelayUi): Promise<void> {
@@ -1560,7 +1607,13 @@ export async function runRelayTaskFlow(
     await signInToRelay(driver, ui, options.credentials);
   }
   await ensureTaskListVisible(ui);
-  await verifyTasksTabNewestFirst(ui, options.taskOrdering);
+  const isTabletWorkspace = await verifyTabletWorkspaceSelection(
+    driver,
+    ui,
+    options.fixture.taskId,
+    options.taskOrdering,
+  );
+  await verifyTasksTabNewestFirst(ui, options.taskOrdering, !isTabletWorkspace);
   const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
   await exactTaskRow.scrollIntoView({ direction: "down", maxScrolls: 5 });
   try {
@@ -1575,7 +1628,9 @@ export async function runRelayTaskFlow(
   await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);
   await options.setTaskActivity("unread");
   await waitForTaskActivity(ui, options.fixture.taskId, "unread");
-  await verifyRecentTabShowsRepoLabel(ui, options.fixture.taskId, options.taskRow);
+  if (!isTabletWorkspace) {
+    await verifyRecentTabShowsRepoLabel(ui, options.fixture.taskId, options.taskRow);
+  }
   await options.setTaskActivity("working");
   await waitForTaskActivity(ui, options.fixture.taskId, "working");
   await verifyRelayTaskActivityTransitions(
@@ -1627,6 +1682,9 @@ export async function runRelayTaskFlow(
       await verifyMentionedFileMenuFlow(driver, ui, options.filePreview);
     },
     verifyComposerReset: () => verifyRelayComposerResetJourney(ui),
+    // On iPad this input follows the sidebar's alternate-task -> fixture-task
+    // switch above, proving the existing single selected-task subscription is
+    // the one that receives the composer message.
     verifyQuickReply: () =>
       verifyRelayCustomizedQuickReplyJourney(
         ui,

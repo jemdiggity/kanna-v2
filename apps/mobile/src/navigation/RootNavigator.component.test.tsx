@@ -6,6 +6,7 @@ import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const alertMock = vi.hoisted(() => vi.fn());
+const viewport = vi.hoisted(() => ({ height: 768, width: 390 }));
 
 vi.mock("react-native", () => ({
   Alert: {
@@ -24,6 +25,7 @@ vi.mock("react-native", () => ({
   },
   Text: "Text",
   TextInput: "TextInput",
+  useWindowDimensions: () => viewport,
   View: "View"
 }));
 
@@ -91,6 +93,8 @@ import RootNavigator from "./RootNavigator";
 let rendered: ReactTestRenderer | null = null;
 
 afterEach(async () => {
+  viewport.height = 768;
+  viewport.width = 390;
   alertMock.mockReset();
   if (rendered) {
     await act(async () => rendered?.unmount());
@@ -99,6 +103,71 @@ afterEach(async () => {
 });
 
 describe("RootNavigator", () => {
+  it("opens a tablet sidebar task through the existing selection and pane geometry wiring", async () => {
+    viewport.height = 1024;
+    viewport.width = 1366;
+    const controller = {
+      openTask: vi.fn(),
+      resizeTaskTerminal: vi.fn(),
+      setTaskPinned: vi.fn(),
+      subscribeRepoCommandTaskOpen: () => () => undefined
+    };
+    await act(async () => {
+      rendered = create(
+        <RootNavigator
+          controller={controller as never}
+          forceCloudEnabled={false}
+          initialState={{
+            index: 0,
+            key: "root",
+            routeNames: ["MainTabs"],
+            routes: [{ key: "main-tabs", name: "MainTabs" }],
+            stale: false,
+            type: "stack"
+          } as never}
+          onForceCloudChange={vi.fn()}
+          onOpenAccount={vi.fn()}
+          openMachinesRequestKey={0}
+          quickReplies={DEFAULT_TASK_QUICK_REPLIES}
+          quickRepliesHydrated
+          state={{
+            accountDesktops: [],
+            auth: { status: "signedIn" },
+            isComposerOpen: false,
+            liveLanDesktops: [],
+            localTaskListPreferences: { dismissedTaskIds: [], pinnedTaskIds: [] },
+            pendingRepoCommandTask: null,
+            recentTasks: [],
+            repoCommandErrorMessage: null,
+            repos: [],
+            repoTasks: [],
+            runningRepoCommandId: null,
+            selectedRepoId: null,
+            taskCollectionStatus: "ready",
+            taskUiSlots: [],
+            trustedDesktops: []
+          } as never}
+        />
+      );
+    });
+
+    const pane = rendered.root.findByProps({
+      testID: "mobile.tablet-workspace.pane"
+    });
+    await act(async () => pane.props.onLayout({
+      nativeEvent: { layout: { height: 1024, width: 1006 } }
+    }));
+    const sidebarTasks = rendered.root.findByType("TasksScreen");
+    await act(async () => sidebarTasks.props.onOpenTask("task-1"));
+
+    expect(controller.resizeTaskTerminal).toHaveBeenCalledWith(
+      "task-1",
+      expect.any(Number),
+      expect.any(Number)
+    );
+    expect(controller.openTask).toHaveBeenCalledWith("task-1");
+  });
+
   it("enables edge-only swipe back for task detail", async () => {
     await act(async () => {
       rendered = create(

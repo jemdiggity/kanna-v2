@@ -469,10 +469,14 @@ describe("simulator mobile runtime", () => {
     }
   }`;
 
-  it("parses available iPhones and prefers a booted simulator", () => {
+  it("parses available iPhones and iPads while preserving the iPhone default", () => {
     const devices = parseSimctlDeviceList(simulatorList);
 
-    expect(devices.map((entry) => entry.udid)).toEqual(["booted-18", "newest-26"]);
+    expect(devices.map((entry) => entry.udid)).toEqual([
+      "booted-18",
+      "newest-26",
+      "ipad-18"
+    ]);
     expect(selectSimulatorDevice(devices)).toMatchObject({
       name: "iPhone 16 Pro",
       state: "Booted",
@@ -489,8 +493,11 @@ describe("simulator mobile runtime", () => {
     expect(selectSimulatorDevice(devices, "iPhone 17 Pro")).toMatchObject({
       udid: "newest-26"
     });
+    expect(selectSimulatorDevice(devices, "ipad-18")).toMatchObject({
+      name: "iPad (A16)"
+    });
     expect(() => selectSimulatorDevice(devices, "iPhone 15")).toThrow(
-      /Available simulators: iPhone 16 Pro \(booted-18, iOS-18-5\), iPhone 17 Pro \(newest-26, iOS-26-2\)/
+      /Available simulators: iPhone 16 Pro \(booted-18, iOS-18-5\), iPhone 17 Pro \(newest-26, iOS-26-2\), iPad \(A16\) \(ipad-18, iOS-18-5\)/
     );
   });
 

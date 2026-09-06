@@ -47,6 +47,7 @@ vi.mock("react-native", () => ({
   },
   Text: "Text",
   TextInput: "TextInput",
+  useWindowDimensions: () => ({ height: 800, width: 390 }),
   View: "View"
 }));
 
