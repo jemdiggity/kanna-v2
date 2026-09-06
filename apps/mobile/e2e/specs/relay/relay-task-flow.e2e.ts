@@ -265,6 +265,11 @@ async function verifyRelayTerminalKeys(
   driver: Browser,
   observation: RelayTaskFlowOptions["terminalKeys"]
 ): Promise<void> {
+  const directInputToggle = await driver.$(
+    selectors.taskTerminalDirectInputToggle
+  );
+  await directInputToggle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await directInputToggle.click();
   const escape = await driver.$(selectors.taskTerminalKey("escape"));
   const enter = await driver.$(selectors.taskTerminalKey("enter"));
   await escape.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });

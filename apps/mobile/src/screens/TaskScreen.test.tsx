@@ -1225,7 +1225,12 @@ describe("TaskScreen", () => {
 
     expect(terminal?.props?.onTerminalInput).toBeTypeOf("function");
 
-    (terminal?.props?.onTerminalInput as (dataB64: string) => void)("G1s8NjU7MTsxTQ==");
+    (
+      terminal?.props?.onTerminalInput as (
+        dataB64: string,
+        kind: "control"
+      ) => void
+    )("G1s8NjU7MTsxTQ==", "control");
     expect(onSendTerminalInput).toHaveBeenCalledWith(
       "G1s8NjU7MTsxTQ==",
       "control"
@@ -1234,12 +1239,24 @@ describe("TaskScreen", () => {
 
   it("sends terminal-strip keys with their exact kind when available", () => {
     const onSendTerminalInput = vi.fn();
-    const tree = renderTaskScreen({
+    let tree = renderTaskScreen({
       agentType: "pty",
       onSendTerminalInput,
       terminalInputUnavailableReason: null
     });
 
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskTerminalKeyStrip)).toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)).not.toBeNull();
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalDirectInputToggle);
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onSendTerminalInput,
+      terminalInputUnavailableReason: null
+    });
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskTerminalDirectInputStatus)
+    ).not.toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)).toBeNull();
     pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalKey("escape"));
     pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalKey("enter"));
     expect(onSendTerminalInput).toHaveBeenNthCalledWith(1, "Gw==", "draft");
@@ -1248,10 +1265,24 @@ describe("TaskScreen", () => {
       "DQ==",
       "submission"
     );
+
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalDirectInputToggle);
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onSendTerminalInput,
+      terminalInputUnavailableReason: null
+    });
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskTerminalKeyStrip)).toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)).not.toBeNull();
   });
 
   it("explains disabled PTY keys and omits the strip for SDK tasks", () => {
-    const pty = renderTaskScreen({
+    let pty = renderTaskScreen({
+      agentType: "pty",
+      terminalInputUnavailableReason: "authentication_required"
+    });
+    pressByTestId(pty, MOBILE_E2E_IDS.taskTerminalDirectInputToggle);
+    pty = renderTaskScreen({
       agentType: "pty",
       terminalInputUnavailableReason: "authentication_required"
     });
@@ -1267,6 +1298,9 @@ describe("TaskScreen", () => {
     ).toMatch(/pair/i);
 
     const sdk = renderTaskScreen({ agentType: "agent" });
+    expect(
+      findByTestId(sdk, MOBILE_E2E_IDS.taskTerminalDirectInputToggle)
+    ).toBeNull();
     expect(findByTestId(sdk, MOBILE_E2E_IDS.taskTerminalKeyStrip)).toBeNull();
   });
 

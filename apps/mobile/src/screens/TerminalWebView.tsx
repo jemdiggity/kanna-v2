@@ -17,6 +17,7 @@ import type {
   TaskTerminalOutputSource,
   TaskTerminalStatus
 } from "../state/sessionStore";
+import type { TaskTerminalInputKind } from "../lib/api/client";
 import {
   createTerminalOutput,
   EMPTY_TERMINAL_OUTPUT,
@@ -30,6 +31,7 @@ import {
 import {
   buildTerminalAppendScript,
   buildTerminalBottomInsetScript,
+  buildTerminalDirectInputScript,
   buildTerminalDocument,
   buildTerminalPrependScript,
   buildTerminalReplaceScript,
@@ -58,11 +60,13 @@ interface TerminalWebViewProps {
   rows: number | null;
   fullscreen?: boolean;
   bottomInset?: number;
+  directInputEnabled?: boolean;
+  directInputFocusRequest?: number;
   selectionToolbarTop?: number;
   onConsolePress?: () => void;
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
-  onTerminalInput?: (dataB64: string) => void;
+  onTerminalInput?: (dataB64: string, kind: TaskTerminalInputKind) => void;
   /** The reader scrolled near the top of the loaded buffer. Whether there is
    * older scrollback to fetch is the app's question, not the page's. */
   onRequestScrollback?: () => void;
@@ -81,7 +85,7 @@ interface TerminalWebViewHandle {
   injectJavaScript(script: string): void;
 }
 
-type PendingScriptKind = "resize" | "bottom-inset";
+type PendingScriptKind = "resize" | "bottom-inset" | "direct-input";
 
 interface PendingTerminalState {
   contentRevision: number;
@@ -113,6 +117,8 @@ export function TerminalWebViewComponent({
   rows,
   fullscreen = false,
   bottomInset,
+  directInputEnabled = false,
+  directInputFocusRequest = 0,
   selectionToolbarTop,
   onConsolePress,
   onMentionedFilesChange,
@@ -228,6 +234,14 @@ export function TerminalWebViewComponent({
           ...resizeScripts,
           script,
           ...remainingScripts
+        ];
+      } else {
+        pendingScriptsRef.current = [
+          ...pendingScriptsRef.current.filter(
+            (pendingScript) =>
+              !pendingScript.includes("__setTerminalDirectInput")
+          ),
+          script
         ];
       }
       return;
@@ -409,6 +423,13 @@ export function TerminalWebViewComponent({
     injectOrQueueScript(bottomInsetScript, "bottom-inset");
   }, [bottomInsetScript]);
 
+  useEffect(() => {
+    injectOrQueueScript(
+      buildTerminalDirectInputScript(directInputEnabled),
+      "direct-input"
+    );
+  }, [directInputEnabled, directInputFocusRequest]);
+
   const handleMessage = (event: WebViewMessageEvent) => {
     let payload: {
       type?: unknown;
@@ -419,6 +440,7 @@ export function TerminalWebViewComponent({
       line?: unknown;
       text?: unknown;
       dataB64?: unknown;
+      kind?: unknown;
       contentRevision?: unknown;
     };
 
@@ -480,9 +502,12 @@ export function TerminalWebViewComponent({
       if (
         typeof payload.dataB64 === "string" &&
         payload.dataB64.length > 0 &&
-        payload.dataB64.length <= MAX_TERMINAL_INPUT_LENGTH
+        payload.dataB64.length <= MAX_TERMINAL_INPUT_LENGTH &&
+        (payload.kind === "draft" ||
+          payload.kind === "submission" ||
+          payload.kind === "control")
       ) {
-        onTerminalInput?.(payload.dataB64);
+        onTerminalInput?.(payload.dataB64, payload.kind);
       }
       return;
     }
@@ -527,7 +552,8 @@ export function TerminalWebViewComponent({
         ? pendingScriptsRef.current
         : [
             ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
-            bottomInsetScript
+            bottomInsetScript,
+            buildTerminalDirectInputScript(directInputEnabled)
           ];
     pendingScriptsRef.current = [];
     for (const script of pending) {
@@ -648,7 +674,8 @@ export function TerminalWebViewComponent({
           setSelectionCopyPending(false);
           pendingScriptsRef.current = [
             ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
-            bottomInsetScript
+            bottomInsetScript,
+            buildTerminalDirectInputScript(directInputEnabled)
           ];
           pendingTerminalStateRef.current = latestTerminalStateRef.current;
         }}
@@ -689,6 +716,7 @@ export function TerminalWebViewComponent({
           });
         }}
         onMessage={handleMessage}
+        keyboardDisplayRequiresUserAction={false}
         scrollEnabled
         source={source}
         style={fullscreen ? styles.webviewFullscreen : styles.webview}

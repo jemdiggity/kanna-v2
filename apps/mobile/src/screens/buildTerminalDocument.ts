@@ -188,6 +188,7 @@ export function buildTerminalDocument({
       let selectionAnchor = null;
       let selectionMode = false;
       let altScreenScrollCapture = null;
+      let directInputEnabled = false;
       let lastScrollbackRequestAt = 0;
       const terminalFileMentionHistory = new Map();
       const terminalFileMentionOccurrences = {
@@ -241,6 +242,18 @@ export function buildTerminalDocument({
       term.onData((data) => {
         if (altScreenScrollCapture) {
           altScreenScrollCapture.push(new TextEncoder().encode(data));
+          return;
+        }
+        if (directInputEnabled) {
+          const cursorFinal = data.charAt(data.length - 1);
+          const isCursorControl =
+            data.charCodeAt(0) === 27 && ["A", "B", "C", "D"].includes(cursorFinal);
+          const kind = data === "\\r"
+            ? "submission"
+            : isCursorControl
+              ? "control"
+              : "draft";
+          postTerminalInput([new TextEncoder().encode(data)], kind);
         }
       });
       term.onBinary((data) => {
@@ -250,6 +263,14 @@ export function buildTerminalDocument({
             bytes[index] = data.charCodeAt(index) & 0xff;
           }
           altScreenScrollCapture.push(bytes);
+          return;
+        }
+        if (directInputEnabled) {
+          const bytes = new Uint8Array(data.length);
+          for (let index = 0; index < data.length; index += 1) {
+            bytes[index] = data.charCodeAt(index) & 0xff;
+          }
+          postTerminalInput([bytes], "draft");
         }
       });
       term.onSelectionChange(() => {
@@ -1239,10 +1260,10 @@ export function buildTerminalDocument({
         } finally {
           altScreenScrollCapture = null;
         }
-        postTerminalInput(captured);
+        postTerminalInput(captured, "control");
       }
 
-      function postTerminalInput(chunks) {
+      function postTerminalInput(chunks, kind) {
         if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
           return;
         }
@@ -1261,9 +1282,19 @@ export function buildTerminalDocument({
         }
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: "terminal-input",
-          dataB64: btoa(binary)
+          dataB64: btoa(binary),
+          kind
         }));
       }
+
+      window.__setTerminalDirectInput = function setTerminalDirectInput(enabled) {
+        directInputEnabled = enabled === true;
+        if (directInputEnabled) {
+          term.focus();
+        } else {
+          term.blur();
+        }
+      };
 
       function isNearBottom() {
         const buffer = term.buffer && term.buffer.active;
@@ -1654,6 +1685,10 @@ export function buildTerminalResizeScript(cols: number, rows: number): string {
 
 export function buildTerminalBottomInsetScript(bottomInset: number): string {
   return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
+}
+
+export function buildTerminalDirectInputScript(enabled: boolean): string {
+  return `window.__setTerminalDirectInput(${JSON.stringify(enabled)}); true;`;
 }
 
 function getStatusCopy(status: TaskTerminalStatus): string {

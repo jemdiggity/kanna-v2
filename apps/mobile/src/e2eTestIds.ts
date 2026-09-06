@@ -47,6 +47,8 @@ export const MOBILE_E2E_IDS = {
   taskAttachmentError: "mobile.task-attachment-error",
   taskInputStatus: "mobile.task-input-status",
   taskQueuedInputStatus: "mobile.task-queued-input-status",
+  taskTerminalDirectInputToggle: "mobile.task-terminal-direct-input-toggle",
+  taskTerminalDirectInputStatus: "mobile.task-terminal-direct-input-status",
   taskTerminalKeyStrip: "mobile.task-terminal-key-strip",
   taskTerminalKeyDisabledReason: "mobile.task-terminal-key-disabled-reason",
   taskTerminalKey(key: string): string {

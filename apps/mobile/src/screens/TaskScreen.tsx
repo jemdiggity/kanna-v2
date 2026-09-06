@@ -330,6 +330,10 @@ export function TaskScreen({
   const [diffModalTaskId, setDiffModalTaskId] = useState<string | null>(null);
   const [previewModalTaskId, setPreviewModalTaskId] = useState<string | null>(null);
   const [explorerTaskId, setExplorerTaskId] = useState<string | null>(null);
+  const [terminalDirectInputEnabled, setTerminalDirectInputEnabled] =
+    useState(false);
+  const [terminalDirectInputFocusRequest, setTerminalDirectInputFocusRequest] =
+    useState(0);
   const companionLifecycleRef = useRef<{
     isOpen: boolean;
     onOpenChange: ((isOpen: boolean) => void) | undefined;
@@ -860,6 +864,11 @@ export function TaskScreen({
   };
 
   useEffect(() => {
+    setTerminalDirectInputEnabled(false);
+    setTerminalDirectInputFocusRequest(0);
+  }, [task.id]);
+
+  useEffect(() => {
     const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
       expandComposer();
       setKeyboardHeight(event.endCoordinates.height);
@@ -898,8 +907,9 @@ export function TaskScreen({
     isComposerScrollable ||
     (!isComposerExpanded &&
       composerLayoutRef.current.contentHeight > TASK_COMPOSER_MIN_HEIGHT);
-  const sendTerminalControlInput = useCallback(
-    (dataB64: string) => onSendTerminalInput?.(dataB64, "control"),
+  const sendTerminalInput = useCallback(
+    (dataB64: string, kind: TaskTerminalInputKind) =>
+      onSendTerminalInput?.(dataB64, kind),
     [onSendTerminalInput]
   );
 
@@ -1017,11 +1027,17 @@ export function TaskScreen({
             rows={terminalGeometry.rows}
             taskId={task.id}
             bottomInset={terminalBottomInset}
+            directInputEnabled={
+              terminalDirectInputEnabled && terminalKeysDisabledReason === null
+            }
+            directInputFocusRequest={terminalDirectInputFocusRequest}
             selectionToolbarTop={terminalSelectionToolbarTop}
-            onConsolePress={Keyboard.dismiss}
+            onConsolePress={
+              terminalDirectInputEnabled ? undefined : Keyboard.dismiss
+            }
             onMentionedFilesChange={handleTerminalMentionedFilesChange}
             onOpenFile={handleTerminalOpenFile}
-            onTerminalInput={sendTerminalControlInput}
+            onTerminalInput={sendTerminalInput}
             onRequestScrollback={onRequestTerminalScrollback}
           />
         ) : (
@@ -1203,6 +1219,32 @@ export function TaskScreen({
         ]}
       >
         <View style={styles.composerActions}>
+          {!isAgentTask ? (
+            <Pressable
+              accessibilityLabel={
+                terminalDirectInputEnabled
+                  ? "Disable direct terminal input"
+                  : "Enable direct terminal input"
+              }
+              accessibilityRole="button"
+              accessibilityState={{ selected: terminalDirectInputEnabled }}
+              onPress={() => {
+                setTerminalDirectInputEnabled((enabled) => !enabled);
+                setTerminalDirectInputFocusRequest((request) => request + 1);
+              }}
+              style={[
+                styles.directInputButton,
+                terminalDirectInputEnabled ? styles.directInputButtonActive : null
+              ]}
+              testID={MOBILE_E2E_IDS.taskTerminalDirectInputToggle}
+            >
+              <Ionicons
+                color={terminalDirectInputEnabled ? "#E8F1FF" : "#9BB0CC"}
+                name="terminal-outline"
+                size={17}
+              />
+            </Pressable>
+          ) : null}
           {previewAvailable ? (
             <Pressable
               accessibilityLabel="Preview dev server"
@@ -1354,7 +1396,7 @@ export function TaskScreen({
           </View>
         ) : null}
 
-        {!isAgentTask ? (
+        {!isAgentTask && terminalDirectInputEnabled ? (
           <View style={styles.terminalKeyStripGroup}>
             <ScrollView
               horizontal
@@ -1396,7 +1438,24 @@ export function TaskScreen({
           </View>
         ) : null}
 
-        <View style={styles.inputComposer}>
+        {terminalDirectInputEnabled && !isAgentTask ? (
+          <Pressable
+            accessibilityLabel="Focus direct terminal keyboard"
+            accessibilityRole="button"
+            onPress={() =>
+              setTerminalDirectInputFocusRequest((request) => request + 1)
+            }
+            style={styles.directInputStatus}
+            testID={MOBILE_E2E_IDS.taskTerminalDirectInputStatus}
+          >
+            <Ionicons color="#73B7FF" name="terminal-outline" size={18} />
+            <Text style={styles.directInputStatusText}>
+              {terminalKeysDisabledReason ??
+                "Typing goes directly to the terminal. Tap here to reopen the keyboard."}
+            </Text>
+          </Pressable>
+        ) : (
+          <View style={styles.inputComposer}>
           {canAttachPhoto ? (
             <Pressable
               accessibilityLabel="Attach photo"
@@ -1475,7 +1534,8 @@ export function TaskScreen({
             onPress={sendDraftInput}
             onSelectReply={selectQuickReply}
           />
-        </View>
+          </View>
+        )}
       </View>
 
       {activeSelectedFile ? (
@@ -1796,6 +1856,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700"
   },
+  directInputButton: {
+    alignItems: "center",
+    backgroundColor: "rgba(13, 21, 36, 0.82)",
+    borderColor: "#22304D",
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 40,
+    justifyContent: "center",
+    width: 40
+  },
+  directInputButtonActive: {
+    backgroundColor: "rgba(25, 55, 91, 0.92)",
+    borderColor: "#3B6A9F"
+  },
   companionUnread: {
     backgroundColor: "#73B7FF",
     borderRadius: 999,
@@ -1945,6 +2019,24 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 15,
     paddingHorizontal: 3
+  },
+  directInputStatus: {
+    alignItems: "center",
+    backgroundColor: "rgba(8, 15, 27, 0.88)",
+    borderColor: "#20304C",
+    borderRadius: 20,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    minHeight: 54,
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  directInputStatusText: {
+    color: "#B8C8DD",
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17
   },
   inputComposer: {
     alignItems: "flex-end",
