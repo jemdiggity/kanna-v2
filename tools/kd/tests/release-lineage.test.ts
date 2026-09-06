@@ -201,6 +201,26 @@ describe("staging publish gate", () => {
     })).toBe(true);
   });
 
+  it("allows a branch-tip descendant after the recut when ancestry is proven", () => {
+    const laterBranchTip = "9999999999999999999999999999999999999999";
+    expect(recutAuthorizes(RECUT, {
+      fromVersion: ACTIVE.version,
+      fromCommit: ACTIVE.commit,
+      toCommit: laterBranchTip,
+      toBranch: RECUT.branch,
+      toCommitRelationshipToNewTip: "descendant",
+      toCommitIsBranchTip: true
+    })).toBe(true);
+    expect(recutAuthorizes(RECUT, {
+      fromVersion: ACTIVE.version,
+      fromCommit: ACTIVE.commit,
+      toCommit: laterBranchTip,
+      toBranch: RECUT.branch,
+      toCommitRelationshipToNewTip: "descendant",
+      toCommitIsBranchTip: false
+    })).toBe(false);
+  });
+
   it("does not reuse a recut after its destination application is recorded", () => {
     const applied = gate({
       relationship: "diverged",
@@ -311,6 +331,24 @@ describe("candidate lineage", () => {
     expect(lineage.valid).toBe(true);
     expect(lineage.authorizedByReset).toBe(true);
     expect(lineage.detail).toContain("authorized by the recorded lineage reset");
+  });
+
+  it("marks a later release-branch backport after a recut as authorized", () => {
+    const laterCandidate = {
+      ...candidate,
+      commit: "9999999999999999999999999999999999999999"
+    };
+    const lineage = evaluateCandidateLineage({
+      candidate: laterCandidate,
+      previous,
+      relationship: "diverged",
+      reset: null,
+      recut: RECUT,
+      recutDestinationRelationship: "descendant",
+      recutDestinationIsBranchTip: true,
+      postPromotion: null
+    });
+    expect(lineage).toMatchObject({ valid: true, authorizedByRecut: true });
   });
 
   it("marks a recorded post-promotion trunk divergence valid", () => {

@@ -231,6 +231,48 @@ async function ensureStagingGithubRelease(input: ReleaseCommandContext, repoSlug
   ], input.repoRoot, input.env);
 }
 
+async function createOrReuseStagingCandidate(
+  input: ReleaseShipInput,
+  repoSlug: string,
+  version: string,
+  targetCommit: string,
+  notes: string,
+  assets: string[]
+): Promise<void> {
+  const tag = stagingTag(version);
+  const created = await input.runner.run(
+    "gh",
+    [
+      "release",
+      "create",
+      tag,
+      "--repo",
+      repoSlug,
+      "--title",
+      `Kanna Staging v${version}`,
+      "--notes",
+      notes,
+      "--target",
+      targetCommit,
+      "--prerelease",
+      ...assets
+    ],
+    { cwd: input.repoRoot, env: input.env }
+  );
+  if (created.exitCode === 0) return;
+
+  // A retry after the versioned release was created but before the channel
+  // pointer moved must finish that same candidate. Reuse is permitted only
+  // when GitHub still identifies the existing release with this exact commit;
+  // a different tag target is never an idempotent retry.
+  const existing = await readStagingCandidate(input, repoSlug, version);
+  if (existing.candidate?.commit?.toLowerCase() === targetCommit.toLowerCase()) return;
+  throw new Error(
+    created.stderr.trim() || created.stdout.trim() ||
+      `Could not create or verify staging prerelease ${tag}.`
+  );
+}
+
 function parseExistingStagingNumbers(output: string, baseVersion: string): number[] {
   const pattern = new RegExp(`(?:refs/tags/)?v${baseVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-staging\\.(\\d+)(?:\\^\\{\\})?$`);
   const numbers = new Set<number>();
@@ -317,6 +359,7 @@ interface StagingContext {
   baseVersion: string;
   sourceBranch: string;
   commit: string;
+  branchTip: string | null;
   versionFloor: MainStagingVersionFloor | null;
 }
 
@@ -421,7 +464,7 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
     // lets an operator override derivation when the release plan requires it.
     const bump = input.bumpExplicit ? input.bump : "minor";
     const derivation = deriveMainStagingBaseVersion(sourceVersion, await readGreatestProductionVersion(input), bump);
-    return { ...derivation, sourceBranch: "main", commit: head };
+    return { ...derivation, sourceBranch: "main", commit: head, branchTip: null };
   }
 
   const series = parseReleaseBranchSeries(branchName);
@@ -454,7 +497,7 @@ async function resolveStagingContext(input: ReleaseShipInput): Promise<StagingCo
     );
   }
   const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${series.major}.${series.minor}.*`], input.repoRoot, input.env);
-  return { baseVersion: nextSeriesPatchVersion(tags, series), sourceBranch: branchName, commit: head, versionFloor: null };
+  return { baseVersion: nextSeriesPatchVersion(tags, series), sourceBranch: branchName, commit: head, branchTip: branchSha, versionFloor: null };
 }
 
 const SOURCE_BRANCH_TRAILER = "Source-Branch:";
@@ -1009,6 +1052,30 @@ async function listStagingCandidateTags(context: ReleaseCommandContext, repoSlug
   return parseStagingReleaseList(list.stdout).sort(compareStagingReleasesDesc).map((release) => release.tag);
 }
 
+async function findReusableStagingCandidate(
+  input: ReleaseShipInput,
+  repoSlug: string,
+  baseVersion: string,
+  activeVersion: string | null,
+  targetCommit: string,
+  sourceBranch: string
+): Promise<string | null> {
+  const tags = await listStagingCandidateTags(input, repoSlug);
+  for (const tag of tags) {
+    const version = tag.replace(/^v/, "");
+    if (!version.startsWith(`${baseVersion}-staging.`)) continue;
+    if (activeVersion && compareVersions(version, activeVersion) <= 0) continue;
+    const lookup = await readStagingCandidate(input, repoSlug, version);
+    if (
+      lookup.candidate?.commit?.toLowerCase() === targetCommit.toLowerCase() &&
+      lookup.candidate.sourceBranch === sourceBranch
+    ) {
+      return version;
+    }
+  }
+  return null;
+}
+
 /**
  * The candidate published immediately before `tag` on the same channel. This is
  * what makes a divergence visible: the incident's v0.1.0-staging.8 was
@@ -1038,9 +1105,23 @@ async function resolveCandidateLineage(
   postPromotion: PostPromotionTrunkRecord | null = null,
   recutApplication: LineageRecutApplicationRecord | null = null
 ): Promise<CandidateLineage> {
+  let recutDestinationRelationship: StagingLineageRelationship | undefined;
+  let recutDestinationIsBranchTip: boolean | undefined;
+  if (recut && candidate.sourceBranch === recut.branch && candidate.commit) {
+    const branchRefs = await context.runner.run(
+      "git",
+      ["ls-remote", "origin", `refs/heads/${recut.branch}`],
+      { cwd: context.repoRoot, env: context.env }
+    );
+    const branchTip = branchRefs.exitCode === 0 ? branchRefs.stdout.trim().split(/\s+/)[0] ?? "" : "";
+    recutDestinationIsBranchTip = branchTip.length > 0 && branchTip.toLowerCase() === candidate.commit.toLowerCase();
+    if (recutDestinationIsBranchTip) {
+      recutDestinationRelationship = await commitRelationship(context, recut.newTip, candidate.commit);
+    }
+  }
   const recutPrevious = recut && recut.fromVersion && candidate.version !== recut.fromVersion &&
-      candidate.commit?.toLowerCase() === recut.newTip.toLowerCase() &&
-      candidate.sourceBranch === recut.branch
+      candidate.sourceBranch === recut.branch &&
+      recutDestinationIsBranchTip
     ? {
         version: recut.fromVersion,
         tag: stagingTag(recut.fromVersion),
@@ -1049,7 +1130,17 @@ async function resolveCandidateLineage(
     : null;
   if (recutPrevious) {
     const recutRelationship = await commitRelationship(context, recutPrevious.commit, candidate.commit);
-    return evaluateCandidateLineage({ candidate, previous: recutPrevious, relationship: recutRelationship, reset, recut, recutApplication, postPromotion });
+    return evaluateCandidateLineage({
+      candidate,
+      previous: recutPrevious,
+      relationship: recutRelationship,
+      reset,
+      recut,
+      recutApplication,
+      recutDestinationRelationship,
+      recutDestinationIsBranchTip,
+      postPromotion
+    });
   }
   const { previous, found } = await resolvePreviousCandidate(context, repoSlug, candidate.tag);
   if (!found) {
@@ -1078,6 +1169,8 @@ async function resolveCandidateLineage(
     reset,
     recut,
     recutApplication,
+    recutDestinationRelationship,
+    recutDestinationIsBranchTip,
     postPromotion
   });
 }
@@ -1089,14 +1182,14 @@ async function resolveCandidateLineage(
  */
 async function assertStagingPublishAllowed(
   input: ReleaseShipInput,
-  proposed: { sourceBranch: string; commit: string }
-): Promise<{ active: StagingCandidate | null; postPromotion: PostPromotionTrunkRecord | null; recut: LineageRecutRecord | null }> {
+  proposed: { sourceBranch: string; commit: string; branchTip: string | null }
+): Promise<{ active: StagingCandidate | null; postPromotion: PostPromotionTrunkRecord | null; recut: LineageRecutRecord | null; repoSlug: string }> {
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const active = await resolveActiveStagingCandidate(input, repoSlug);
   // A candidate we could not read still has to reach the gate: only a channel
   // positively known to be empty skips the comparison.
-  if (!active.candidate && !active.error) return { active: null, postPromotion: null, recut: null };
+  if (!active.candidate && !active.error) return { active: null, postPromotion: null, recut: null, repoSlug };
 
   if (active.candidate) await fetchStagingHistory(input);
   const relationship = active.candidate
@@ -1109,6 +1202,9 @@ async function assertStagingPublishAllowed(
     ? await resolvePostPromotionTrunkRecord(input, repoSlug, active.candidate, proposed)
     : null;
   const audit = active.candidate ? await readLineageAudit(input, repoSlug) : { reset: null, recut: null, recutApplication: null, postPromotion: null };
+  const recutDestinationRelationship = audit.recut && proposed.sourceBranch === audit.recut.branch
+    ? await commitRelationship(input, audit.recut.newTip, proposed.commit)
+    : undefined;
   const decision = evaluateStagingPublishGate({
     proposedSourceBranch: proposed.sourceBranch,
     proposedCommit: proposed.commit,
@@ -1119,6 +1215,8 @@ async function assertStagingPublishAllowed(
     reset: audit.reset,
     recut: audit.recut,
     recutApplication: audit.recutApplication,
+    recutDestinationRelationship,
+    recutDestinationIsBranchTip: proposed.branchTip === null ? undefined : proposed.branchTip === proposed.commit,
     postPromotion
   });
   if (!decision.allowed) {
@@ -1127,7 +1225,8 @@ async function assertStagingPublishAllowed(
   return {
     active: active.candidate,
     postPromotion: decision.authorizedByPromotion ? postPromotion : null,
-    recut: decision.authorizedByRecut ? audit.recut : null
+    recut: decision.authorizedByRecut ? audit.recut : null,
+    repoSlug
   };
 }
 
@@ -1514,6 +1613,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     runner: input.runner
   });
   await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
+  let repoSlug = "";
 
   let version: string;
   let pushBranch = "main";
@@ -1531,8 +1631,10 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     versionFloor = stagingContext.versionFloor;
     const publishGate = await assertStagingPublishAllowed(input, {
       sourceBranch: stagingContext.sourceBranch,
-      commit: stagingContext.commit
+      commit: stagingContext.commit,
+      branchTip: stagingContext.branchTip
     });
+    repoSlug = publishGate.repoSlug;
     postPromotionTrunk = publishGate.postPromotion;
     recutAuthorization = publishGate.recut;
     const activeBaseVersion = publishGate.active &&
@@ -1544,6 +1646,17 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
       ? activeBaseVersion
       : stagingContext.baseVersion;
     version = await resolveNextStagingVersion(input, baseVersion, publishGate.active?.version ?? null);
+    if (recutAuthorization && input.release) {
+      const reusable = await findReusableStagingCandidate(
+        input,
+        repoSlug,
+        baseVersion,
+        publishGate.active?.version ?? null,
+        stagingContext.commit,
+        stagingContext.sourceBranch
+      );
+      if (reusable) version = reusable;
+    }
     assertStagingVersionAdvances(version, publishGate.active);
   } else {
     const sourceVersion = readCurrentVersion(input.repoRoot);
@@ -1564,13 +1677,15 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     restoreVersionFiles(versionFileSnapshot);
   }
 
+  if (!repoSlug) {
+    const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+    repoSlug = releaseRepoSlug(remoteUrl);
+  }
   const releaseDir = releaseOutputDir(input.repoRoot, environment);
   mkdirSync(releaseDir, { recursive: true });
   const dmgPaths: string[] = [];
   const updaterPaths: string[] = [];
   const platforms: Record<string, { signature: string; url: string }> = {};
-  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
-  const repoSlug = releaseRepoSlug(remoteUrl);
   const downloadBase = environment === "staging"
     ? `https://github.com/${repoSlug}/releases/download/v${version}`
     : `https://github.com/${repoSlug}/releases/download/v${version}`;
@@ -1601,7 +1716,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
 
   const latestJson = join(releaseDir, environment === "staging" ? STAGING_MANIFEST_NAME : "latest.json");
   const notes = input.release && environment === "production"
-    ? await mustRun(input.runner, "gh", ["api", `repos/${releaseRepoSlug(remoteUrl)}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", `target_commitish=${pushBranch}`, "--jq", ".body"], input.repoRoot, input.env)
+    ? await mustRun(input.runner, "gh", ["api", `repos/${repoSlug}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", `target_commitish=${pushBranch}`, "--jq", ".body"], input.repoRoot, input.env)
     : environment === "staging"
       ? `Staging updater manifest for v${version}\n\n${SOURCE_BRANCH_TRAILER} ${stagingSourceBranch}${recutAuthorization ? `\nLineage-Recut-Authorization: ${recutAuthorization.recutId}` : ""}`
       : `Dry-run updater manifest for v${version}`;
@@ -1610,24 +1725,33 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
 
   if (input.release && environment === "staging") {
     const targetCommit = await mustRun(input.runner, "git", ["rev-parse", "HEAD"], input.repoRoot, input.env);
-    await mustRun(input.runner, "gh", [
-      "release",
-      "create",
-      `v${version}`,
-      "--repo",
+    await createOrReuseStagingCandidate(
+      input,
       repoSlug,
-      "--title",
-      `Kanna Staging v${version}`,
-      "--notes",
-      notes,
-      "--target",
+      version,
       targetCommit,
-      "--prerelease",
-      ...dmgPaths,
-      ...updaterPaths,
-      latestJson
-    ], input.repoRoot, input.env);
+      notes,
+      [...dmgPaths, ...updaterPaths, latestJson]
+    );
     await ensureStagingGithubRelease(input, repoSlug);
+    if (postPromotionTrunk) {
+      const channelBody = composePostPromotionTrunkBody(
+        await readStagingChannelBody(input, repoSlug),
+        postPromotionTrunk
+      );
+      await mustRun(
+        input.runner,
+        "gh",
+        ["release", "edit", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--notes", channelBody],
+        input.repoRoot,
+        input.env
+      );
+    }
+    await mustRun(input.runner, "gh", ["release", "upload", STAGING_CHANNEL_TAG, latestJson, "--repo", repoSlug, "--clobber"], input.repoRoot, input.env);
+    // The recut grant becomes durable only after the pointer release serves
+    // this candidate. If the upload fails, the grant remains pending and a
+    // retry can reuse the versioned RC instead of being stranded by an
+    // application record that claims the move happened.
     if (recutAuthorization) {
       const appliedTag = `recut-applied/${recutAuthorization.recutId}`;
       const application: LineageRecutApplicationRecord = {
@@ -1653,20 +1777,6 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
       const appliedBody = composeStagingChannelRecutApplicationBody(await readStagingChannelBody(input, repoSlug), application);
       await mustRun(input.runner, "gh", ["release", "edit", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--notes", appliedBody], input.repoRoot, input.env);
     }
-    if (postPromotionTrunk) {
-      const channelBody = composePostPromotionTrunkBody(
-        await readStagingChannelBody(input, repoSlug),
-        postPromotionTrunk
-      );
-      await mustRun(
-        input.runner,
-        "gh",
-        ["release", "edit", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--notes", channelBody],
-        input.repoRoot,
-        input.env
-      );
-    }
-    await mustRun(input.runner, "gh", ["release", "upload", STAGING_CHANNEL_TAG, latestJson, "--repo", repoSlug, "--clobber"], input.repoRoot, input.env);
     await pruneStagingChannelAssets(input, repoSlug);
     await pruneOldStagingPrereleases(input, repoSlug, `v${version}`);
   } else if (input.release) {

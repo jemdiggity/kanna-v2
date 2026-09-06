@@ -298,17 +298,34 @@ export function resetAuthorizes(
   return reset.toBranch === args.toBranch;
 }
 
-/** A recut authorizes one exact next candidate from the moved branch. */
+/**
+ * A recut authorizes the next candidate built from the moved branch tip. The
+ * candidate may include a later release-branch backport, but callers must
+ * prove both that it is still the remote branch tip and that it descends from
+ * the recorded cut tip before passing those facts here.
+ */
 export function recutAuthorizes(
   recut: LineageRecutRecord | null,
-  args: { fromVersion: string; fromCommit: string | null; toCommit: string | null; toBranch: string | null; application?: LineageRecutApplicationRecord | null }
+  args: {
+    fromVersion: string;
+    fromCommit: string | null;
+    toCommit: string | null;
+    toBranch: string | null;
+    application?: LineageRecutApplicationRecord | null;
+    toCommitRelationshipToNewTip?: StagingLineageRelationship;
+    toCommitIsBranchTip?: boolean;
+  }
 ): boolean {
   if (!recut || !args.fromCommit || !args.toCommit || !args.toBranch || !recut.fromVersion || !recut.fromCommit) return false;
   if (args.application?.recutId === recut.recutId) return false;
+  if (args.toCommitIsBranchTip === false) return false;
+  const reachesNewTip = args.toCommitRelationshipToNewTip === undefined
+    ? recut.newTip.toLowerCase() === args.toCommit.toLowerCase()
+    : args.toCommitRelationshipToNewTip === "same-commit" || args.toCommitRelationshipToNewTip === "descendant";
   return (
     normalizeStagingVersion(recut.fromVersion) === normalizeStagingVersion(args.fromVersion) &&
     recut.fromCommit.toLowerCase() === args.fromCommit.toLowerCase() &&
-    recut.newTip.toLowerCase() === args.toCommit.toLowerCase() &&
+    reachesNewTip &&
     recut.branch === args.toBranch
   );
 }
@@ -348,6 +365,10 @@ export interface StagingPublishGateInput {
   reset: LineageResetRecord | null;
   recut?: LineageRecutRecord | null;
   recutApplication?: LineageRecutApplicationRecord | null;
+  /** Git-proven relationship from the recorded recut tip to the proposed commit. */
+  recutDestinationRelationship?: StagingLineageRelationship;
+  /** The proposed commit was checked against the freshly resolved branch tip. */
+  recutDestinationIsBranchTip?: boolean;
   /** Present only after GitHub/tag identity and forward-trunk ancestry were verified. */
   postPromotion: PostPromotionTrunkRecord | null;
 }
@@ -477,7 +498,9 @@ export function evaluateStagingPublishGate(input: StagingPublishGateInput): Stag
     fromCommit: active.commit,
     toCommit: input.proposedCommit,
     toBranch: input.proposedSourceBranch,
-    application: input.recutApplication
+    application: input.recutApplication,
+    toCommitRelationshipToNewTip: input.recutDestinationRelationship,
+    toCommitIsBranchTip: input.recutDestinationIsBranchTip
   });
 
   switch (input.relationship) {
@@ -572,6 +595,8 @@ export function evaluateCandidateLineage(args: {
   reset: LineageResetRecord | null;
   recut?: LineageRecutRecord | null;
   recutApplication?: LineageRecutApplicationRecord | null;
+  recutDestinationRelationship?: StagingLineageRelationship;
+  recutDestinationIsBranchTip?: boolean;
   postPromotion: PostPromotionTrunkRecord | null;
 }): CandidateLineage {
   const { candidate, previous, relationship, reset, postPromotion } = args;
@@ -609,7 +634,9 @@ export function evaluateCandidateLineage(args: {
       fromCommit: previous.commit,
       toCommit: candidate.commit,
       toBranch: candidate.sourceBranch,
-      application: args.recutApplication
+      application: args.recutApplication,
+      toCommitRelationshipToNewTip: args.recutDestinationRelationship,
+      toCommitIsBranchTip: args.recutDestinationIsBranchTip
     });
 
   switch (relationship) {
