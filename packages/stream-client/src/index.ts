@@ -20,6 +20,7 @@ import type {
   StateChangeScope,
   StreamKind,
   TaskStateChange,
+  TerminalViewerRole,
 } from "@kanna/agent-protocol";
 
 /** Minimal WebSocket surface so tests and non-browser runtimes can inject
@@ -238,6 +239,9 @@ export interface StreamClientOptions {
   terminalScrollbackWindow?: boolean;
   /** Negotiate bounded agent snapshots with backwards history requests. */
   agentHistoryWindow?: boolean;
+  /** Declare this connection's terminal viewers to the daemon-owned geometry
+   * controller. Omit for an undeclared legacy peer. */
+  terminalViewerRole?: TerminalViewerRole;
 }
 
 interface AgentAttachment {
@@ -254,6 +258,15 @@ interface TerminalAttachment {
    * snapshot names the starting offset and every output frame's own decoded
    * length advances it, so resuming costs nothing on the wire. */
   resume: TermResumePosition | null;
+}
+
+interface TerminalViewerRegistration {
+  viewerId: string;
+  role: TerminalViewerRole;
+  generation: number;
+  cols: number;
+  rows: number;
+  visible: boolean;
 }
 
 interface CompanionAttachment {
@@ -348,9 +361,11 @@ export class StreamClient {
   private nextRequestId = 1;
   private nextScrollbackRequestId = 1;
   private nextAgentHistoryRequestId = 1;
+  private nextTerminalViewerId = 1;
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly pendingCompanionEvents = new Map<string, PendingCompanionEvent>();
   private readonly attachments = new Map<string, Attachment>();
+  private readonly terminalViewerRegistrations = new Map<string, TerminalViewerRegistration>();
   private readonly companionChunkAssemblies = new Map<
     string,
     CompanionChunkAssembly
@@ -570,7 +585,76 @@ export class StreamClient {
   }
 
   sendTermResize(taskId: string, cols: number, rows: number): void {
+    // An upgraded client cannot safely make an automatic remote proposal to
+    // an old owner: that peer would interpret the legacy resize as authority.
+    if (
+      this.options.terminalViewerRole === "remote" &&
+      this.authed &&
+      !this.supportsCapability("terminal_geometry")
+    ) {
+      return;
+    }
+    if (this.options.terminalViewerRole) {
+      this.registerTerminalViewer(taskId, cols, rows);
+      // A remote proposal is carried by the negotiated viewer registration.
+      // Never also emit the legacy resize frame: an old owner would treat it
+      // as authoritative and could shrink a local desktop.
+      if (this.options.terminalViewerRole === "remote") return;
+    }
     this.sendFrame({ type: "term_resize", task_id: taskId, cols, rows });
+  }
+
+  /** Register or update a viewer's measured viewport without changing the
+   * PTY. Remote followers use this when their presentation viewport changes;
+   * the daemon decides whether the proposal is authoritative. */
+  registerTerminalViewer(taskId: string, cols: number, rows: number): void {
+    if (!this.options.terminalViewerRole || cols <= 0 || rows <= 0) return;
+    if (
+      this.authed &&
+      !this.supportsCapability("terminal_geometry")
+    ) {
+      return;
+    }
+    const current = this.terminalViewerRegistrations.get(taskId);
+    const registration = current ?? {
+      viewerId: `terminal-viewer-${this.nextTerminalViewerId++}`,
+      role: this.options.terminalViewerRole,
+      generation: 1,
+      cols,
+      rows,
+      visible: true,
+    };
+    registration.cols = cols;
+    registration.rows = rows;
+    this.terminalViewerRegistrations.set(taskId, registration);
+    this.sendFrame({
+      type: "term_viewer_register",
+      task_id: taskId,
+      viewer_id: registration.viewerId,
+      role: registration.role,
+      generation: registration.generation,
+      cols,
+      rows,
+      visible: registration.visible,
+    });
+  }
+
+  takeTerminalControl(taskId: string): void {
+    if (
+      this.options.terminalViewerRole &&
+      (!this.authed || this.supportsCapability("terminal_geometry"))
+    ) {
+      this.sendFrame({ type: "term_viewer_takeover", task_id: taskId });
+    }
+  }
+
+  releaseTerminalControl(taskId: string): void {
+    if (
+      this.options.terminalViewerRole &&
+      (!this.authed || this.supportsCapability("terminal_geometry"))
+    ) {
+      this.sendFrame({ type: "term_viewer_release", task_id: taskId });
+    }
   }
 
   sendCompanionEvent(
@@ -785,6 +869,9 @@ export class StreamClient {
         ...(this.options.agentHistoryWindow
           ? (["agent_history_window"] as const)
           : []),
+        ...(this.options.terminalViewerRole
+          ? (["terminal_geometry"] as const)
+          : []),
       ],
     }, socket);
   }
@@ -813,6 +900,24 @@ export class StreamClient {
           if (attachment.kind === "companion" && !this.supports("companion")) {
             attachment.handlers.onUnavailable();
             continue;
+          }
+          if (kind === "terminal") {
+            const registration = this.terminalViewerRegistrations.get(taskId);
+            if (
+              registration &&
+              this.supportsCapability("terminal_geometry")
+            ) {
+              this.rawSend({
+                type: "term_viewer_register",
+                task_id: taskId,
+                viewer_id: registration.viewerId,
+                role: registration.role,
+                generation: registration.generation,
+                cols: registration.cols,
+                rows: registration.rows,
+                visible: registration.visible,
+              });
+            }
           }
           const sent = this.rawSend({
             type: "attach",
@@ -851,6 +956,14 @@ export class StreamClient {
             !this.supportsCapability("term_input_boundary")
           ) {
             this.reportUnsupportedTerminalInput(frame.task_id);
+            continue;
+          }
+          if (
+            !this.supportsCapability("terminal_geometry") &&
+            (frame.type === "term_viewer_register" ||
+              frame.type === "term_viewer_takeover" ||
+              frame.type === "term_viewer_release")
+          ) {
             continue;
           }
           this.rawSend(frame);

@@ -133,6 +133,8 @@ export interface MobileController {
   ): Promise<TaskInputSendOutcome>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
+  takeTaskTerminalControl(taskId: string): void;
+  releaseTaskTerminalControl(taskId: string): void;
   /** Pull the next older chunk of terminal scrollback, if the desktop kept any
    * back and no request is already in flight. */
   requestTaskTerminalScrollback(taskId: string): void;
@@ -1442,10 +1444,6 @@ export function createMobileController(
               event.rows,
               event.window
             );
-            // Every reconnect produces a fresh daemon snapshot. Reassert the
-            // mounted mobile viewport if another client changed the shared PTY
-            // while this stream was disconnected.
-            resizeToRequestedGeometry(event);
             break;
           case "output":
             store.appendTaskTerminal(streamTaskId, `${event.dataB64}\n`);
@@ -3636,6 +3634,18 @@ export function createMobileController(
       requestedTaskTerminalGeometry = { taskId, cols, rows };
       if (activeTaskTerminal?.taskId === taskId) {
         activeTaskTerminal.subscription.resize?.(cols, rows);
+      }
+    },
+
+    takeTaskTerminalControl(taskId) {
+      if (activeTaskTerminal?.taskId === taskId) {
+        activeTaskTerminal.subscription.takeControl?.();
+      }
+    },
+
+    releaseTaskTerminalControl(taskId) {
+      if (activeTaskTerminal?.taskId === taskId) {
+        activeTaskTerminal.subscription.releaseControl?.();
       }
     },
 

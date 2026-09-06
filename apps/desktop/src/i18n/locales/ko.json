@@ -198,6 +198,10 @@
     "remoteCompanionOpenFailed": "비주얼 컴패니언을 열 수 없습니다.",
     "remoteTerminalFileDropUnavailable": "다른 컴퓨터의 터미널에는 파일을 놓을 수 없습니다. 파일을 해당 컴퓨터로 전송한 다음 경로를 붙여 넣으세요."
   },
+  "terminalGeometry": {
+    "takeControl": "터미널 제어 가져오기",
+    "releaseControl": "터미널 제어 해제"
+  },
   "tags": {
     "inProgress": "진행 중",
     "pr": "PR",

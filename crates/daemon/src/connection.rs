@@ -10,8 +10,8 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::client::{
-    cleanup_client_writer_registries, effective_terminal_size, register_terminal_emulator_client,
-    unregister_terminal_emulator_client, LostHandoffSessions, SessionSizes,
+    cleanup_client_writer_registries, register_terminal_emulator_client,
+    unregister_terminal_emulator_client, LostHandoffSessions, SessionSizeState, SessionSizes,
     TerminalEmulatorClients,
 };
 use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
@@ -31,6 +31,7 @@ use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
 use crate::util::{error_event, recovery_snapshot_to_terminal_snapshot};
 use crate::{agent_runtime, headless_terminal, pty};
+use kanna_daemon::terminal_perf;
 
 /// The whole unblock story, in the one line the caller actually reads.
 ///
@@ -209,6 +210,32 @@ async fn registration_is_current(
         .is_some_and(|current| Arc::ptr_eq(&current, fanout))
 }
 
+/// Publish the post-resize authoritative grid through the existing ordered
+/// fanout. A geometry change is therefore a snapshot cutover, not a byte-ring
+/// record, and followers hydrate before consuming subsequent output.
+async fn publish_resize_snapshot(
+    session_id: &str,
+    session: &Arc<SessionHandle>,
+    fanouts: &SessionFanouts,
+) {
+    let Some(fanout) = existing_session_fanout(fanouts, session_id).await else {
+        return;
+    };
+    let mut state = fanout.state.lock().await;
+    let Ok(snapshot) = session.snapshot(session_id).await else {
+        return;
+    };
+    let event = Event::Snapshot {
+        session_id: session_id.to_string(),
+        snapshot,
+        agent_provider: session.agent_provider().await,
+    };
+    if let Some(line) = crate::fanout::EventLine::serialize(&event, 0, 0) {
+        let report = state.enqueue(&line);
+        terminal_perf::emit_events(report.newly_lagged);
+    }
+}
+
 async fn test_pause_from_env(variable: &str, message: String) {
     let Some(milliseconds) = std::env::var(variable)
         .ok()
@@ -320,6 +347,17 @@ pub(crate) async fn handle_connection(
                             "unsupported raw-input protocol {version}; this daemon speaks {}",
                             protocol::RAW_INPUT_PROTOCOL_VERSION
                         ),
+                    )
+                };
+                let _ = write_event(&mut *writer.lock().await, &event).await;
+            }
+            Some(Command::NegotiateTerminalGeometry { version }) => {
+                let event = if version == protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION {
+                    Event::TerminalGeometryReady { version }
+                } else {
+                    error_event(
+                        Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
+                        format!("unsupported terminal geometry protocol version {version}"),
                     )
                 };
                 let _ = write_event(&mut *writer.lock().await, &event).await;
@@ -484,14 +522,18 @@ pub(crate) async fn handle_connection(
     )
     .await;
     for (session_id, cols, rows) in remaining_sizes {
-        let resized = match session_handle(&sessions, &session_id).await {
-            Some(session) => session.resize(cols, rows).await.is_ok(),
-            None => false,
-        };
-        if resized {
-            recovery_manager
-                .resize_session(&session_id, cols, rows)
-                .await;
+        let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+        let _lifecycle_guard = lifecycle.lock().await;
+        if let Some(session) = session_handle(&sessions, &session_id).await {
+            if session.resize(cols, rows).await.is_ok() {
+                if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
+                    state.mark_applied((cols, rows));
+                }
+                recovery_manager
+                    .resize_session(&session_id, cols, rows)
+                    .await;
+                publish_resize_snapshot(&session_id, &session, &fanouts).await;
+            }
         }
     }
     agent_runtime::cleanup_agent_writer(&agent_sessions, &writer).await;
@@ -709,6 +751,12 @@ pub(crate) async fn handle_command(
                     }
                     drop(mgr);
 
+                    session_sizes
+                        .lock()
+                        .await
+                        .entry(session_id.clone())
+                        .or_insert_with(|| SessionSizeState::new((cols, rows)));
+
                     // Ask the provider CLI which version it is, off the spawn
                     // path. The session is already classifying by now, from
                     // every rule measured for its provider; the probe narrows
@@ -850,25 +898,28 @@ pub(crate) async fn handle_command(
                         .remove(SubscriberKind::Attached, Arc::as_ptr(&writer) as usize);
                 }
 
-                // Remove this client from the size registry and recompute
-                {
-                    let mut sizes = session_sizes.lock().await;
-                    if let Some(client_sizes) = sizes.get_mut(&session_id) {
-                        let writer_id = Arc::as_ptr(&writer) as usize;
-                        client_sizes.remove(&writer_id);
-                        if !client_sizes.is_empty() {
-                            let (min_cols, min_rows) =
-                                effective_terminal_size(client_sizes, (80, 24));
-                            drop(sizes);
-                            let resized = match session_handle(&sessions, &session_id).await {
-                                Some(session) => session.resize(min_cols, min_rows).await.is_ok(),
-                                None => false,
-                            };
-                            if resized {
-                                recovery_manager
-                                    .resize_session(&session_id, min_cols, min_rows)
-                                    .await;
+                // Controller cleanup is fenced to this connection. A
+                // follower detach never changes geometry; controller detach
+                // elects exactly once and retains the last size if no viewer
+                // remains.
+                let writer_id = Arc::as_ptr(&writer) as usize;
+                let resize = session_sizes
+                    .lock()
+                    .await
+                    .get_mut(&session_id)
+                    .and_then(|state| state.remove(writer_id));
+                if let Some((cols, rows)) = resize {
+                    let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+                    let _lifecycle_guard = lifecycle.lock().await;
+                    if let Some(session) = session_handle(&sessions, &session_id).await {
+                        if session.resize(cols, rows).await.is_ok() {
+                            if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
+                                state.mark_applied((cols, rows));
                             }
+                            recovery_manager
+                                .resize_session(&session_id, cols, rows)
+                                .await;
+                            publish_resize_snapshot(&session_id, &session, &fanouts).await;
                         }
                     }
                 }
@@ -1430,18 +1481,21 @@ pub(crate) async fn handle_command(
             cols,
             rows,
         } => {
-            // Update this client's size and compute effective min across all attached clients
             let writer_id = Arc::as_ptr(&writer) as usize;
-            let (eff_cols, eff_rows) = {
-                let mut sizes = session_sizes.lock().await;
-                let client_sizes = sizes.entry(session_id.clone()).or_default();
-                client_sizes.insert(writer_id, (cols, rows));
-                effective_terminal_size(client_sizes, (cols, rows))
-            };
-
-            let result = match session_handle(&sessions, &session_id).await {
-                Some(session) => session.resize(eff_cols, eff_rows).await,
-                None => Err(format!("session not found: {}", session_id).into()),
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            let resize = session_sizes
+                .lock()
+                .await
+                .entry(session_id.clone())
+                .or_insert_with(|| SessionSizeState::new((cols, rows)))
+                .resize(writer_id, cols, rows);
+            let result = match resize {
+                Some((eff_cols, eff_rows)) => match session_handle(&sessions, &session_id).await {
+                    Some(session) => session.resize(eff_cols, eff_rows).await,
+                    None => Err(format!("session not found: {}", session_id).into()),
+                },
+                None => Ok(()),
             };
             let success = result.is_ok();
             let evt = match result {
@@ -1449,9 +1503,17 @@ pub(crate) async fn handle_command(
                 Err(e) => error_event(None, e.to_string()),
             };
             if success {
-                recovery_manager
-                    .resize_session(&session_id, eff_cols, eff_rows)
-                    .await;
+                if let Some((eff_cols, eff_rows)) = resize {
+                    if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
+                        state.mark_applied((eff_cols, eff_rows));
+                    }
+                    recovery_manager
+                        .resize_session(&session_id, eff_cols, eff_rows)
+                        .await;
+                    if let Some(session) = session_handle(&sessions, &session_id).await {
+                        publish_resize_snapshot(&session_id, &session, &fanouts).await;
+                    }
+                }
             }
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
@@ -1461,66 +1523,137 @@ pub(crate) async fn handle_command(
             cols,
             rows,
         } => {
-            // One persistent control socket owns one size entry. Commands on
-            // that socket are read in order, preserving resize/input ordering.
             let writer_id = Arc::as_ptr(&writer) as usize;
-            let terminal_client_ids = terminal_emulator_clients
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            let resize = session_sizes
                 .lock()
                 .await
-                .get(&session_id)
-                .cloned()
-                .unwrap_or_default();
-            let (eff_cols, eff_rows) = {
-                let mut sizes = session_sizes.lock().await;
-                let client_sizes = sizes.entry(session_id.clone()).or_default();
-                client_sizes.insert(writer_id, (cols, rows));
-                let terminal_client_sizes = client_sizes
-                    .iter()
-                    .filter(|(client_id, _)| {
-                        **client_id != writer_id && terminal_client_ids.contains(client_id)
-                    })
-                    .map(|(client_id, size)| (*client_id, *size))
-                    .collect::<std::collections::HashMap<_, _>>();
-                if terminal_client_sizes.is_empty() {
-                    // A follower is authoritative when no attached desktop
-                    // has supplied a size. Retire older management entries so
-                    // their later disconnect cannot restore stale geometry.
-                    client_sizes.retain(|client_id, _| *client_id == writer_id);
-                    (cols, rows)
-                } else {
-                    effective_terminal_size(&terminal_client_sizes, (cols, rows))
+                .entry(session_id.clone())
+                .or_insert_with(|| SessionSizeState::new((cols, rows)))
+                .resize(writer_id, cols, rows);
+            if let Some((eff_cols, eff_rows)) = resize {
+                match session_handle(&sessions, &session_id).await {
+                    Some(session) => match session.resize(eff_cols, eff_rows).await {
+                        Ok(()) => {
+                            if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
+                                state.mark_applied((eff_cols, eff_rows));
+                            }
+                            recovery_manager
+                                .resize_session(&session_id, eff_cols, eff_rows)
+                                .await;
+                            publish_resize_snapshot(&session_id, &session, &fanouts).await;
+                        }
+                        Err(error) => {
+                            let evt = error_event(None, error.to_string());
+                            let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        }
+                    },
+                    None => {
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::SessionNotFound),
+                            format!("session not found: {}", session_id),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    }
+                }
+            }
+        }
+
+        Command::RegisterViewer {
+            session_id,
+            viewer_id,
+            role,
+            generation,
+            cols,
+            rows,
+            visible,
+        } => {
+            let writer_id = Arc::as_ptr(&writer) as usize;
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            let fallback = match session_handle(&sessions, &session_id).await {
+                Some(session) => session.rows_cols().await,
+                None => {
+                    let evt = error_event(
+                        Some(protocol::ErrorCode::SessionNotFound),
+                        format!("session not found: {}", session_id),
+                    );
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    return;
                 }
             };
-
-            let result = match session_handle(&sessions, &session_id).await {
-                Some(session) => session.resize(eff_cols, eff_rows).await,
-                None => Err(format!("session not found: {}", session_id).into()),
-            };
-            match result {
-                Ok(_) => {
-                    recovery_manager
-                        .resize_session(&session_id, eff_cols, eff_rows)
-                        .await;
-                    if let (Some(session), Some(fanout)) = (
-                        session_handle(&sessions, &session_id).await,
-                        existing_session_fanout(&fanouts, &session_id).await,
-                    ) {
-                        let mut fanout_state = fanout.state.lock().await;
-                        if let Ok(snapshot) = session.snapshot(&session_id).await {
-                            let event = Event::Snapshot {
-                                session_id: session_id.clone(),
-                                snapshot,
-                                agent_provider: session.agent_provider().await,
-                            };
-                            if let Some(line) = EventLine::serialize(&event, 0, 0) {
-                                let _ = fanout_state.enqueue_attached(&line);
+            let resize = session_sizes
+                .lock()
+                .await
+                .entry(session_id.clone())
+                .or_insert_with(|| SessionSizeState::new(fallback))
+                .register(writer_id, viewer_id, role, cols, rows, visible, generation);
+            if let Some((eff_cols, eff_rows)) = resize {
+                if let Some(session) = session_handle(&sessions, &session_id).await {
+                    match session.resize(eff_cols, eff_rows).await {
+                        Ok(()) => {
+                            if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
+                                state.mark_applied((eff_cols, eff_rows));
                             }
+                            recovery_manager
+                                .resize_session(&session_id, eff_cols, eff_rows)
+                                .await;
+                            publish_resize_snapshot(&session_id, &session, &fanouts).await;
+                        }
+                        Err(error) => {
+                            let evt = error_event(None, error.to_string());
+                            let _ = write_event(&mut *writer.lock().await, &evt).await;
                         }
                     }
                 }
-                Err(error) => {
-                    let evt = error_event(None, error.to_string());
-                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+            }
+        }
+
+        Command::TakeoverViewer { session_id } => {
+            let writer_id = Arc::as_ptr(&writer) as usize;
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            let resize = session_sizes
+                .lock()
+                .await
+                .get_mut(&session_id)
+                .and_then(|state| state.takeover(writer_id));
+            if let Some((cols, rows)) = resize {
+                if let Some(session) = session_handle(&sessions, &session_id).await {
+                    if session.resize(cols, rows).await.is_ok() {
+                        if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
+                            state.mark_applied((cols, rows));
+                        }
+                        recovery_manager
+                            .resize_session(&session_id, cols, rows)
+                            .await;
+                        publish_resize_snapshot(&session_id, &session, &fanouts).await;
+                    }
+                }
+            }
+        }
+
+        Command::ReleaseViewer { session_id } => {
+            let writer_id = Arc::as_ptr(&writer) as usize;
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            let resize = session_sizes
+                .lock()
+                .await
+                .get_mut(&session_id)
+                .and_then(|state| state.release(writer_id));
+            if let Some((cols, rows)) = resize {
+                if let Some(session) = session_handle(&sessions, &session_id).await {
+                    if session.resize(cols, rows).await.is_ok() {
+                        if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
+                            state.mark_applied((cols, rows));
+                        }
+                        recovery_manager
+                            .resize_session(&session_id, cols, rows)
+                            .await;
+                        publish_resize_snapshot(&session_id, &session, &fanouts).await;
+                    }
                 }
             }
         }
@@ -1937,7 +2070,8 @@ pub(crate) async fn handle_command(
         Command::AdoptOperator
         | Command::AuthorizeServer { .. }
         | Command::NegotiateProtectedInput { .. }
-        | Command::NegotiateRawInput { .. } => {
+        | Command::NegotiateRawInput { .. }
+        | Command::NegotiateTerminalGeometry { .. } => {
             let event = error_event(None, "unexpected nested authority command");
             let _ = write_event(&mut *writer.lock().await, &event).await;
         }

@@ -117,6 +117,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     state.terminalView?.unregisterE2ETerminalBuffer()
     state.terminalView = initializeTerminalView({
       el,
+      state,
       sessionId,
       instanceId,
       options,

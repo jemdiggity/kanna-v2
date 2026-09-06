@@ -1754,12 +1754,24 @@ impl SessionHandle {
         cols: u16,
         rows: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let previous = {
+            let pty = self.pty.lock().await;
+            (pty.cols(), pty.rows())
+        };
         self.pty.lock().await.resize(cols, rows)?;
-        self.state
-            .lock()
-            .await
-            .headless_terminal
-            .resize(cols, rows)?;
+        let headless_result = self.state.lock().await.headless_terminal.resize(cols, rows);
+        if let Err(error) = headless_result {
+            // Do not leave the kernel PTY and the authoritative headless
+            // interpreter on different grids. A failed resize is invisible
+            // to consumers, and the caller can retry the unchanged proposal.
+            if let Err(rollback_error) = self.pty.lock().await.resize(previous.0, previous.1) {
+                return Err(format!(
+                    "headless resize failed ({error}); PTY rollback failed ({rollback_error})"
+                )
+                .into());
+            }
+            return Err(error);
+        }
         Ok(())
     }
 

@@ -71,6 +71,18 @@ semantics, and the MCP task-management rule — stay in the repo-root
 3. Close shell → focus returns to agent terminal
 4. Type in agent terminal to send input to Claude
 
+### Viewing a terminal from more than one device
+
+The PTY has one authoritative grid. The visible owning desktop terminal is the
+automatic geometry controller when present; a phone or remote desktop follows
+that grid and can pan/scroll it without changing the owner's layout. When no
+desktop viewer is present, the phone's measured viewport can size the PTY.
+The remote viewer's **Take terminal control** action is an explicit temporary
+takeover and remains in effect until **Release terminal control** or
+disconnect. Focus, typing, rotation, and keyboard visibility do not silently
+reclaim control. A reconnect re-registers the viewer and rehydrates from the
+authoritative snapshot.
+
 **Multi-repo:** Import repos via sidebar. Each repo has its own task list. Cmd+Opt+Up/Down navigates tasks in sidebar order.
 
 ### Closing a task (⇧⌘⌫)

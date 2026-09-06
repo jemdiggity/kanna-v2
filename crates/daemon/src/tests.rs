@@ -234,7 +234,13 @@ async fn connection_drop_cleanup_reports_remaining_effective_terminal_size() {
     let small_id = Arc::as_ptr(&small_writer) as usize;
     session_sizes.lock().await.insert(
         "session-resize".to_string(),
-        HashMap::from([(large_id, (120, 43)), (small_id, (80, 24))]),
+        crate::client::SessionSizeState {
+            last_applied: (80, 24),
+            viewers: HashMap::new(),
+            legacy_sizes: HashMap::from([(large_id, (120, 43)), (small_id, (80, 24))]),
+            controller: None,
+            explicit_controller: None,
+        },
     );
 
     let remaining_sizes = cleanup_client_writer_registries(

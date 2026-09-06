@@ -26,7 +26,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use kanna_agent_protocol::frames::TermResumePosition;
 use kanna_agent_protocol::{
     AgentEvent, ClientFrame, CompanionEvent, FrameAgentEvent, KspCapability, PermissionDecision,
-    ServerFrame, StreamKind,
+    ServerFrame, StreamKind, TerminalViewerRole,
 };
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext, TerminalPerfMonitor};
@@ -709,6 +709,7 @@ fn auth_ok_frame_for(companion_access: bool) -> ServerFrame {
             KspCapability::TermInputBoundary,
             KspCapability::TermScrollbackWindow,
             KspCapability::AgentHistoryWindow,
+            KspCapability::TerminalGeometry,
         ],
     }
 }
@@ -1609,6 +1610,7 @@ async fn handle_stream_channels(
         supports_companion_event_epoch: false,
         supports_term_input_boundary: false,
         supports_terminal_window: false,
+        supports_terminal_geometry: false,
         supports_agent_history_window: false,
         legacy_companion_tasks_on_connection: HashSet::new(),
         auth_mode,
@@ -1686,6 +1688,7 @@ struct StreamConn {
     supports_companion_event_epoch: bool,
     supports_term_input_boundary: bool,
     supports_terminal_window: bool,
+    supports_terminal_geometry: bool,
     supports_agent_history_window: bool,
     legacy_companion_tasks_on_connection: HashSet<String>,
     auth_mode: AuthMode,
@@ -1800,6 +1803,7 @@ pub(crate) fn request_concurrency() -> usize {
         .unwrap_or(1)
 }
 
+#[derive(Clone)]
 enum TerminalControlCommand {
     Input {
         data: Vec<u8>,
@@ -1809,6 +1813,16 @@ enum TerminalControlCommand {
         cols: u16,
         rows: u16,
     },
+    Register {
+        viewer_id: String,
+        role: TerminalViewerRole,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+        visible: bool,
+    },
+    Takeover,
+    Release,
 }
 
 #[derive(Clone, Copy)]
@@ -1835,6 +1849,24 @@ impl TerminalControlCommand {
                 cols,
                 rows,
             },
+            Self::Register {
+                viewer_id,
+                role,
+                generation,
+                cols,
+                rows,
+                visible,
+            } => DaemonCommand::RegisterViewer {
+                session_id,
+                viewer_id,
+                role,
+                generation,
+                cols,
+                rows,
+                visible,
+            },
+            Self::Takeover => DaemonCommand::TakeoverViewer { session_id },
+            Self::Release => DaemonCommand::ReleaseViewer { session_id },
         }
     }
 }
@@ -1930,6 +1962,12 @@ async fn run_terminal_control(
     };
     let daemon_dir = state.config().daemon_dir.clone();
     let mut retry_attempt = 0usize;
+    let mut geometry_daemon_pid: Option<u32> = None;
+    let mut geometry_supported: Option<bool> = None;
+    // Replayed on every daemon reconnect. A KSP connection may outlive a
+    // daemon handoff, so registration belongs to this control lifetime rather
+    // than only to the first socket.
+    let mut registration: Option<DaemonCommand> = None;
     // Do not open an otherwise idle control socket merely because a terminal
     // attached for output. Keep the first command pending across definite
     // connect failures; after the first connection, reconnect proactively so
@@ -1968,9 +2006,57 @@ async fn run_terminal_control(
                 continue;
             }
         };
+        let connected_pid = client.connected_pid();
+        if geometry_daemon_pid != Some(connected_pid) {
+            geometry_daemon_pid = Some(connected_pid);
+            geometry_supported = None;
+        }
         let (mut daemon_reader, mut daemon_writer) = client.into_split();
         retry_attempt = 0;
 
+        if geometry_supported.is_none() {
+            let negotiated = tokio::select! {
+                biased;
+                _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                result = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    async {
+                        daemon_writer
+                            .send_one_way(&DaemonCommand::NegotiateTerminalGeometry {
+                                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+                            })
+                            .await?;
+                        daemon_reader.read_event().await
+                    },
+                ) => result,
+            };
+            geometry_supported = Some(matches!(
+                negotiated,
+                Ok(Ok(DaemonEvent::TerminalGeometryReady { version }))
+                    if version == kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION
+            ));
+            if !geometry_supported.unwrap_or(false) {
+                // The probe consumes a connection that an old daemon cannot
+                // keep alive. Reconnect once and send only legacy commands;
+                // a PID change probes again after daemon replacement.
+                continue;
+            }
+        }
+
+        let pending_is_registration = pending_command
+            .as_ref()
+            .is_some_and(|command| matches!(command, TerminalControlCommand::Register { .. }));
+        if !geometry_supported.unwrap_or(false) {
+            if pending_is_registration {
+                pending_command = None;
+            }
+        } else if !pending_is_registration {
+            if let Some(command) = registration.as_ref() {
+                if daemon_writer.send_one_way(command).await.is_err() {
+                    continue;
+                }
+            }
+        }
         if let Some(command) = pending_command.take() {
             if let TerminalControlCommand::Resize { cols, rows } = &command {
                 log::info!(
@@ -1978,6 +2064,10 @@ async fn run_terminal_control(
                 );
             }
             let daemon_command = command.into_daemon_command(session_id.clone());
+            let is_registration = matches!(&daemon_command, DaemonCommand::RegisterViewer { .. });
+            if is_registration {
+                registration = Some(daemon_command.clone());
+            }
             let write_result = tokio::select! {
                 biased;
                 _ = terminal_control_cancelled(&mut cancel_rx) => return,
@@ -2038,6 +2128,14 @@ async fn run_terminal_control(
                         );
                     }
                     let daemon_command = command.into_daemon_command(session_id.clone());
+                    if !geometry_supported.unwrap_or(false)
+                        && matches!(&daemon_command, DaemonCommand::RegisterViewer { .. })
+                    {
+                        continue;
+                    }
+                    if matches!(&daemon_command, DaemonCommand::RegisterViewer { .. }) {
+                        registration = Some(daemon_command.clone());
+                    }
                     let write_result = tokio::select! {
                         biased;
                         _ = terminal_control_cancelled(&mut cancel_rx) => return,
@@ -2707,6 +2805,9 @@ impl StreamConn {
                 | ClientFrame::TermInputBoundary { task_id, .. }
                 | ClientFrame::TermInputControl { task_id, .. }
                 | ClientFrame::TermResize { task_id, .. }
+                | ClientFrame::TermViewerRegister { task_id, .. }
+                | ClientFrame::TermViewerTakeover { task_id }
+                | ClientFrame::TermViewerRelease { task_id }
                 | ClientFrame::TermScrollbackRequest { task_id, .. }
                 | ClientFrame::AgentHistoryRequest { task_id, .. }
                 | ClientFrame::CompanionEvent { task_id, .. } => Some(task_id.clone()),
@@ -2909,6 +3010,77 @@ impl StreamConn {
                 rows,
             } => self
                 .enqueue_terminal_control(task_id, TerminalControlCommand::Resize { cols, rows }),
+            ClientFrame::TermViewerRegister {
+                task_id,
+                viewer_id,
+                role,
+                generation,
+                cols,
+                rows,
+                visible,
+            } => {
+                if !self.supports_terminal_geometry {
+                    self.error(
+                        Some(task_id),
+                        "terminal_geometry_unsupported",
+                        "the desktop does not support terminal viewer geometry control".into(),
+                    )
+                    .await;
+                } else if role == TerminalViewerRole::Local
+                    && self.auth_mode != AuthMode::RequireLocalControlToken
+                {
+                    self.error(
+                        Some(task_id),
+                        "terminal_viewer_role_unauthorized",
+                        "only the owning desktop may declare a local terminal viewer".into(),
+                    )
+                    .await;
+                } else if viewer_id.trim().is_empty() || cols == 0 || rows == 0 {
+                    self.error(
+                        Some(task_id),
+                        "invalid_terminal_viewer",
+                        "terminal viewer registration requires an id and positive dimensions"
+                            .into(),
+                    )
+                    .await;
+                } else {
+                    self.enqueue_terminal_control(
+                        task_id,
+                        TerminalControlCommand::Register {
+                            viewer_id,
+                            role,
+                            generation,
+                            cols,
+                            rows,
+                            visible,
+                        },
+                    );
+                }
+            }
+            ClientFrame::TermViewerTakeover { task_id } => {
+                if self.supports_terminal_geometry {
+                    self.enqueue_terminal_control(task_id, TerminalControlCommand::Takeover);
+                } else {
+                    self.error(
+                        Some(task_id),
+                        "terminal_geometry_unsupported",
+                        "terminal takeover is unavailable on this desktop".into(),
+                    )
+                    .await;
+                }
+            }
+            ClientFrame::TermViewerRelease { task_id } => {
+                if self.supports_terminal_geometry {
+                    self.enqueue_terminal_control(task_id, TerminalControlCommand::Release);
+                } else {
+                    self.error(
+                        Some(task_id),
+                        "terminal_geometry_unsupported",
+                        "terminal takeover is unavailable on this desktop".into(),
+                    )
+                    .await;
+                }
+            }
             ClientFrame::TermScrollbackRequest {
                 task_id,
                 request_id,
@@ -3047,6 +3219,7 @@ impl StreamConn {
         self.supports_term_input_boundary =
             capabilities.contains(&KspCapability::TermInputBoundary);
         self.supports_terminal_window = capabilities.contains(&KspCapability::TermScrollbackWindow);
+        self.supports_terminal_geometry = capabilities.contains(&KspCapability::TerminalGeometry);
         self.supports_agent_history_window =
             capabilities.contains(&KspCapability::AgentHistoryWindow);
         self.send(auth_ok_frame_for(self.companion_access)).await;
@@ -4642,6 +4815,11 @@ impl TerminalTap {
         // to the broadcast under the same lock, so anything it can already see
         // must not also reach it as a live event.
         let mut shared = self.lock_shared();
+        // A snapshot is also the cutover for a geometry change. Invalidate
+        // resume cursors at that boundary just as a daemon reconnect does;
+        // offsets from the old rendered grid must never be replayed into the
+        // newly sized emulator.
+        shared.stream_id = next_terminal_tap_id();
         let offset = shared.ring.end_offset();
         shared.ring.reset_to(offset);
         shared.base_offset = offset;
@@ -5364,7 +5542,7 @@ mod tests {
     use kanna_daemon::terminal_perf::{format_event, TerminalPerfMonitor};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -5543,6 +5721,22 @@ mod tests {
         kanna_runtime_defaults::socket_path(std::path::Path::new(daemon_dir))
     }
 
+    async fn write_geometry_ready<W: AsyncWrite + Unpin>(writer: &mut W) {
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::TerminalGeometryReady {
+                        version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write geometry negotiation response");
+    }
+
     async fn spawn_fake_daemon_once(daemon_dir: String) -> tokio::task::JoinHandle<DaemonCommand> {
         spawn_fake_daemon_once_with_response(daemon_dir, DaemonEvent::Ok).await
     }
@@ -5609,6 +5803,22 @@ mod tests {
                     }
                     let command: DaemonCommand = serde_json::from_str(line.trim())
                         .expect("parse fake control daemon command");
+                    if matches!(&command, DaemonCommand::NegotiateTerminalGeometry { .. }) {
+                        write_half
+                            .write_all(
+                                format!(
+                                    "{}\n",
+                                    serde_json::to_string(&DaemonEvent::TerminalGeometryReady {
+                                        version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+                                    })
+                                    .unwrap()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .expect("write geometry negotiation response");
+                        continue;
+                    }
                     let expects_reply = !matches!(
                         &command,
                         DaemonCommand::InputNoReply { .. } | DaemonCommand::ResizeNoReply { .. }
@@ -5658,13 +5868,32 @@ mod tests {
                     .expect("accept reconnect daemon connection");
                 let (read_half, mut write_half) = stream.into_split();
                 let mut reader = BufReader::new(read_half);
-                let mut line = String::new();
-                reader
-                    .read_line(&mut line)
-                    .await
-                    .expect("read reconnect daemon command");
-                let command: DaemonCommand =
-                    serde_json::from_str(line.trim()).expect("parse reconnect daemon command");
+                let command = loop {
+                    let mut line = String::new();
+                    reader
+                        .read_line(&mut line)
+                        .await
+                        .expect("read reconnect daemon command");
+                    let command: DaemonCommand =
+                        serde_json::from_str(line.trim()).expect("parse reconnect daemon command");
+                    if !matches!(&command, DaemonCommand::NegotiateTerminalGeometry { .. }) {
+                        break command;
+                    }
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::TerminalGeometryReady {
+                                    version:
+                                        kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+                                })
+                                .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("write geometry negotiation response");
+                };
                 let expects_reply = !matches!(
                     &command,
                     DaemonCommand::InputNoReply { .. } | DaemonCommand::ResizeNoReply { .. }
@@ -5715,7 +5944,34 @@ mod tests {
                 if line.is_empty() {
                     return;
                 }
-                let command = serde_json::from_str(line.trim()).expect("parse terminal input");
+                let command = loop {
+                    let command = serde_json::from_str(line.trim()).expect("parse terminal input");
+                    if !matches!(&command, DaemonCommand::NegotiateTerminalGeometry { .. }) {
+                        break command;
+                    }
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::TerminalGeometryReady {
+                                    version:
+                                        kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+                                })
+                                .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("write geometry negotiation response");
+                    line.clear();
+                    reader
+                        .read_line(&mut line)
+                        .await
+                        .expect("read terminal input after geometry negotiation");
+                    if line.is_empty() {
+                        return;
+                    }
+                };
                 command_tx
                     .send(command)
                     .await
@@ -5748,7 +6004,8 @@ mod tests {
 
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept control connection");
-            let mut reader = BufReader::new(stream);
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
             for _ in 0..command_count {
                 let mut line = String::new();
                 reader
@@ -5758,7 +6015,22 @@ mod tests {
                 if line.is_empty() {
                     return;
                 }
-                let command = serde_json::from_str(line.trim()).expect("parse terminal command");
+                let command = loop {
+                    let command =
+                        serde_json::from_str(line.trim()).expect("parse terminal command");
+                    if !matches!(&command, DaemonCommand::NegotiateTerminalGeometry { .. }) {
+                        break command;
+                    }
+                    write_geometry_ready(&mut write_half).await;
+                    line.clear();
+                    reader
+                        .read_line(&mut line)
+                        .await
+                        .expect("read terminal command after geometry negotiation");
+                    if line.is_empty() {
+                        return;
+                    }
+                };
                 command_tx
                     .send(command)
                     .await
@@ -5783,7 +6055,8 @@ mod tests {
                 let (stream, _) = listener.accept().await.expect("accept control connection");
                 let command_tx = command_tx.clone();
                 handlers.spawn(async move {
-                    let mut reader = BufReader::new(stream);
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
                     loop {
                         let mut line = String::new();
                         let read = reader
@@ -5793,8 +6066,23 @@ mod tests {
                         if read == 0 {
                             return;
                         }
-                        let command =
-                            serde_json::from_str(line.trim()).expect("parse terminal command");
+                        let command = loop {
+                            let command =
+                                serde_json::from_str(line.trim()).expect("parse terminal command");
+                            if !matches!(&command, DaemonCommand::NegotiateTerminalGeometry { .. })
+                            {
+                                break command;
+                            }
+                            write_geometry_ready(&mut write_half).await;
+                            line.clear();
+                            let read = reader
+                                .read_line(&mut line)
+                                .await
+                                .expect("read terminal command after geometry negotiation");
+                            if read == 0 {
+                                return;
+                            }
+                        };
                         if command_tx.send(command).await.is_err() {
                             return;
                         }
@@ -5909,6 +6197,7 @@ mod tests {
                 supports_companion_event_epoch,
                 supports_term_input_boundary: true,
                 supports_terminal_window: false,
+                supports_terminal_geometry: false,
                 supports_agent_history_window: false,
                 terminal_taps: HashMap::new(),
                 agent_histories: HashMap::new(),
@@ -8912,6 +9201,7 @@ mod tests {
                 supports_companion_event_epoch: false,
                 supports_term_input_boundary: true,
                 supports_terminal_window: false,
+                supports_terminal_geometry: false,
                 supports_agent_history_window: false,
                 terminal_taps: HashMap::new(),
                 agent_histories: HashMap::new(),
@@ -9024,6 +9314,7 @@ mod tests {
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
             supports_terminal_window: false,
+            supports_terminal_geometry: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -9948,13 +10239,19 @@ mod tests {
                 handlers.spawn(async move {
                     let (read_half, mut write_half) = stream.into_split();
                     let mut reader = BufReader::new(read_half);
-                    let mut line = String::new();
-                    reader
-                        .read_line(&mut line)
-                        .await
-                        .expect("read daemon command");
-                    let command: DaemonCommand =
-                        serde_json::from_str(line.trim()).expect("parse daemon command");
+                    let command = loop {
+                        let mut line = String::new();
+                        reader
+                            .read_line(&mut line)
+                            .await
+                            .expect("read daemon command");
+                        let command: DaemonCommand =
+                            serde_json::from_str(line.trim()).expect("parse daemon command");
+                        if !matches!(&command, DaemonCommand::NegotiateTerminalGeometry { .. }) {
+                            break command;
+                        }
+                        write_geometry_ready(&mut write_half).await;
+                    };
                     let hold_reply = matches!(command, DaemonCommand::AgentInterrupt { .. });
                     command_tx
                         .send(command)
@@ -10126,6 +10423,7 @@ mod tests {
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
             supports_terminal_window: false,
+            supports_terminal_geometry: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -10273,6 +10571,7 @@ mod tests {
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
             supports_terminal_window: false,
+            supports_terminal_geometry: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -10341,6 +10640,7 @@ mod tests {
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
             supports_terminal_window: false,
+            supports_terminal_geometry: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -10452,6 +10752,7 @@ mod tests {
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
             supports_terminal_window: false,
+            supports_terminal_geometry: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -12764,6 +13065,7 @@ mod tests {
                     KspCapability::TermInputBoundary,
                     KspCapability::TermScrollbackWindow,
                     KspCapability::AgentHistoryWindow,
+                    KspCapability::TerminalGeometry,
                 ],
             })
         );

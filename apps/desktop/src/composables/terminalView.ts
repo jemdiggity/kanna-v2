@@ -10,6 +10,7 @@ import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers"
 import { isAppShortcut } from "./useKeyboardShortcuts"
 import { shouldPushKittyKeyboardOnFreshAttach, shouldSupportKittyKeyboard } from "./terminalSessionRecovery"
 import type { TerminalOptions } from "./terminalTypes"
+import type { TerminalRuntimeState } from "./terminalRuntimeState"
 import { createTerminalFileLinkProvider, type TerminalFileLinkProvider } from "./terminalFileLinks"
 import { registerTerminalFileLinkProvider } from "./terminalFileLinkRegistry"
 import { createTerminalDropBridge, type TerminalDropBridge } from "./terminalDropBridge"
@@ -29,6 +30,7 @@ export interface InitializedTerminalView {
 
 export function initializeTerminalView(params: {
   el: HTMLElement
+  state: TerminalRuntimeState
   sessionId: string
   instanceId: string
   options?: TerminalOptions
@@ -188,7 +190,7 @@ export function initializeTerminalView(params: {
   // Handle resize — only forward to daemon after session is attached,
   // otherwise the invoke fails silently and the resize is lost.
   term.onResize(({ cols, rows }) => {
-    if (params.isAttached()) {
+    if (params.isAttached() && !params.state.applyingSnapshot) {
       params.getStreamClient()?.sendTermResize(params.sessionId, cols, rows)
     }
   })

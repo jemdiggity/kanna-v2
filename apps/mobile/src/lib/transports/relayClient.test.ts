@@ -421,7 +421,8 @@ describe("createRelayDesktopClient", () => {
         capabilities: [
           "companion_event_epoch",
           "term_input_boundary",
-          "term_scrollback_window"
+          "term_scrollback_window",
+          "terminal_geometry"
         ],
         credential: "id-token-1"
       })
@@ -429,7 +430,7 @@ describe("createRelayDesktopClient", () => {
     socket.onmessage?.({
       data: JSON.stringify({
         type: "auth_ok",
-        capabilities: ["term_input_boundary"],
+        capabilities: ["term_input_boundary", "terminal_geometry"],
       }),
     });
     await flushPromises();
@@ -491,10 +492,14 @@ describe("createRelayDesktopClient", () => {
     await flushPromises();
     expect(socket.send).toHaveBeenLastCalledWith(
       JSON.stringify({
-        type: "term_resize",
+        type: "term_viewer_register",
         task_id: "task-1",
+        viewer_id: "terminal-viewer-1",
+        role: "remote",
+        generation: 1,
         cols: 80,
-        rows: 48
+        rows: 48,
+        visible: true
       })
     );
 

@@ -166,8 +166,14 @@ export function createTerminalSessionLifecycle(params: {
       }
 
       if (!params.state.terminalStreamAttached) {
+        const initialViewer = getLiveTerminal()
+        if (initialViewer) {
+          // Establish the owning local role on the same KSP control path
+          // before the attach can become interactive or emit a resize.
+          client.registerTerminalViewer?.(params.sessionId, initialViewer.cols, initialViewer.rows)
+        }
         client.attachTerminal(params.sessionId, {
-          onSnapshot: (_cols, _rows, dataB64, agentProvider) => {
+          onSnapshot: (cols, rows, dataB64, agentProvider) => {
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
@@ -181,6 +187,11 @@ export function createTerminalSessionLifecycle(params: {
             ) {
               liveTerminal.reset()
             }
+            params.state.applyingSnapshot = true
+            if (liveTerminal.cols !== cols || liveTerminal.rows !== rows) {
+              liveTerminal.resize(cols, rows)
+            }
+            params.state.applyingSnapshot = false
             params.state.preserveRecoveredScrollbackForNextSnapshot = false
             params.state.resetTerminalOnNextSnapshot = false
             params.clipboardBridge.restoreTerminalModesFromSnapshot(vt)

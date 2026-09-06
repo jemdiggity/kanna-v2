@@ -16,6 +16,10 @@ use ts_rs::TS;
 use crate::events::{AgentEvent, PermissionDecision};
 use crate::AgentProvider;
 
+fn default_true() -> bool {
+    true
+}
+
 /// Which stream of a task to attach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,8 +54,22 @@ pub enum KspCapability {
     /// older sequence ranges on demand, and retains its existing events when
     /// re-attaching from a non-zero sequence.
     AgentHistoryWindow,
+    /// Terminal viewers can register an explicit local/remote role and use
+    /// the daemon-owned geometry controller. Without this capability a peer
+    /// is legacy and must not be treated as a local controller.
+    TerminalGeometry,
     #[serde(other)]
     Unknown,
+}
+
+/// The role a terminal viewer declares on the authenticated control path.
+/// This is a rendering/ownership role, not an input permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub enum TerminalViewerRole {
+    Local,
+    Remote,
 }
 
 /// Whether the companion content is an HTML fragment that Kanna must frame
@@ -234,6 +252,26 @@ pub enum ClientFrame {
         task_id: String,
         cols: u16,
         rows: u16,
+    },
+    /// Register the viewer before it sends input or resize. Registration is
+    /// bound to this authenticated KSP connection by kanna-server and then
+    /// to the daemon control attachment.
+    TermViewerRegister {
+        task_id: String,
+        viewer_id: String,
+        role: TerminalViewerRole,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        generation: u64,
+        cols: u16,
+        rows: u16,
+        #[serde(default = "default_true")]
+        visible: bool,
+    },
+    TermViewerTakeover {
+        task_id: String,
+    },
+    TermViewerRelease {
+        task_id: String,
     },
     /// Pull one bounded chunk of scrollback older than what the client holds.
     /// `before_line` indexes the retained history identified by `history_id`,

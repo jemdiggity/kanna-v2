@@ -2872,6 +2872,69 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("registers a remote viewport without sending a legacy owner resize", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    expect(socket.sent[0]).toEqual({
+      type: "auth",
+      capabilities: [
+        "companion_event_epoch",
+        "term_input_boundary",
+        "terminal_geometry",
+      ],
+    });
+    socket.receive({
+      type: "auth_ok",
+      capabilities: ["term_input_boundary", "terminal_geometry"],
+    });
+    client.attachTerminal("task-pty", { onOutput() {} });
+    client.sendTermResize("task-pty", 42, 18);
+
+    expect(socket.sent.at(-1)).toEqual({
+      type: "term_viewer_register",
+      task_id: "task-pty",
+      viewer_id: "terminal-viewer-1",
+      role: "remote",
+      generation: 1,
+      cols: 42,
+      rows: 18,
+      visible: true,
+    });
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "term_resize" }),
+    );
+    client.close();
+  });
+
+  it("suppresses remote geometry control against an old owner", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["term_input_boundary"] });
+    client.attachTerminal("task-pty", { onOutput() {} });
+    client.sendTermResize("task-pty", 42, 18);
+    client.takeTerminalControl("task-pty");
+    client.releaseTerminalControl("task-pty");
+
+    expect(socket.sent).toHaveLength(2);
+    expect(socket.sent[1]).toEqual({
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    });
+    client.close();
+  });
+
   it("fails closed without server boundary support and never emits terminal input", () => {
     const errors: Array<{ code: string; message: string }> = [];
     const client = new StreamClient({

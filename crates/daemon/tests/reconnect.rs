@@ -2886,6 +2886,7 @@ fn wait_for_ok(conn: &mut ClientConn, action: &str) {
             Evt::Ok => break,
             Evt::Output { .. } => continue,
             Evt::StatusChanged { .. } => continue,
+            Evt::Snapshot { .. } => continue,
             Evt::Error { message, .. } => panic!("{action} failed: {message}"),
             other => panic!("expected Ok for {action}, got: {:?}", other),
         }
@@ -2903,7 +2904,9 @@ fn wait_for_ok_with_timeout(conn: &mut ClientConn, action: &str, timeout: Durati
 
         match conn.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
             Ok(Evt::Ok) => break,
-            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) => continue,
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) | Ok(Evt::Snapshot { .. }) => {
+                continue
+            }
             Ok(Evt::Error { message, .. }) => panic!("{action} failed: {message}"),
             Ok(other) => panic!("expected Ok for {action}, got: {:?}", other),
             Err(_) => continue,

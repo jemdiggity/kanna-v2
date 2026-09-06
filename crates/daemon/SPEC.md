@@ -13,7 +13,14 @@ kanna-daemon manages persistent PTY sessions for Claude CLI agents. It runs as a
 5. **One reader per session.** Each PTY session has exactly one `stream_output` task. Newly spawned sessions start it immediately so detached output is captured by the headless terminal. Adopted handoff sessions start it immediately after the old-daemon release barrier.
 6. **Headless terminal is authoritative while detached.** PTY bytes are always consumed by `stream_output` and applied to the per-session headless terminal. There is no raw pre-attach byte replay buffer.
 7. **AttachSnapshot is the only frontend attach path.** It atomically sends the current headless terminal snapshot, adds the connection to the live writer list, and then streams future output.
-8. **Multiple clients per session.** Attached clients receive output via broadcast. Smallest terminal dimensions are used for the PTY.
+8. **Multiple clients per session.** Attached clients receive output via broadcast. A
+   geometry-capable viewer registers its role and measured dimensions on the
+   control connection. One daemon-owned controller proposes the PTY size:
+   eligible local viewers win over eligible remote viewers, ties are
+   deterministic by viewer id, and a remote viewer never shrinks an attached
+   local viewer. An explicit takeover overrides automatic election until
+   release or disconnect. Followers render the controller's authoritative grid
+   and may pan/scroll it; their viewport is not a PTY resize.
 9. **Always broadcast.** Before exiting during handoff, the old daemon broadcasts `ShuttingDown` to all subscribers.
 10. **Always reconnect.** Apps detect daemon restart (via `ShuttingDown` or EOF) and automatically reconnect + re-attach all tracked sessions.
 11. **Authorize the successor before handoff state.** For every supported handoff version, the sender authenticates the peer as a daemon directly spawned by the trusted app-launcher executable before it acquires daemon-lifecycle ownership, seals a registry, snapshots a session, writes `HandoffReady`, or transfers a descriptor.
@@ -143,10 +150,48 @@ The daemon does **not** buffer raw scrollback. Reconnection uses the headless te
 1. Client sends `AttachSnapshot`
 2. Daemon ensures the session has one `stream_output` reader
 3. Daemon snapshots the headless terminal and adds the client to the writer broadcast list
-4. Client hydrates xterm.js from the snapshot and sends `Resize`
+4. Client hydrates xterm.js from the snapshot and, when geometry is negotiated,
+   registers its measured proposal before sending `Resize`
 5. Future PTY output streams live to the client
 
 **Why no raw scrollback buffer:** Claude's TUI uses absolute cursor positioning and full-screen rendering. Raw byte replay can resurrect overwritten output and garble state. The headless terminal is the single detached-state copy; xterm.js is hydrated from that state on attach.
+
+### Terminal geometry controller
+
+`RegisterViewer` is atomic with the first positive `(cols, rows)` proposal and
+is fenced by the control connection, viewer id, and registration generation.
+`ResizeNoReply` updates a registered viewer's proposal, but only the elected
+viewer can change the PTY and headless terminal. A follower resize is a no-op.
+The selection table is:
+
+| Eligible candidates | Automatic controller |
+|---|---|
+| local viewers | deterministic local candidate |
+| no local, remote viewers | deterministic remote candidate |
+| no visible measured viewers | retain last applied size |
+
+The current eligible controller is retained. A local arrival preempts an
+automatically selected remote controller; ordinary focus and input never
+reclaim an explicit takeover. Detaching a follower does nothing. Detaching,
+disconnecting, or backgrounding the controller elects once. A transient
+transport loss may relinquish takeover; there is no heartbeat or timeout
+arbitration loop.
+
+Legacy undeclared resize requests retain the old minimum policy only while all
+participants are legacy. Once a geometry-capable viewer registers, legacy
+requests cannot displace its controller. This is a compatibility limitation,
+not the synchronized-grid guarantee. Geometry changes publish an ordered
+authoritative snapshot through fanout, so the snapshot/live tail cutover is
+the same boundary as lag recovery. A failed PTY/headless resize is not
+published as applied. Draft bytes, composer attestation, and held logical
+input are independent of geometry and survive reflow. Handoff preserves the
+last applied dimensions but never transfers pointer-based viewer ownership;
+clients re-register after reconnect.
+
+The server probes daemon terminal-geometry protocol version 1 on each daemon
+PID before sending viewer commands. An older daemon is treated as legacy and
+continues to receive only legacy resize commands; a replacement daemon is
+probed again. This is deliberately separate from protected-input negotiation.
 
 ## Handoff Protocol
 

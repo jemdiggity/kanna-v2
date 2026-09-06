@@ -118,6 +118,7 @@ export function createRelayDesktopClient({
       // minutes of viewing: bounded snapshots, on-demand scrollback, and delta
       // resubscribe are all negotiated here.
       terminalScrollbackWindow: true,
+      terminalViewerRole: "remote",
     });
     streamClients.set(desktopId, client);
     return client;
@@ -502,6 +503,12 @@ export function createRelayDesktopClient({
         },
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);
+        },
+        takeControl() {
+          client.takeTerminalControl(taskId);
+        },
+        releaseControl() {
+          client.releaseTerminalControl(taskId);
         },
         requestScrollback(request) {
           client.requestTerminalScrollback(taskId, request);

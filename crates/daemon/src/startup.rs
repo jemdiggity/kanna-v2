@@ -5,7 +5,7 @@ use std::sync::Arc;
 use kanna_daemon::recovery::{RecoveryManager, SeededRecoverySnapshot};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::client::{LostHandoffSessions, SessionSizes, TerminalEmulatorClients};
+use crate::client::{LostHandoffSessions, SessionSizeState, SessionSizes, TerminalEmulatorClients};
 use crate::connection::handle_connection;
 use crate::daemon_lifecycle::new_daemon_lifecycle;
 use crate::fanout::{session_fanout, SessionFanouts};
@@ -364,6 +364,10 @@ pub(crate) async fn run_daemon() {
             }
             let rows = handoff.rows;
             let cols = handoff.cols;
+            session_sizes
+                .lock()
+                .await
+                .insert(session_id.clone(), SessionSizeState::new((cols, rows)));
             let stream_control = StreamControl::new();
             let handle = Arc::new(SessionHandle::new(SessionRecord {
                 pty: pty_session,
