@@ -18,9 +18,9 @@ export function getE2EMobileInstallUrl(): string | undefined {
  * callers must not turn them into QR codes.
  */
 export const MOBILE_INSTALL_LINKS: Record<MobileInstallEnvironment, string> = {
-  production: "__CONFIGURE_PRODUCTION_APP_STORE_URL__",
-  staging: "__CONFIGURE_STAGING_TESTFLIGHT_URL__",
-  dev: "__CONFIGURE_STAGING_TESTFLIGHT_URL__",
+  production: "https://apps.apple.com/app/id6802176590",
+  staging: "https://apps.apple.com/app/id6802176590",
+  dev: "https://apps.apple.com/app/id6802176590",
 };
 
 export function normalizeMobileInstallEnvironment(

@@ -34,7 +34,7 @@ describe("MobileAccessPanel", () => {
     });
 
     expect(wrapper.text()).toContain("Studio Mac");
-    expect(wrapper.get('button[type="button"]').text()).toMatch(/start pairing/i);
+    expect(wrapper.get('[data-testid="mobile-access-start-pairing"]').text()).toMatch(/start pairing/i);
   });
 
   it("exposes stable selectors for the desktop pairing E2E", () => {
@@ -94,6 +94,7 @@ describe("MobileAccessPanel", () => {
   });
 
   it("shows the honest fallback when the environment link is a placeholder", () => {
+    MOBILE_INSTALL_LINKS.staging = "__CONFIGURE_STAGING_TESTFLIGHT_URL__";
     const wrapper = mount(MobileAccessPanel, {
       props: {
         desktopName: "Studio Mac",

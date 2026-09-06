@@ -19,8 +19,8 @@ describe("mobile install links", () => {
 
   it("does not guess an environment or treat placeholders as links", () => {
     expect(normalizeMobileInstallEnvironment("unknown")).toBeNull();
-    expect(isConfiguredMobileInstallLink(MOBILE_INSTALL_LINKS.production)).toBe(false);
-    expect(getMobileInstallLink("production")).toBeNull();
+    expect(isConfiguredMobileInstallLink("__CONFIGURE_TESTFLIGHT_URL__")).toBe(false);
+    expect(getMobileInstallLink("unknown")).toBeNull();
   });
 
   it("returns only a configured HTTPS link from the typed environment map", () => {
