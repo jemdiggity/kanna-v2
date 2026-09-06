@@ -438,6 +438,43 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Write discrete terminal keys, or explicit raw bytes, into a running
+    /// task's PTY without appending Enter or sending a logical message
+    SendRawInput {
+        /// The target task ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Named keys to write, in order, comma-separated
+        /// (for example `--keys down,enter`). Mutually exclusive with --bytes
+        #[arg(long, value_delimiter = ',')]
+        keys: Vec<String>,
+
+        /// Explicit bytes to write verbatim, hex by default
+        /// (for example `--bytes 1b5b42`). The shell never interprets this:
+        /// it is decoded here, not by a `printf`. Mutually exclusive with --keys
+        #[arg(long)]
+        bytes: Option<String>,
+
+        /// How --bytes is spelled: hex (default) or base64
+        #[arg(long)]
+        encoding: Option<String>,
+
+        /// Who is acting: "operator" for a human or a human's relayed
+        /// instruction, "manager" for an orchestrating agent driving the
+        /// terminal on its own authority. Recorded as declared; omit it to
+        /// claim nothing
+        #[arg(long)]
+        source: Option<String>,
+
+        /// List the accepted key names and exit without writing anything
+        #[arg(long)]
+        list_keys: bool,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Rename a task by setting its display name
     Rename {
         /// The task ID

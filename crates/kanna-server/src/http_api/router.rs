@@ -48,6 +48,7 @@ use super::task_files::{get_task_file, resolve_task_file_mentions};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
+use super::task_raw_input::send_task_raw_input;
 use super::tasks::{
     create_task, get_task, get_task_children, get_task_inputs, list_closed_task_identities,
     list_recent_tasks, put_task, search_tasks, update_task,
@@ -213,6 +214,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 crate::task_input_attachments::MAX_TASK_INPUT_BODY_BYTES,
             )),
         )
+        .route("/v1/tasks/{task_id}/raw-input", post(send_task_raw_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
         .route("/v1/tasks/{task_id}/actions/unblock", post(unblock_task))
         .route(

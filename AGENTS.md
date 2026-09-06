@@ -118,7 +118,10 @@ the user sees the TUI and can type. Lifecycle events arrive as hooks.
 stdin/stdout, non-interactive.
 
 To send input to a running task:
-`kanna-cli task send-input --task-id <TASK_ID> --message "..."`.
+`kanna-cli task send-input --task-id <TASK_ID> --message "..."`. That is one
+logical message with its own Enter; to answer a menu or a trust prompt, which a
+sentence cannot, use
+`kanna-cli task send-raw-input --task-id <TASK_ID> --keys down,enter`.
 
 ## Mobile
 
@@ -359,6 +362,25 @@ Read it with `kanna_task_inputs`
 uncertain delivery is deliberately not recorded, and recording never fails a
 delivery that already reached the PTY. Add a new injected-message kind to this
 record where it is delivered, not by diffing terminals. See
+`docs/kanna-server-boundary.md`.
+
+**Raw terminal keys are actions, not speech.**
+`POST /v1/tasks/{task_id}/raw-input` (`kanna_send_task_raw_input`,
+`kanna-cli task send-raw-input`) writes discrete keys or explicit bytes into a
+task's live PTY with nothing appended. It exists because the logical-message
+route structurally cannot answer a menu: it sends a sentence and the daemon
+appends its own Enter. The vocabulary is
+`kanna_runtime_defaults::terminal_keys` — one table, advertised by the MCP
+schema and used by the server, held in step by a contract test — and only the
+named `enter` key declares a submission boundary, so a carriage return inside
+explicit bytes is refused rather than left to corrupt the daemon's draft
+ledger. Every write is fenced to the PTY pid discovery observed and is
+acknowledged only once its bytes reached the terminal, so order holds and a
+part-way stop answers `delivery_uncertain` — never retry that; only a daemon mid-handoff (`daemon_handing_off`) answers `retryable: true`. **No
+`task_input` row is written**: an arrow key answering a prompt is not owner or
+manager speech, and the instruction history must not be readable as though it
+were. The action is announced as `task.raw_input_delivered`. Raw keys enable
+interactive menus; they are not an approval mechanism. See
 `docs/kanna-server-boundary.md`.
 
 **Task terms come from the prompt and durable delivered directives.** The

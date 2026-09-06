@@ -66,6 +66,15 @@ enum Cmd {
         expected_pid: u32,
         data: Vec<u8>,
     },
+    RawInputIfSession {
+        session_id: String,
+        expected_pid: u32,
+        data: Vec<u8>,
+        class: RawInputClass,
+    },
+    NegotiateRawInput {
+        version: u32,
+    },
     SubmitInput {
         session_id: String,
         data: Vec<u8>,
@@ -102,6 +111,15 @@ enum Cmd {
     },
     List,
     Subscribe,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RawInputClass {
+    Draft,
+    Submission,
+    Control,
 }
 
 #[allow(dead_code)]
@@ -144,6 +162,9 @@ enum Evt {
     LogicalInputReleased {
         session_id: String,
         session_pid: u32,
+    },
+    RawInputReady {
+        version: u32,
     },
     Ok,
     Error {
@@ -3124,7 +3145,12 @@ fn same_id_reuse_waits_for_old_reader_exit_and_recovery_teardown() {
             }
             Ok(Evt::Exit { .. }) => panic!("old Exit escaped after replacement SessionCreated"),
             Ok(Evt::SessionCreated { .. } | Evt::Snapshot { .. } | Evt::Ok | Evt::Unknown) => {}
-            Ok(Evt::SessionList { .. } | Evt::LogicalInputReleased { .. } | Evt::Error { .. }) => {}
+            Ok(
+                Evt::SessionList { .. }
+                | Evt::LogicalInputReleased { .. }
+                | Evt::RawInputReady { .. }
+                | Evt::Error { .. },
+            ) => {}
             Err(_) => {}
         }
     }
@@ -4398,4 +4424,268 @@ fn test_rapid_reattach() {
         "after rapid reattach, output should be intact, got: {:?}",
         output_str
     );
+}
+
+/// One byte of PTY stdin, rendered as hex on its own line.
+///
+/// A snapshot is the terminal's *rendered* state, so escape sequences written
+/// into it are consumed by the emulator and never appear as text — which is
+/// exactly why an assertion on rendered output cannot prove an arrow key was
+/// received. This child reads its stdin one byte at a time and prints each
+/// byte's hex value, so what the snapshot shows is the byte sequence the PTY
+/// actually delivered, in the order it arrived.
+/// `READY` is printed only after the line discipline is raw. Without waiting
+/// for it a write can reach the PTY while the child is still starting, and the
+/// discipline's own ICRNL turns the Enter this test is asserting on into a
+/// line feed — a real race, observed on the first run of this test.
+const HEX_STDIN_ECHO: &str = "stty raw -echo; printf 'READY\\r\\n'; \
+     while b=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); do \
+       [ -n \"$b\" ] || break; printf 'B%s\\r\\n' \"$b\"; \
+     done";
+
+fn live_session_pid(conn: &mut ClientConn, session_id: &str) -> u32 {
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => sessions
+            .iter()
+            .find(|session| session["session_id"] == session_id)
+            .and_then(|session| session["pid"].as_u64())
+            .and_then(|pid| u32::try_from(pid).ok())
+            .expect("spawned session should have a pid"),
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+}
+
+fn await_snapshot_containing(conn: &mut ClientConn, session_id: &str, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        conn.send(&Cmd::Snapshot {
+            session_id: session_id.to_string(),
+        });
+        match conn.recv() {
+            Evt::Snapshot { snapshot, .. } if snapshot.vt.contains(needle) => return snapshot.vt,
+            Evt::Snapshot { .. } if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Evt::Snapshot { snapshot, .. } => {
+                panic!("{needle:?} never reached the PTY; saw: {:?}", snapshot.vt)
+            }
+            other => panic!("expected Snapshot, got: {other:?}"),
+        }
+    }
+}
+
+fn negotiate_raw_input(conn: &mut ClientConn) {
+    conn.send(&Cmd::NegotiateRawInput { version: 1 });
+    match conn.recv() {
+        Evt::RawInputReady { version } => assert_eq!(version, 1),
+        other => panic!("expected RawInputReady, got: {other:?}"),
+    }
+}
+
+/// The 2026-09-05 incident's own key sequence, end to end against a real
+/// daemon and a real PTY: Escape, then Down, then Enter, arriving as exactly
+/// the bytes named and in exactly that order, with nothing appended.
+///
+/// The child prints one hex line per received byte, so this asserts real stdin
+/// receipt rather than rendered output — an arrow key rendered into a terminal
+/// emulator leaves no text behind at all.
+#[test]
+fn fenced_raw_keys_reach_the_pty_as_exact_ordered_bytes() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "raw-key-bytes";
+    spawn_shell_session(&mut conn, session_id, HEX_STDIN_ECHO);
+    await_snapshot_containing(&mut conn, session_id, "READY");
+    negotiate_raw_input(&mut conn);
+    let pid = live_session_pid(&mut conn, session_id);
+
+    // Escape (draft), Down (draft), Enter (submission) — the three classes the
+    // server can emit, in the order a menu is actually driven.
+    let sequence: [(&[u8], RawInputClass); 3] = [
+        (b"\x1b", RawInputClass::Draft),
+        (b"\x1b[B", RawInputClass::Draft),
+        (b"\r", RawInputClass::Submission),
+    ];
+    for (data, class) in sequence {
+        conn.send(&Cmd::RawInputIfSession {
+            session_id: session_id.to_string(),
+            expected_pid: pid,
+            data: data.to_vec(),
+            class,
+        });
+        // The acknowledgement is the ordering barrier: it is sent only once
+        // every byte of this write has reached the PTY, so the next write
+        // cannot overtake it.
+        assert!(matches!(conn.recv(), Evt::Ok));
+    }
+
+    let rendered = await_snapshot_containing(&mut conn, session_id, "B0d");
+    // The snapshot's final line carries the emulator's own cursor-restore
+    // escape, so each line is read as its leading hex digits only.
+    let received = rendered
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('B'))
+        .map(|line| {
+            line.chars()
+                .take_while(char::is_ascii_hexdigit)
+                .collect::<String>()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    // Exactly the five bytes sent, in order, and nothing else — in particular
+    // no trailing 0a, which is what a logical message's synthesized newline
+    // would have added.
+    assert_eq!(received, vec!["1b", "1b", "5b", "42", "0d"], "{rendered:?}");
+}
+
+/// The fence covers raw keys too: a write naming a PTY pid the session no
+/// longer has is refused, and no byte reaches the replacement.
+#[test]
+fn fenced_raw_keys_refuse_a_different_observed_pid() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "raw-key-fence";
+    spawn_shell_session(&mut conn, session_id, HEX_STDIN_ECHO);
+    await_snapshot_containing(&mut conn, session_id, "READY");
+    negotiate_raw_input(&mut conn);
+    let pid = live_session_pid(&mut conn, session_id);
+
+    conn.send(&Cmd::RawInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid.saturating_add(1),
+        data: b"\x1b[B".to_vec(),
+        class: RawInputClass::Draft,
+    });
+    assert!(matches!(
+        conn.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::SessionIncarnationMismatch),
+            ..
+        }
+    ));
+
+    // A key the fence accepts proves the child is alive and reading, so the
+    // absence of the refused bytes above is a refusal rather than a race.
+    conn.send(&Cmd::RawInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid,
+        data: b"\t".to_vec(),
+        class: RawInputClass::Draft,
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+
+    let rendered = await_snapshot_containing(&mut conn, session_id, "B09");
+    assert!(
+        !rendered.contains("B5b") && !rendered.contains("B42"),
+        "refused bytes reached the PTY: {rendered:?}"
+    );
+}
+
+/// A raw Enter declared as a submission empties the draft ledger, so a logical
+/// message delivered afterwards goes out immediately instead of being held
+/// behind a line the raw keys appeared to be typing.
+///
+/// This is the bookkeeping half of the contract: `InputIfSession` classified
+/// every fenced write as a draft, so a fenced CR armed the ledger against a
+/// composer it had just submitted.
+#[test]
+fn a_declared_raw_submission_clears_the_draft_it_ends() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "raw-key-boundary";
+    spawn_shell_session(
+        &mut conn,
+        session_id,
+        "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
+    );
+    negotiate_raw_input(&mut conn);
+    let pid = live_session_pid(&mut conn, session_id);
+
+    // Typed content arms the ledger, exactly as a human's keystrokes would.
+    conn.send(&Cmd::RawInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid,
+        data: b"half typed".to_vec(),
+        class: RawInputClass::Draft,
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+
+    // A logical message now has to wait: appending it would concatenate onto
+    // that unsent line.
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"held message".to_vec(),
+    });
+    assert!(matches!(
+        conn.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::LogicalInputHeldByDraft),
+            ..
+        }
+    ));
+
+    // The declared submission ends that draft, and the held message goes out
+    // as its own line rather than glued to the first.
+    conn.send(&Cmd::RawInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid,
+        data: b"\r".to_vec(),
+        class: RawInputClass::Submission,
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+
+    let rendered = await_snapshot_containing(&mut conn, session_id, "LINE:<held message>");
+    assert!(
+        rendered.contains("LINE:<half typed>"),
+        "the raw draft was not submitted on its own: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("LINE:<half typedheld message>"),
+        "the held message was concatenated onto the draft: {rendered:?}"
+    );
+}
+
+/// Navigation keys create no composer text, so they must not park a delivered
+/// message behind a draft nobody typed — the 2026-09-05 phantom-draft report,
+/// asserted here through the fenced raw path an agent actually uses.
+#[test]
+fn fenced_navigation_keys_do_not_hold_a_delivered_message() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "raw-key-navigation";
+    spawn_shell_session(
+        &mut conn,
+        session_id,
+        "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
+    );
+    negotiate_raw_input(&mut conn);
+    let pid = live_session_pid(&mut conn, session_id);
+
+    for key in [b"\x1b".as_slice(), b"\x1b[C", b"\x1b[5~"] {
+        conn.send(&Cmd::RawInputIfSession {
+            session_id: session_id.to_string(),
+            expected_pid: pid,
+            data: key.to_vec(),
+            class: RawInputClass::Draft,
+        });
+        assert!(matches!(conn.recv(), Evt::Ok));
+    }
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"delivered anyway".to_vec(),
+    });
+    assert!(
+        matches!(conn.recv(), Evt::Ok),
+        "an Escape, an arrow and a PageUp created no draft, so nothing may be held"
+    );
+    // The line the shell reads may still carry the navigation bytes ahead of
+    // the text: a canonical-mode line discipline keeps them in its buffer until
+    // the Enter, and whether they land in this line or an earlier one depends
+    // on when the child got scheduled. That is the terminal's business. What
+    // this asserts is the daemon's: the message went out with its own Enter
+    // rather than being parked behind a draft those keys never created.
+    await_snapshot_containing(&mut conn, session_id, "delivered anyway>");
 }

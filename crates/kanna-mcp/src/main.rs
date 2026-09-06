@@ -1768,6 +1768,7 @@ mod tests {
                 "kanna_signal_agent",
                 "kanna_signal_merge_handoff",
                 "kanna_send_task_input",
+                "kanna_send_task_raw_input",
                 "kanna_close_task",
                 "kanna_rename_task",
                 "kanna_advance_stage",

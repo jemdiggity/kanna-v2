@@ -148,6 +148,36 @@ impl DaemonClient {
         }
     }
 
+    /// Prove this daemon speaks the fenced raw-input contract before any key is
+    /// sent to a PTY.
+    ///
+    /// The negotiation command has no session and no side effect, so every way
+    /// it can fail — an old daemon dropping the connection on a variant it
+    /// cannot deserialize, a version it declines, a lost response — leaves the
+    /// terminal untouched. That is what lets the raw-input route answer
+    /// "unsupported, nothing written" rather than the uncertain verdict a lost
+    /// response after a write would deserve.
+    pub(crate) async fn negotiate_raw_input(&mut self) -> Result<(), String> {
+        let version = kanna_daemon::protocol::RAW_INPUT_PROTOCOL_VERSION;
+        match self
+            .send_command(&Command::NegotiateRawInput { version })
+            .await
+        {
+            Ok(Event::RawInputReady {
+                version: acknowledged,
+            }) if acknowledged == version => Ok(()),
+            Ok(Event::Error { message, .. }) => Err(format!(
+                "daemon refused raw-input protocol {version}: {message}"
+            )),
+            Ok(event) => Err(format!(
+                "daemon did not acknowledge raw-input protocol {version}: {event:?}"
+            )),
+            Err(error) => Err(format!(
+                "daemon does not support raw-input protocol {version}: {error}"
+            )),
+        }
+    }
+
     pub(crate) async fn negotiate_protected_input(&mut self) -> Result<(), String> {
         self.negotiate_protected_input_once()
             .await
