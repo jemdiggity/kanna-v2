@@ -11,7 +11,11 @@ import {
 import { BuildInfoPanel } from "../components/BuildInfoPanel";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { RepoCommandCatalog, RepoSummary } from "../lib/api/types";
-import type { RepoCheckoutOffer, RepoCommandStatus } from "../state/sessionStore";
+import type {
+  RepoCheckoutOffer,
+  RepoCommandRunFailure,
+  RepoCommandStatus
+} from "../state/sessionStore";
 import { buildRepoCommandSections } from "./repoCommandPresentation";
 
 interface MoreScreenProps {
@@ -21,6 +25,8 @@ interface MoreScreenProps {
   status: RepoCommandStatus;
   errorMessage: string | null;
   runningCommandId: string | null;
+  /** A launch the desktop refused. The catalog beside it is still good. */
+  runError?: RepoCommandRunFailure | null;
   checkoutOffer?: RepoCheckoutOffer | null;
   scrollViewRef?: React.RefObject<ScrollView | null>;
   onSelectRepo(repoId: string): void;
@@ -36,6 +42,7 @@ export function MoreScreen({
   status,
   errorMessage,
   runningCommandId,
+  runError = null,
   checkoutOffer = null,
   scrollViewRef,
   onSelectRepo,
@@ -177,31 +184,51 @@ export function MoreScreen({
               <View style={styles.commandList}>
                 {section.commands.map((command) => {
                   const running = runningCommandId === command.id;
+                  const failure =
+                    runError?.commandId === command.id ? runError : null;
                   return (
-                    <Pressable
-                      disabled={runningCommandId !== null}
-                      key={command.id}
-                      onPress={() => onRunCommand(command.id)}
-                      style={({ pressed }) => [
-                        styles.command,
-                        runningCommandId !== null
-                          ? styles.commandDisabled
-                          : pressed
-                            ? styles.commandPressed
-                            : null
-                      ]}
-                      testID={MOBILE_E2E_IDS.moreCommand(command.id)}
-                    >
-                      <View style={styles.commandText}>
-                        <Text style={styles.commandTitle}>
-                          {running ? "Running…" : command.label}
-                        </Text>
-                        <Text style={styles.commandCopy}>
-                          {command.description}
-                        </Text>
-                      </View>
-                      <Text style={styles.chevron}>›</Text>
-                    </Pressable>
+                    <View key={command.id}>
+                      <Pressable
+                        disabled={runningCommandId !== null}
+                        onPress={() => onRunCommand(command.id)}
+                        style={({ pressed }) => [
+                          styles.command,
+                          failure ? styles.commandFailed : null,
+                          runningCommandId !== null
+                            ? styles.commandDisabled
+                            : pressed
+                              ? styles.commandPressed
+                              : null
+                        ]}
+                        testID={MOBILE_E2E_IDS.moreCommand(command.id)}
+                      >
+                        <View style={styles.commandText}>
+                          <Text style={styles.commandTitle}>
+                            {running ? "Running…" : command.label}
+                          </Text>
+                          <Text style={styles.commandCopy}>
+                            {command.description}
+                          </Text>
+                        </View>
+                        <Text style={styles.chevron}>›</Text>
+                      </Pressable>
+                      {failure ? (
+                        <View
+                          style={styles.commandError}
+                          testID={MOBILE_E2E_IDS.moreCommandError(command.id)}
+                        >
+                          <Text style={styles.commandErrorTitle}>
+                            {`Could not start ${command.label}`}
+                          </Text>
+                          <Text style={styles.commandErrorCopy}>
+                            {failure.message}
+                          </Text>
+                          <Text style={styles.commandErrorHint}>
+                            Nothing was started. Tap the command to try again.
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
                   );
                 })}
               </View>
@@ -272,6 +299,19 @@ const styles = StyleSheet.create({
     padding: 15
   },
   commandDisabled: { opacity: 0.62 },
+  commandFailed: { borderColor: "#7A3B45" },
+  commandError: {
+    backgroundColor: "#1B1016",
+    borderColor: "#7A3B45",
+    borderRadius: 14,
+    borderWidth: 1,
+    gap: 4,
+    marginTop: 6,
+    padding: 13
+  },
+  commandErrorTitle: { color: "#F2C3C9", fontSize: 13, fontWeight: "700" },
+  commandErrorCopy: { color: "#D8AEB5", fontSize: 13, lineHeight: 18 },
+  commandErrorHint: { color: "#9E8188", fontSize: 12, lineHeight: 17 },
   commandPressed: {
     backgroundColor: "#182842",
     borderColor: "#3A5F91",

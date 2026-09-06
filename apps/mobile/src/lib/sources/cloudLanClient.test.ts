@@ -596,6 +596,113 @@ describe("createCloudLanClient", () => {
     expect(cloud.runRepoCommand).not.toHaveBeenCalled();
   });
 
+  it("names a reused sibling-owned singleton by its owner's identity", async () => {
+    // The repository command reached the MacBook, but the account already owns
+    // this task-manager on the Studio, so the MacBook reused it there. Naming
+    // it with the MacBook's desktop and repository ids builds a task id that
+    // resolves to nothing anywhere.
+    const cloud = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([])
+    });
+    const lan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-macbook"))
+    });
+    const macbook = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-kanji", name: "kanji-kongbu", remoteUrlHash: "hash-kanji" }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      listRepoCommands: vi.fn().mockResolvedValue({
+        repoId: "repo-kanji",
+        revision: "catalog-v1",
+        commands: []
+      }),
+      runRepoCommand: vi.fn().mockResolvedValue({
+        taskId: "task-manager-studio",
+        reused: true,
+        ownerDesktopId: "desktop-studio",
+        ownerLocalRepoId: "repo-studio-kanji",
+        ownerLocalTaskId: "task-manager-studio"
+      })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      lanClientForDesktop: (desktopId) =>
+        desktopId === "desktop-macbook" ? macbook : null
+    });
+
+    await client.listRepos();
+    await client.listRecentTasks();
+    await client.listRepoCommands("git:hash-kanji");
+    const reused = await client.runRepoCommand(
+      "git:hash-kanji",
+      "custom:task-manager",
+      "catalog-v1"
+    );
+
+    expect(reused).toMatchObject({
+      taskId: "cloud:desktop-studio:repo-studio-kanji:task-manager-studio",
+      reused: true,
+      ownerDesktopId: "desktop-studio",
+      ownerLocalRepoId: "repo-studio-kanji",
+      ownerLocalTaskId: "task-manager-studio"
+    });
+    // The Studio was never proven to be on this LAN, so the task resolves the
+    // way every other sibling-owned task does rather than through a LAN route
+    // invented for it.
+    expect(client.getTaskRouteIdentity?.(reused.taskId)).not.toContain(
+      "desktop-macbook"
+    );
+  });
+
+  it("does not guess a repository id for a sibling owner that could not be asked", async () => {
+    const cloud = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([]),
+      listRecentTasks: vi.fn().mockResolvedValue([])
+    });
+    const lan = createClientMock({
+      getStatus: vi.fn().mockResolvedValue(runningStatus("desktop-macbook"))
+    });
+    const macbook = createClientMock({
+      listRepos: vi.fn().mockResolvedValue([
+        { id: "repo-kanji", name: "kanji-kongbu", remoteUrlHash: "hash-kanji" }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      listRepoCommands: vi.fn().mockResolvedValue({
+        repoId: "repo-kanji",
+        revision: "catalog-v1",
+        commands: []
+      }),
+      runRepoCommand: vi.fn().mockResolvedValue({
+        taskId: "task-manager-studio",
+        reused: true,
+        ownerDesktopId: "desktop-studio",
+        ownerLocalTaskId: "task-manager-studio"
+      })
+    });
+    const client = createCloudLanClient(cloud, lan, {
+      isLanEnabled: () => true,
+      lanClientForDesktop: (desktopId) =>
+        desktopId === "desktop-macbook" ? macbook : null
+    });
+
+    await client.listRepos();
+    await client.listRecentTasks();
+    await client.listRepoCommands("git:hash-kanji");
+    const reused = await client.runRepoCommand(
+      "git:hash-kanji",
+      "custom:task-manager",
+      "catalog-v1"
+    );
+
+    // `repo-kanji` is this MacBook's id for the repository, not the Studio's.
+    // Substituting it would name a task that exists on neither machine.
+    expect(reused.ownerLocalRepoId).toBeUndefined();
+    expect(reused.taskId).toBe("task-manager-studio");
+    expect(reused.ownerDesktopId).toBe("desktop-studio");
+  });
+
   it("routes commands for a taskless LAN repository through its owning desktop", async () => {
     const cloud = createClientMock({
       listRepos: vi.fn().mockResolvedValue([]),

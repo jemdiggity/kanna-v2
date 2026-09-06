@@ -328,6 +328,127 @@ describe("remote task listing, creation, and actions E2E", () => {
   }, 120_000);
 
 
+  it("launches, reuses, and honestly refuses a repository singleton command over the LAN route", async () => {
+    // The route the phone's More tab uses. Its 503 was not a transport
+    // failure: the LAN request arrived and the desktop's own account-wide
+    // singleton arbitration refused it, because the relay could not answer
+    // the account directory. This pins all three outcomes on the real route —
+    // create, reuse, and refuse without creating a rival.
+    const commandTask = await createScriptedTask(harness, {
+      displayName: "Repo command singleton"
+    });
+    const remoteUrlHash = createHash("sha256")
+      .update(`repo-command-singleton:${commandTask.repoId}`)
+      .digest("hex");
+    await invokeDesktop(harness, "PATCH", `/v1/repos/${commandTask.repoId}`, {
+      remoteUrlHash
+    });
+    const openManagers = async (): Promise<string[]> => {
+      const rows = await querySql(
+        harness,
+        `SELECT DISTINCT p.id
+           FROM pipeline_item p
+           JOIN repo r ON r.id = p.repo_id
+           JOIN stage_run s ON s.task_id = p.id AND s.agent = 'task-manager'
+          WHERE r.remote_url_hash = ?1 AND p.closed_at IS NULL`,
+        [remoteUrlHash]
+      );
+      return rows.map((row) => getString(row, "id"));
+    };
+
+    const catalog = asRecord(await invokeLanJson(
+      harness,
+      "GET",
+      `/v1/repos/${commandTask.repoId}/commands`,
+      null
+    ));
+    const revision = getString(catalog, "revision");
+    const commandIds = (catalog.commands as unknown[]).map(
+      (command) => getString(asRecord(command), "id")
+    );
+    expect(commandIds).toContain("custom:task-manager");
+
+    // A sibling desktop that has not published a complete directory makes the
+    // account-wide lookup unanswerable. That is uncertainty, never permission
+    // to elect a rival singleton.
+    const strandedDesktopUrl =
+      `${firestoreBaseUrl(harness)}/users/${BUFFY_UID}/desktops/stranded-directory-desktop`;
+    const strandedWrite = await fetch(strandedDesktopUrl, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer owner", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fields: {
+          desktopId: { stringValue: "stranded-directory-desktop" },
+          singletonDirectoryVersion: { integerValue: "0" }
+        }
+      })
+    });
+    expect(strandedWrite.ok).toBe(true);
+
+    const runPath =
+      `/v1/repos/${commandTask.repoId}/commands/${encodeURIComponent("custom:task-manager")}/run`;
+    const refusal = await invokeLanJson(harness, "POST", runPath, {
+      catalogRevision: revision
+    }).then(() => null, (error: unknown) => error);
+    expect(refusal).toBeInstanceOf(Error);
+    // The desktop explains the refusal in the body, which is what the phone
+    // now shows instead of a bare status code.
+    expect((refusal as Error).message).toContain("(503)");
+    expect((refusal as Error).message).toContain("account directory");
+    expect((refusal as Error).message).toContain("no singleton was created");
+    expect(await openManagers()).toEqual([]);
+
+    await fetch(strandedDesktopUrl, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer owner" }
+    });
+
+    const created = asRecord(await invokeLanJson(harness, "POST", runPath, {
+      catalogRevision: revision
+    }));
+    expect(created.reused).toBe(false);
+    const managerTaskId = getString(created, "taskId");
+    // The owner's identity, which is how a caller names the task. This desktop
+    // owns it, so both halves are its own.
+    expect(getString(created, "ownerDesktopId")).toBe(harness.desktopId);
+    expect(getString(created, "ownerLocalRepoId")).toBe(commandTask.repoId);
+    expect(getString(created, "ownerLocalTaskId")).toBe(managerTaskId);
+    await waitForCondition(
+      async () => (await openManagers()).length === 1,
+      30_000,
+      "the repository command did not create exactly one task-manager singleton"
+    );
+
+    // A second launch of the same command reuses the singleton the account
+    // already owns rather than creating a second one.
+    const reused = asRecord(await invokeLanJson(harness, "POST", runPath, {
+      catalogRevision: revision
+    }));
+    expect(reused).toMatchObject({
+      taskId: managerTaskId,
+      reused: true,
+      ownerDesktopId: harness.desktopId,
+      ownerLocalRepoId: commandTask.repoId,
+      ownerLocalTaskId: managerTaskId
+    });
+    expect(await openManagers()).toEqual([managerTaskId]);
+
+    // A catalog the caller has not refreshed is refused separately, and that
+    // refusal also creates nothing.
+    const stale = await invokeLanJson(harness, "POST", runPath, {
+      catalogRevision: "stale-revision"
+    }).then(() => null, (error: unknown) => error);
+    expect((stale as Error).message).toContain("(409)");
+    expect(await openManagers()).toEqual([managerTaskId]);
+
+    await invokeDesktop(harness, "POST", `/v1/tasks/${managerTaskId}/actions/close`, null);
+    await waitForCondition(
+      async () => (await openManagers()).length === 0,
+      30_000,
+      "closing the singleton did not release it"
+    );
+  }, 180_000);
+
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {
     const advanceTask = await createScriptedTask(harness, {
       displayName: "Remote advance task"

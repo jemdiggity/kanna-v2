@@ -1,4 +1,8 @@
-import { readServerRefusal, ServerRefusalError } from "./serverRefusal";
+import {
+  readServerFailureBody,
+  readServerRefusal,
+  ServerRefusalError
+} from "./serverRefusal";
 import type {
   KannaTransport,
   TaskAgentSubscription,
@@ -38,6 +42,12 @@ export interface FetchResponseLike {
   ok: boolean;
   status: number;
   json(): Promise<unknown>;
+  /**
+   * Present on every real `fetch` response. Optional here only so the tests
+   * that stand up a bare `{ ok, status, json }` double keep compiling; a
+   * response without it falls back to the JSON-only reading.
+   */
+  text?(): Promise<string>;
 }
 
 export type FetchLike = (
@@ -99,11 +109,17 @@ export function createLanTransport(
       ? createSocket(url, credentialHeaders())
       : createSocket(url);
   // The server's own explanation and machine-readable reason for a failed
-  // request, when it sent them.
-  const readFailure = async (response: {
-    json: () => Promise<unknown>;
-  }): Promise<{ reason: string | null; message: string | null }> => {
+  // request, when it sent them. Read from the raw body rather than as JSON:
+  // the server's structured refusals are JSON, but most of its handlers refuse
+  // with axum's `(StatusCode, String)`, whose body is `text/plain`.
+  const readFailure = async (
+    response: FetchResponseLike
+  ): Promise<{ reason: string | null; message: string | null }> => {
     try {
+      const readText = response.text;
+      if (typeof readText === "function") {
+        return readServerFailureBody(await readText.call(response));
+      }
       return readServerRefusal(await response.json());
     } catch {
       return { reason: null, message: null };
@@ -134,7 +150,8 @@ export function createLanTransport(
       throw new ServerRefusalError(
         `LAN request failed (${response.status}) for ${path}${message ? `: ${message}` : ""}`,
         reason,
-        response.status
+        response.status,
+        message
       );
     }
 

@@ -285,6 +285,22 @@ export function createRelayDesktopClient({
     pendingInvokes.delete(id);
     const status = typeof message.status === "number" ? message.status : 200;
     if (typeof message.error === "string" && message.error.trim()) {
+      // A frame carrying the desktop's own failure status is the desktop
+      // answering, not a broken tunnel — the relay's own refusals ("Desktop
+      // offline") carry no status. Reporting the two the same way is what put
+      // the whole app into its connection-error state over one refused
+      // request.
+      if (typeof message.status === "number" && message.status >= 400) {
+        pending.reject(
+          new ServerRefusalError(
+            `Remote desktop request failed with status ${message.status}. ${message.error}`,
+            null,
+            message.status,
+            message.error
+          )
+        );
+        return;
+      }
       pending.reject(new Error(message.error));
       return;
     }
@@ -300,7 +316,8 @@ export function createRelayDesktopClient({
             refusal.message ? ` ${refusal.message}` : ""
           }`,
           refusal.reason,
-          status
+          status,
+          refusal.message
         )
       );
       return;

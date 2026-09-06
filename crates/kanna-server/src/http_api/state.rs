@@ -8,7 +8,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
-type SingletonOwnerObservations = HashMap<(String, String), HashMap<String, Vec<String>>>;
+type SingletonOwnerObservations =
+    HashMap<(String, String), HashMap<String, Vec<ObservedSingletonTask>>>;
+
+/// One open singleton on some machine, as last proven.
+///
+/// Repository ids are installation-local, so `local_repo_id` is only known
+/// once the owner itself has answered — the relay directory reports machines
+/// and tasks, not the owner's own repository id. It stays `None` for an owner
+/// this desktop has only heard about through the directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObservedSingletonTask {
+    pub task_id: String,
+    pub local_repo_id: Option<String>,
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
@@ -704,7 +717,7 @@ impl AppState {
         remote_url_hash: &str,
         agent: &str,
         machine_id: &str,
-        task_ids: Vec<String>,
+        tasks: Vec<ObservedSingletonTask>,
     ) {
         let mut observations = self
             .known_singleton_owners
@@ -713,7 +726,7 @@ impl AppState {
         observations
             .entry((remote_url_hash.to_string(), agent.to_string()))
             .or_default()
-            .insert(machine_id.to_string(), task_ids);
+            .insert(machine_id.to_string(), tasks);
     }
 
     /// Replace the complete relay-backed owner snapshot for this repository
@@ -726,12 +739,15 @@ impl AppState {
         agent: &str,
         owners: Vec<RemoteSingletonOwner>,
     ) {
-        let mut by_machine = HashMap::<String, Vec<String>>::new();
+        let mut by_machine = HashMap::<String, Vec<ObservedSingletonTask>>::new();
         for owner in owners {
             by_machine
                 .entry(owner.machine_id)
                 .or_default()
-                .push(owner.task_id);
+                .push(ObservedSingletonTask {
+                    task_id: owner.task_id,
+                    local_repo_id: None,
+                });
         }
         let mut observations = self
             .known_singleton_owners
@@ -744,17 +760,17 @@ impl AppState {
         &self,
         remote_url_hash: &str,
         agent: &str,
-    ) -> Vec<(String, String)> {
+    ) -> Vec<(String, ObservedSingletonTask)> {
         self.known_singleton_owners
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&(remote_url_hash.to_string(), agent.to_string()))
             .into_iter()
             .flat_map(|owners| owners.iter())
-            .flat_map(|(machine_id, task_ids)| {
-                task_ids
+            .flat_map(|(machine_id, tasks)| {
+                tasks
                     .iter()
-                    .map(move |task_id| (machine_id.clone(), task_id.clone()))
+                    .map(move |task| (machine_id.clone(), task.clone()))
             })
             .collect()
     }

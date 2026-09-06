@@ -194,6 +194,95 @@ describe("MoreScreen", () => {
     );
   });
 
+  it("keeps the catalog visible and names why a launch was refused", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+    const refusal =
+      "cannot resolve the task-manager singleton for repo ca99c7ee from the "
+      + "account directory: repository singleton directory is unavailable; "
+      + "no singleton was created";
+    const input = {
+      ...props(),
+      runError: { commandId: "custom:merge-master", message: refusal }
+    };
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen!, input));
+    });
+
+    const copy = rendered.root
+      .findAll((node) => node.type === "Text")
+      .flatMap((node) => node.children)
+      .join(" ");
+    // The catalog it was launched from is still good, so it stays on screen
+    // and is not relabelled as unavailable.
+    expect(copy).toContain("Merge Master");
+    expect(copy).not.toContain("Commands unavailable");
+    expect(copy).toContain("Could not start Merge Master");
+    expect(copy).toContain(refusal);
+    expect(copy).toContain("Nothing was started.");
+    expect(
+      rendered.root.find(
+        (node) =>
+          node.props.testID === "mobile.more.command-error.custom:merge-master"
+      )
+    ).toBeDefined();
+
+    // The command itself remains the retry, and the catalog-reload retry is
+    // not offered for a failure that was not the catalog's.
+    expect(
+      rendered.root.findAll(
+        (node) => node.props.testID === "mobile.more-retry-button"
+      )
+    ).toHaveLength(0);
+    const command = rendered.root.find(
+      (node) => node.props.testID === "mobile.more.command.custom:merge-master"
+    );
+    expect(command.props.disabled).toBe(false);
+    command.props.onPress();
+    expect(input.onRunCommand).toHaveBeenCalledWith("custom:merge-master");
+  });
+
+  it("marks only the command that was refused", async () => {
+    if (!MoreScreen) throw new Error("MoreScreen was not loaded");
+    const base = props();
+    const input = {
+      ...base,
+      catalog: {
+        ...base.catalog,
+        commands: [
+          ...base.catalog.commands,
+          {
+            id: "custom:task-manager",
+            label: "Kanna Task Manager",
+            description: "Open the repository task manager",
+            group: "automation" as const
+          }
+        ]
+      },
+      runError: {
+        commandId: "custom:task-manager",
+        message: "the directory is unavailable"
+      }
+    };
+
+    await act(async () => {
+      rendered = create(React.createElement(MoreScreen!, input));
+    });
+
+    expect(
+      rendered.root.findAll(
+        (node) =>
+          node.props.testID === "mobile.more.command-error.custom:merge-master"
+      )
+    ).toHaveLength(0);
+    expect(
+      rendered.root.find(
+        (node) =>
+          node.props.testID === "mobile.more.command-error.custom:task-manager"
+      )
+    ).toBeDefined();
+  });
+
   it("places compact build information after repository commands", async () => {
     if (!MoreScreen) throw new Error("MoreScreen was not loaded");
 

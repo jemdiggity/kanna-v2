@@ -1395,6 +1395,112 @@ describe("Relay integration", () => {
     }
   });
 
+  it("answers account-directory invokes that name no desktop, and never routes them", async () => {
+    // The account-wide singleton directory is asked of the relay itself, so
+    // `list_repo_singletons` / `claim_repo_singleton` carry no `desktopId` —
+    // there is no target desktop to name. A relay that does not recognize
+    // them falls through to desktop-to-desktop routing and refuses with
+    // "desktopId required for desktop-to-desktop request", which the asking
+    // desktop reports as `cannot resolve the <agent> singleton ... from the
+    // account directory` and a 503 that reaches the phone. That is exactly
+    // what a relay deployment predating these commands did, so the contract
+    // is pinned here: the command is answered, not routed.
+    const ownerDesktopId = "directory-owner-desktop";
+    const userRef = testFirestore.doc(`users/${TEST_USER_ID}`);
+    const desktopRef = userRef.collection("desktops").doc(ownerDesktopId);
+    // Every canonical desktop on the account must have published a complete
+    // directory, the asking machine included — an incomplete one is an honest
+    // failure, covered at the end of this case.
+    const requesterDesktopRef = userRef.collection("desktops").doc(SECRET_DESKTOP_ID);
+    const requesterBefore = await requesterDesktopRef.get();
+    await requesterDesktopRef.set({
+      desktopId: SECRET_DESKTOP_ID,
+      singletonDirectoryVersion: 1,
+    });
+    await desktopRef.set({ desktopId: ownerDesktopId, singletonDirectoryVersion: 1 });
+    await desktopRef.collection("tasks").doc("task-directory-manager").set({
+      ...publishedTask("idle", {
+        ownerDesktopId,
+        ownerLocalTaskId: "task-directory-manager",
+        singletonAgent: "task-manager",
+      }),
+      closedAt: null,
+    });
+
+    const { ws: requester } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+
+    try {
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "directory-lookup",
+        command: "list_repo_singletons",
+        args: { remoteUrlHash: "remote-hash", agent: "task-manager" },
+      }));
+      const lookup = await waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "directory-lookup",
+      );
+      expect(lookup.error).toBeUndefined();
+      expect(lookup.data).toEqual({
+        owners: [{ machineId: ownerDesktopId, taskId: "task-directory-manager" }],
+      });
+
+      // The same lookup from a second machine on the account reuses that
+      // owner rather than electing a rival, and a claim behind it is refused
+      // as already owned — no duplicate singleton is created.
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "directory-claim",
+        command: "claim_repo_singleton",
+        args: {
+          remoteUrlHash: "remote-hash",
+          agent: "task-manager",
+          taskId: "rival-task",
+          creatorFence: "rival-creator",
+        },
+      }));
+      const claim = await waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "directory-claim",
+      );
+      expect(claim.error).toBeUndefined();
+      expect(claim.data).toMatchObject({
+        claim: {
+          status: "owned",
+          machineId: ownerDesktopId,
+          taskId: "task-directory-manager",
+        },
+      });
+
+      // A directory the relay cannot read honestly fails. It is never an
+      // "unowned" answer, which would license a duplicate singleton.
+      await desktopRef.set({ desktopId: ownerDesktopId, singletonDirectoryVersion: 0 });
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "directory-unavailable",
+        command: "list_repo_singletons",
+        args: { remoteUrlHash: "remote-hash", agent: "task-manager" },
+      }));
+      const unavailable = await waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "directory-unavailable",
+      );
+      expect(unavailable.data).toBeUndefined();
+      expect(unavailable.error).toContain("repository singleton directory is unavailable");
+      expect(unavailable.error).not.toContain("desktopId required");
+    } finally {
+      await closeAndWait(requester);
+      await testFirestore.recursiveDelete(desktopRef);
+      await testFirestore.recursiveDelete(userRef.collection("repoSingletonClaims"));
+      const restored = requesterBefore.data();
+      if (restored) await requesterDesktopRef.set(restored);
+      else await requesterDesktopRef.delete();
+    }
+  });
+
   it("stops routing sibling invokes after the requester desktop secret is revoked", async () => {
     const requesterCredentialRef = testFirestore.doc(
       `desktopCredentials/${SECRET_DESKTOP_ID}`,

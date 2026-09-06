@@ -593,7 +593,7 @@ impl Db {
     ) -> Result<Option<OpenAgentTask>, rusqlite::Error> {
         self.conn
             .query_row(
-                "SELECT p.id, COALESCE(NULLIF(sr.session_id, ''), p.id)
+                "SELECT p.id, COALESCE(NULLIF(sr.session_id, ''), p.id), p.repo_id
                  FROM pipeline_item p
                  JOIN stage_run sr ON sr.task_id = p.id
                  WHERE p.repo_id = ?
@@ -606,6 +606,7 @@ impl Db {
                     Ok(OpenAgentTask {
                         task_id: row.get(0)?,
                         session_id: row.get(1)?,
+                        repo_id: row.get(2)?,
                     })
                 },
             )
@@ -625,7 +626,7 @@ impl Db {
         agent: &str,
     ) -> Result<Vec<OpenAgentTask>, rusqlite::Error> {
         let mut statement = self.conn.prepare(
-            "SELECT DISTINCT p.id, COALESCE(NULLIF(latest.session_id, ''), p.id)
+            "SELECT DISTINCT p.id, COALESCE(NULLIF(latest.session_id, ''), p.id), p.repo_id
              FROM pipeline_item p
              JOIN repo r ON r.id = p.repo_id
              JOIN stage_run matching ON matching.task_id = p.id AND matching.agent = ?
@@ -646,6 +647,7 @@ impl Db {
                 Ok(OpenAgentTask {
                     task_id: row.get(0)?,
                     session_id: row.get(1)?,
+                    repo_id: row.get(2)?,
                 })
             })?
             .collect();
