@@ -394,6 +394,10 @@ const releaseCutInputSchema = z.object({
   major: z.boolean().default(false),
   minor: z.boolean().default(false),
   patch: z.boolean().default(false),
+  recut: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  confirmRecut: z.string().describe("The active staging version from kd release status, or empty when the channel is positively uninitialized.").optional(),
+  confirmOldTip: z.string().describe("The exact old origin/release/X.Y SHA observed before recut.").optional(),
   version: z
     .string()
     .describe(
@@ -407,6 +411,12 @@ const releaseCutInputSchema = z.object({
     )
     .optional(),
   reason: z.string().describe("Why no production release will come from the abandoned series.").optional()
+}).superRefine((parsed, ctx) => {
+  if (!parsed.recut) return;
+  if (!parsed.version) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "release cut --recut requires --version X.Y.0." });
+  if (!parsed.reason?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "release cut --recut requires --reason." });
+  if (!parsed.confirmRecut) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "release cut --recut requires --confirm-recut." });
+  if (!parsed.confirmOldTip) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "release cut --recut requires --confirm-old-tip." });
 });
 
 const releaseStatusInputSchema = z.object({});
@@ -2645,19 +2655,40 @@ export const taskDefinitions = [
   {
     id: "release.cut",
     description:
-      "Cut a release/X.Y stabilization branch from origin/main, optionally naming an explicit target series and recording the unreleased series it abandons.",
+      "Cut a release/X.Y stabilization branch from origin/main, or explicitly recut an unreleased existing series with a reason and confirmations; bare main staging remains separate and never implicitly recuts.",
     inputSchema: releaseCutInputSchema,
     execute: async (_context, input) => {
       const parsed = releaseCutInputSchema.parse(input);
       if (parsed.version && (parsed.major || parsed.minor || parsed.patch)) {
         return { ok: false, message: "release cut accepts --version or a bump flag, not both." };
       }
+      if (parsed.recut && (parsed.major || parsed.minor || parsed.patch)) {
+        return { ok: false, message: "release cut --recut accepts --version, --reason, and --dry-run only." };
+      }
+      if (parsed.recut && !parsed.version) {
+        return { ok: false, message: "release cut --recut requires --version X.Y.0." };
+      }
+      if (parsed.recut && parsed.abandonSeries) {
+        return { ok: false, message: "release cut --recut cannot be combined with --abandon-series." };
+      }
+      if (parsed.recut && !parsed.reason?.trim()) {
+        return { ok: false, message: "release cut --recut requires --reason \"<why the series is moving>\"." };
+      }
+      if (parsed.recut && !parsed.confirmRecut) {
+        return { ok: false, message: "release cut --recut requires --confirm-recut <active-staging-version|empty>." };
+      }
+      if (parsed.recut && !parsed.confirmOldTip) {
+        return { ok: false, message: "release cut --recut requires --confirm-old-tip <old-branch-sha>." };
+      }
+      if (!parsed.recut && parsed.dryRun) {
+        return { ok: false, message: "release cut --dry-run is only supported with --recut." };
+      }
       const bump = parsed.major ? "major" : parsed.patch ? "patch" : "minor";
       const abandonSeries = (parsed.abandonSeries ?? "")
         .split(",")
         .map((series) => series.trim())
         .filter(Boolean);
-      if (parsed.reason && abandonSeries.length === 0) {
+      if (parsed.reason && abandonSeries.length === 0 && !parsed.recut) {
         return { ok: false, message: "release cut --reason only applies with --abandon-series." };
       }
       const context = await resolveDefaultContext(process.env);
@@ -2667,6 +2698,10 @@ export const taskDefinitions = [
         version: parsed.version,
         abandonSeries,
         reason: parsed.reason,
+        recut: parsed.recut,
+        dryRun: parsed.dryRun,
+        confirmRecut: parsed.confirmRecut,
+        confirmOldTip: parsed.confirmOldTip,
         env: context.env,
         runner: nodeCommandRunner
       });

@@ -45,6 +45,7 @@ import {
   type ReleaseResetStagingInput,
   type ReleaseShipInput
 } from "../src/runtime/release";
+import { parseLineageRecutRecord } from "../src/runtime/release-lineage";
 
 interface CommandCall {
   command: string;
@@ -2487,6 +2488,196 @@ describe("release status", () => {
   const PREVIOUS_RC_COMMIT = "9999999999999999999999999999999999999999";
   const NOW = Date.parse("2026-07-08T00:00:00Z");
 
+  it("reports a recut migration as authorized provenance without hiding the git relationship", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-status-recut-"));
+    try {
+      const oldTip = PREVIOUS_RC_COMMIT;
+      const before = await releaseStatus({
+        repoRoot: root,
+        env: {},
+        now: NOW,
+        runner: statusRunner({
+          activeVersion: "0.3.0-staging.10",
+          activeSourceBranch: "main",
+          candidateTags: ["v0.3.0-staging.10"],
+          releaseBranchSha: oldTip,
+          recutTags: [],
+          previousCommit: "8888888888888888888888888888888888888888",
+          channelBody: "Pointer-only desktop staging updater channel."
+        })
+      });
+      expect(before.staging).toMatchObject({ version: "0.3.0-staging.10", sourceBranch: "main" });
+      expect(before.releaseBranch).toMatchObject({ commit: oldTip, recuts: [] });
+
+      const body = [
+        "Pointer-only desktop staging updater channel.",
+        "",
+        "Lineage-Recut: 2026-09-05T23:00:00.000Z",
+        "Recut-Id: 0.3-1",
+        "Recut-Series: 0.3",
+        "Recut-Branch: release/0.3",
+        `Recut-Old-Tip: ${oldTip}`,
+        `Recut-New-Tip: ${MAIN_COMMIT}`,
+        "Recut-Archive-Tag: recut/release/0.3-1",
+        `Recut-From: 0.3.0-staging.10 (${oldTip}) source main`,
+        "Recut-Prior-Epoch: 0.3.0-staging.10",
+        "Recut-Requester: migration-test",
+        "Recut-Reason: include the latest feature"
+      ].join("\n");
+      const result = await releaseStatus({
+        repoRoot: root,
+        env: {},
+        now: NOW,
+        runner: statusRunner({
+          activeVersion: "0.3.0-staging.11",
+          activeSourceBranch: "release/0.3",
+          candidateTags: ["v0.3.0-staging.11", "v0.3.0-staging.10"],
+          releaseBranchSha: MAIN_COMMIT,
+          recutTags: ["recut/release/0.3-1"],
+          previousCommit: oldTip,
+          channelBody: body
+        })
+      });
+      expect(parseLineageRecutRecord(body)?.recutId).toBe("0.3-1");
+      expect(result.lineage?.recut?.recutId).toBe("0.3-1");
+      expect(result.lineage).toMatchObject({ relationship: "descendant", valid: true, authorizedByRecut: true });
+      expect(result.releaseBranch?.recuts).toEqual([{
+        id: "0.3-1",
+        archiveTag: "recut/release/0.3-1",
+        status: "pending",
+        oldTip,
+        newTip: MAIN_COMMIT
+      }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a later release-branch tip descended from a recut as authorized", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-status-recut-descendant-"));
+    try {
+      const oldTip = PREVIOUS_RC_COMMIT;
+      const recutTip = MAIN_COMMIT;
+      const laterBranchTip = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      const body = [
+        "Pointer-only desktop staging updater channel.",
+        "",
+        "Lineage-Recut: 2026-09-05T23:00:00.000Z",
+        "Recut-Id: 0.3-1",
+        "Recut-Series: 0.3",
+        "Recut-Branch: release/0.3",
+        `Recut-Old-Tip: ${oldTip}`,
+        `Recut-New-Tip: ${recutTip}`,
+        "Recut-Archive-Tag: recut/release/0.3-1",
+        `Recut-From: 0.3.0-staging.10 (${oldTip}) source main`,
+        "Recut-Prior-Epoch: 0.3.0-staging.10",
+        "Recut-Requester: status-test",
+        "Recut-Reason: include the latest feature"
+      ].join("\n");
+      const result = await releaseStatus({
+        repoRoot: root,
+        env: {},
+        now: NOW,
+        runner: statusRunner({
+          activeVersion: "0.3.0-staging.11",
+          activeCommit: laterBranchTip,
+          activeSourceBranch: "release/0.3",
+          candidateTags: ["v0.3.0-staging.11", "v0.3.0-staging.10"],
+          previousCommit: oldTip,
+          previousIsAncestor: 1,
+          activeIsAncestor: 1,
+          releaseBranchSha: laterBranchTip,
+          recutTags: ["recut/release/0.3-1"],
+          recutNewTip: recutTip,
+          recutNewTipIsAncestor: 0,
+          channelBody: body
+        })
+      });
+      expect(result.lineage).toMatchObject({
+        relationship: "diverged",
+        valid: true,
+        authorizedByRecut: true,
+        recut: { recutId: "0.3-1" }
+      });
+      expect(result.releaseBranch?.recuts).toEqual([{
+        id: "0.3-1",
+        archiveTag: "recut/release/0.3-1",
+        status: "pending",
+        oldTip,
+        newTip: recutTip
+      }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a recut candidate promotable after its application is recorded", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-status-recut-applied-"));
+    try {
+      const oldTip = PREVIOUS_RC_COMMIT;
+      const recutTip = MAIN_COMMIT;
+      const candidateCommit = "beef000000000000000000000000000000000000";
+      const body = [
+        "Pointer-only desktop staging updater channel.",
+        "",
+        "Lineage-Recut: 2026-09-05T23:00:00.000Z",
+        "Recut-Id: 0.3-1",
+        "Recut-Series: 0.3",
+        "Recut-Branch: release/0.3",
+        `Recut-Old-Tip: ${oldTip}`,
+        `Recut-New-Tip: ${recutTip}`,
+        "Recut-Archive-Tag: recut/release/0.3-1",
+        `Recut-From: 0.3.0-staging.7 (${oldTip}) source release/0.3`,
+        "Recut-Prior-Epoch: 0.3.0-staging.7",
+        "Recut-Requester: promotion-test",
+        "Recut-Reason: include the latest feature",
+        "",
+        "Lineage-Recut-Applied: 2026-09-06T00:00:00.000Z",
+        "Recut-Applied-Id: 0.3-1",
+        "Recut-Applied-Version: 0.3.0-staging.8",
+        `Recut-Applied-Commit: ${candidateCommit}`,
+        "Recut-Applied-Tag: recut-applied/0.3-1"
+      ].join("\n");
+      const result = await releaseStatus({
+        repoRoot: root,
+        env: {},
+        now: NOW,
+        runner: statusRunner({
+          activeVersion: "0.3.0-staging.8",
+          activeCommit: candidateCommit,
+          activeSourceBranch: "release/0.3",
+          candidateTags: ["v0.3.0-staging.8", "v0.3.0-staging.7"],
+          previousCommit: oldTip,
+          previousIsAncestor: 1,
+          activeIsAncestor: 1,
+          releaseBranchSha: candidateCommit,
+          recutTags: ["recut/release/0.3-1"],
+          recutNewTip: recutTip,
+          recutNewTipIsAncestor: 0,
+          productionTag: "v0.2.0",
+          channelBody: body
+        })
+      });
+
+      expect(result.lineage).toMatchObject({
+        relationship: "diverged",
+        valid: true,
+        authorizedByRecut: true
+      });
+      expect(result.releaseBranch?.recuts).toEqual([{
+        id: "0.3-1",
+        archiveTag: "recut/release/0.3-1",
+        status: "applied",
+        oldTip,
+        newTip: recutTip
+      }]);
+      expect(result.promotion.allowed).toBe(true);
+      expect(result.promotion.blockers).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   interface StatusFixture {
     activeVersion: string | null;
     activeCommit?: string | null;
@@ -2515,6 +2706,9 @@ describe("release status", () => {
     /** Raw manifest on the immutable versioned prerelease. */
     versionedManifestBody?: string;
     abandonedSeries?: Record<string, string>;
+    recutTags?: string[];
+    recutNewTip?: string;
+    recutNewTipIsAncestor?: number;
     cherry?: string;
     behindMain?: number;
     commitsSinceProduction?: number;
@@ -2613,6 +2807,9 @@ describe("release status", () => {
         }
         if (command === "git" && args[0] === "merge-base") {
           const [, , base, candidate] = args;
+          if (base === fixture.recutNewTip && candidate === activeCommit) {
+            return { exitCode: fixture.recutNewTipIsAncestor ?? 1, stdout: "", stderr: "" };
+          }
           if (base === previousCommit && candidate === activeCommit) {
             return { exitCode: fixture.previousIsAncestor ?? 0, stdout: "", stderr: "" };
           }
@@ -2627,6 +2824,13 @@ describe("release status", () => {
         }
         if (command === "git" && args[0] === "ls-remote" && args[1] === "--tags") {
           const pattern = args[3] ?? "";
+          if (pattern.startsWith("recut/release/")) {
+            return {
+              exitCode: 0,
+              stdout: (fixture.recutTags ?? []).map((tag) => `sha\trefs/tags/${tag}\n`).join(""),
+              stderr: ""
+            };
+          }
           if (fixture.activeVersion && pattern === `refs/tags/v${fixture.activeVersion}`) {
             const tagCommit = fixture.activeTagCommit ?? activeCommit ?? "";
             return {
@@ -2896,6 +3100,7 @@ describe("release status", () => {
         name: "release/1.3",
         commit: rcCommit,
         abandoned: null,
+        recuts: [],
         unmergedCommits: [{ sha: "1111111111111111111111111111111111111111", subject: "fix: only on the branch" }],
         unmergedCommitCount: 1
       });
@@ -3195,6 +3400,9 @@ describe("staging publish lineage gates", () => {
     productionTagParent?: string;
     originMain?: string;
     originRelease?: string;
+    recutNewTip?: string;
+    recutNewTipIsAncestor?: number;
+    candidateSourceBranch?: string;
     mergeBase?: string;
     /** Result of proving the merge-base is contained by origin/main. */
     mainContainsMergeBase?: number;
@@ -3214,11 +3422,16 @@ describe("staging publish lineage gates", () => {
     manifestDownloadFails?: boolean;
     /** Raw latest-staging.json contents, for malformed-manifest cases. */
     manifestBody?: string;
+    /** Existing versioned candidate and a one-shot pointer upload failure for retry coverage. */
+    existingStagingTags?: string[];
+    failStagingChannelUploadOnce?: boolean;
   }
 
   function shipGateRunner(fixture: ShipGateFixture, repoRoot: string, outputs: Map<string, string>, calls: CommandCall[]): CommandRunner {
     const activeVersion = fixture.activeVersion === undefined ? "1.2.4-staging.2" : fixture.activeVersion;
     const activeCommit = fixture.activeCommit === undefined ? ACTIVE_COMMIT : fixture.activeCommit;
+    let existingStagingTags = [...(fixture.existingStagingTags ?? [])];
+    let failStagingChannelUpload = fixture.failStagingChannelUploadOnce ?? false;
     return {
       async run(command, args, options) {
         calls.push({ command, args, options });
@@ -3251,7 +3464,7 @@ describe("staging publish lineage gates", () => {
           const sha = fixture.releaseBranchSha ?? "";
           return { exitCode: 0, stdout: sha ? `${sha}\t${args[2]}\n` : "", stderr: "" };
         }
-        if (command === "git" && args[0] === "fetch") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "git" && ["fetch", "push", "tag"].includes(args[0] ?? "")) return { exitCode: 0, stdout: "", stderr: "" };
         if (isStagingChannelAssetsQuery(command, args)) {
           if (fixture.channelUnreadable) return { exitCode: 1, stdout: "", stderr: "HTTP 503: Service unavailable" };
           return stagingChannelAssetsResponse(activeVersion ? ["latest-staging.json"] : null);
@@ -3300,6 +3513,9 @@ describe("staging publish lineage gates", () => {
             return { exitCode: 0, stdout: `${fixture.mergeBase ?? BRANCH_POINT}\n`, stderr: "" };
           }
           const [, , base, candidate] = args;
+          if (base === fixture.recutNewTip && candidate === fixture.head) {
+            return { exitCode: fixture.recutNewTipIsAncestor ?? 1, stdout: "", stderr: "" };
+          }
           if (base === activeCommit && candidate === fixture.head) {
             return { exitCode: fixture.activeIsAncestorOfHead ?? 0, stdout: "", stderr: "" };
           }
@@ -3335,7 +3551,13 @@ describe("staging publish lineage gates", () => {
             return { exitCode: 0, stdout: has ? `sha\t${pattern}\n` : "", stderr: "" };
           }
           const wanted = pattern.replace(/^v/, "");
-          if (wanted.includes("staging")) return { exitCode: 0, stdout: "", stderr: "" };
+          if (wanted.includes("staging")) {
+            return {
+              exitCode: 0,
+              stdout: existingStagingTags.map((tag) => `${fixture.head}\trefs/tags/v${tag}\n`).join(""),
+              stderr: ""
+            };
+          }
           const exists = (fixture.existingProductionTags ?? []).includes(wanted);
           return { exitCode: 0, stdout: exists ? `sha\trefs/tags/v${wanted}\n` : "", stderr: "" };
         }
@@ -3352,7 +3574,35 @@ describe("staging publish lineage gates", () => {
           writeFileSync(`${args.at(-1)}.sig`, "staging signature\n");
           return { exitCode: 0, stdout: "", stderr: "" };
         }
-        if (command === "gh" && args[0] === "release" && ["create", "edit", "upload"].includes(args[1] ?? "")) {
+        if (command === "gh" && args[0] === "release" && args[1] === "view" && args[2] !== "desktop-staging") {
+          const tag = args[2] ?? "";
+          if (!existingStagingTags.includes(tag.replace(/^v/, ""))) {
+            return { exitCode: 1, stdout: "", stderr: "release not found" };
+          }
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              tagName: tag,
+              targetCommitish: fixture.head,
+              body: `Staging updater manifest for ${tag}\n\nSource-Branch: ${fixture.candidateSourceBranch ?? "release/1.3"}`,
+              publishedAt: "2026-08-17T03:00:00Z"
+            }),
+            stderr: ""
+          };
+        }
+        if (command === "gh" && args[0] === "release" && args[1] === "create") {
+          const tag = (args[2] ?? "").replace(/^v/, "");
+          if (existingStagingTags.includes(tag)) {
+            return { exitCode: 1, stdout: "", stderr: "release already exists" };
+          }
+          existingStagingTags.push(tag);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "gh" && args[0] === "release" && args[1] === "upload" && args[2] === "desktop-staging" && failStagingChannelUpload) {
+          failStagingChannelUpload = false;
+          return { exitCode: 1, stdout: "", stderr: "transient channel upload failure" };
+        }
+        if (command === "gh" && args[0] === "release" && ["edit", "upload"].includes(args[1] ?? "")) {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
         if (isProductionReleaseListQuery(command, args)) {
@@ -3364,7 +3614,14 @@ describe("staging publish lineage gates", () => {
           };
         }
         if (command === "gh" && args[0] === "release" && args[1] === "list") {
-          return { exitCode: 0, stdout: "[]", stderr: "" };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify(existingStagingTags.map((tag, index) => ({
+              tagName: `v${tag}`,
+              createdAt: new Date(Date.parse("2026-08-17T03:00:00Z") + index * 1000).toISOString()
+            }))),
+            stderr: ""
+          };
         }
         return { exitCode: 1, stdout: "", stderr: `unexpected command ${key}` };
       }
@@ -3965,6 +4222,109 @@ describe("staging publish lineage gates", () => {
     }
   });
 
+  it("consumes a recut for a later release-branch backport and rejects another branch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-ship-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const recutNewTip = "9999999999999999999999999999999999999999";
+      const laterBranchTip = DIVERGED_COMMIT;
+      const channelBody = [
+        "Pointer-only desktop staging updater channel.",
+        "",
+        "Lineage-Recut: 2026-08-16T00:00:00Z",
+        "Recut-Id: 1.3-1",
+        "Recut-Series: 1.3",
+        "Recut-Branch: release/1.3",
+        `Recut-Old-Tip: ${ACTIVE_COMMIT}`,
+        `Recut-New-Tip: ${recutNewTip}`,
+        "Recut-Archive-Tag: recut/release/1.3-1",
+        `Recut-From: 1.3.0-staging.2 (${ACTIVE_COMMIT}) source main`,
+        "Recut-Prior-Epoch: 1.3.0-staging.2",
+        "Recut-Requester: test-user",
+        "Recut-Reason: include the latest feature"
+      ].join("\n");
+      const fixture: ShipGateFixture = {
+        head: laterBranchTip,
+        activeVersion: "1.3.0-staging.2",
+        activeSourceBranch: "main",
+        activeIsAncestorOfHead: 1,
+        headIsAncestorOfActive: 1,
+        releaseBranchSha: laterBranchTip,
+        recutNewTip,
+        recutNewTipIsAncestor: 0,
+        channelBody
+      };
+
+      const result = await shipRelease(
+        shipGateInput(repoRoot, privateKeyPath, shipGateRunner(fixture, repoRoot, outputs, calls), "release/1.3", true)
+      );
+      expect(result.version).toBe("1.3.0-staging.3");
+      const manifest = JSON.parse(readFileSync(result.latestJson, "utf8")) as { notes?: string };
+      expect(manifest.notes).toContain("Lineage-Recut-Authorization: 1.3-1");
+      expect(calls.some((call) => call.command === "git" && call.args.includes("recut-applied/1.3-1"))).toBe(true);
+
+      await expect(
+        shipRelease(
+          shipGateInput(repoRoot, privateKeyPath, shipGateRunner(fixture, repoRoot, outputs, []), "release/1.2")
+        )
+      ).rejects.toThrow(/diverged from the active channel/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retries the same recut candidate when the pointer upload fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-retry-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const recutNewTip = "9999999999999999999999999999999999999999";
+      const channelBody = [
+        "Pointer-only desktop staging updater channel.",
+        "",
+        "Lineage-Recut: 2026-08-16T00:00:00Z",
+        "Recut-Id: 1.3-1",
+        "Recut-Series: 1.3",
+        "Recut-Branch: release/1.3",
+        `Recut-Old-Tip: ${ACTIVE_COMMIT}`,
+        `Recut-New-Tip: ${recutNewTip}`,
+        "Recut-Archive-Tag: recut/release/1.3-1",
+        `Recut-From: 1.3.0-staging.2 (${ACTIVE_COMMIT}) source main`,
+        "Recut-Prior-Epoch: 1.3.0-staging.2",
+        "Recut-Requester: test-user",
+        "Recut-Reason: include the latest feature"
+      ].join("\n");
+      const fixture: ShipGateFixture = {
+        head: DIVERGED_COMMIT,
+        activeVersion: "1.3.0-staging.2",
+        activeSourceBranch: "main",
+        activeIsAncestorOfHead: 1,
+        headIsAncestorOfActive: 1,
+        releaseBranchSha: DIVERGED_COMMIT,
+        recutNewTip,
+        recutNewTipIsAncestor: 0,
+        channelBody,
+        failStagingChannelUploadOnce: true
+      };
+      const runner = shipGateRunner(fixture, repoRoot, outputs, calls);
+      const input = shipGateInput(repoRoot, privateKeyPath, runner, "release/1.3", true);
+
+      await expect(shipRelease(input)).rejects.toThrow(/transient channel upload failure/);
+      expect(calls.some((call) => call.command === "git" && call.args.includes("recut-applied/1.3-1"))).toBe(false);
+
+      const retry = await shipRelease(input);
+      expect(retry.version).toBe("1.3.0-staging.3");
+      expect(calls.filter((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "create")).toHaveLength(2);
+      expect(calls.filter((call) => call.command === "git" && call.args[0] === "tag" && call.args.includes("recut-applied/1.3-1"))).toHaveLength(1);
+      expect(calls.filter((call) => call.command === "git" && call.args[0] === "push" && call.args.some((arg) => arg.includes("recut-applied/1.3-1")))).toHaveLength(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to ship an RC from an abandoned series", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
@@ -4214,6 +4574,135 @@ describe("staging lineage reset", () => {
 
       expect(result.applied).toBe(false);
       expect(calls.some((call) => call.command === "gh" && call.args[1] === "edit")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("release branch recut", () => {
+  const OLD_TIP = "2222222222222222222222222222222222222222";
+  const MAIN_TIP = "3333333333333333333333333333333333333333";
+
+  function recutRunner(calls: CommandCall[], options: { branchOnly?: boolean; productionTag?: boolean; unreadableChannel?: boolean; branchChangedDuringBuild?: boolean } = {}): CommandRunner {
+    let branchTip = OLD_TIP;
+    return {
+      async run(command, args, runOptions) {
+        calls.push({ command, args, options: runOptions });
+        const key = `${command} ${args.join(" ")}`;
+        if (key === "git remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+        if (command === "git" && args[0] === "fetch") return { exitCode: 0, stdout: "", stderr: "" };
+        if (key === "git rev-parse origin/main") return { exitCode: 0, stdout: `${MAIN_TIP}\n`, stderr: "" };
+        if (key === "git show origin/main:VERSION") return { exitCode: 0, stdout: "0.3.0\n", stderr: "" };
+        if (key === "git rev-parse FETCH_HEAD^{commit}") return { exitCode: 0, stdout: `${MAIN_TIP}\n`, stderr: "" };
+        if (key === "git ls-remote origin refs/heads/release/0.3") return { exitCode: 0, stdout: `${branchTip}\trefs/heads/release/0.3\n`, stderr: "" };
+        if (command === "git" && args[0] === "ls-remote" && args[1] === "--tags") {
+          const pattern = args.at(-1) ?? "";
+          if (pattern === "refs/tags/v0.3.*") {
+            return options.productionTag
+              ? { exitCode: 0, stdout: "deadbeef\trefs/tags/v0.3.0\n", stderr: "" }
+              : { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (pattern.includes("v0.3.0-staging.10")) return { exitCode: 0, stdout: `${MAIN_TIP}\t${pattern}\n`, stderr: "" };
+          if (pattern.startsWith("recut/release/0.3-")) return { exitCode: 0, stdout: "", stderr: "" };
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (isStagingChannelAssetsQuery(command, args)) {
+          return options.unreadableChannel
+            ? { exitCode: 1, stdout: "", stderr: "HTTP 503: Service unavailable" }
+            : stagingChannelAssetsResponse(["latest-staging.json"]);
+        }
+        if (command === "gh" && args[0] === "release" && args[1] === "download") {
+          const dirIndex = args.indexOf("--dir");
+          writeFileSync(join(args[dirIndex + 1] ?? "", "latest-staging.json"), '{"version":"0.3.0-staging.10"}\n');
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("gh release view v0.3.0-staging.10 ")) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              tagName: "v0.3.0-staging.10",
+              targetCommitish: MAIN_TIP,
+              publishedAt: "2026-09-05T00:00:00Z",
+              body: "Staging updater manifest for v0.3.0-staging.10\n\nSource-Branch: main",
+              isPrerelease: true
+            }),
+            stderr: ""
+          };
+        }
+        if (key.startsWith("git log --no-merges")) {
+          return options.branchOnly ? { exitCode: 0, stdout: `${OLD_TIP} branch-only fix\n`, stderr: "" } : { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("git log --merges")) return { exitCode: 0, stdout: "", stderr: "" };
+        if (key.startsWith("gh release view desktop-staging")) return { exitCode: 0, stdout: "", stderr: "" };
+        if (key.startsWith("gh release edit desktop-staging")) return { exitCode: 0, stdout: "", stderr: "" };
+        if (key.startsWith("git push origin --force-with-lease=")) {
+          branchTip = MAIN_TIP;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("git push origin refs/tags/recut/")) {
+          if (options.branchChangedDuringBuild) branchTip = "4444444444444444444444444444444444444444";
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (key.startsWith("git tag -a") || key.startsWith("git push origin")) return { exitCode: 0, stdout: "", stderr: "" };
+        throw new Error(`unexpected command ${key}`);
+      }
+    };
+  }
+
+  it("archives the old tip before moving the branch and records the recut", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-"));
+    try {
+      const calls: CommandCall[] = [];
+      const result = await cutReleaseBranch({
+        repoRoot: root,
+        bump: "minor",
+        version: "0.3.0",
+        recut: true,
+        reason: "include the latest feature",
+        confirmRecut: "0.3.0-staging.10",
+        confirmOldTip: OLD_TIP,
+        env: {},
+        runner: recutRunner(calls)
+      });
+      expect(result.recut).toMatchObject({ archiveTag: "recut/release/0.3-1", oldTip: OLD_TIP, newTip: MAIN_TIP, applied: true });
+      const tagPush = calls.findIndex((call) => call.command === "git" && call.args.includes("refs/tags/recut/release/0.3-1"));
+      const branchPush = calls.findIndex((call) => call.command === "git" && call.args.some((arg) => arg.includes("refs/heads/release/0.3")) && call.args.includes("--force-with-lease=refs/heads/release/0.3:" + OLD_TIP));
+      expect(tagPush).toBeGreaterThanOrEqual(0);
+      expect(branchPush).toBeGreaterThan(tagPush);
+      const edit = calls.find((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "edit");
+      expect(edit?.args.at(-1)).toContain("Lineage-Recut: 2026-09");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses branch-only work, production history, and unreadable channel state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-"));
+    try {
+      const input = { repoRoot: root, bump: "minor" as const, version: "0.3.0", recut: true, reason: "move", confirmRecut: "0.3.0-staging.10", confirmOldTip: OLD_TIP, env: {} };
+      await expect(cutReleaseBranch({ ...input, runner: recutRunner([], { branchOnly: true }) })).rejects.toThrow(/branch-only commit/);
+      await expect(cutReleaseBranch({ ...input, runner: recutRunner([], { productionTag: true }) })).rejects.toThrow(/production release/);
+      await expect(cutReleaseBranch({ ...input, runner: recutRunner([], { unreadableChannel: true }) })).rejects.toThrow(/channel is unreadable/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when a pinned branch moves during the recut", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-recut-"));
+    try {
+      await expect(cutReleaseBranch({
+        repoRoot: root,
+        bump: "minor",
+        version: "0.3.0",
+        recut: true,
+        reason: "include the latest feature",
+        confirmRecut: "0.3.0-staging.10",
+        confirmOldTip: OLD_TIP,
+        env: {},
+        runner: recutRunner([], { branchChangedDuringBuild: true })
+      })).rejects.toThrow(/release refs changed before branch move/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
