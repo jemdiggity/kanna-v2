@@ -368,6 +368,26 @@ mod tests {
     }
 
     #[test]
+    fn same_class_local_followers_never_fall_back_to_minimum_sizing() {
+        let mut state = SessionSizeState::new((80, 24));
+        register(&mut state, 1, "owner", TerminalViewerRole::Local, 203, 81);
+        register(
+            &mut state,
+            2,
+            "follower",
+            TerminalViewerRole::Local,
+            171,
+            65,
+        );
+
+        assert_eq!(state.controller, Some(1));
+        assert_eq!(state.proposed_size(), (203, 81));
+        assert_eq!(state.resize(2, 171, 65), None);
+        assert_eq!(state.proposed_size(), (203, 81));
+        assert_eq!(state.last_applied, (203, 81));
+    }
+
+    #[test]
     fn takeover_lasts_until_release_then_re_elects_local() {
         let mut state = SessionSizeState::new((80, 24));
         register(&mut state, 1, "desktop", TerminalViewerRole::Local, 220, 48);

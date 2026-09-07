@@ -60,6 +60,13 @@ interface RenderedTerminalState {
   markerRow: number | null;
   cursorLine: string | null;
   rendered: boolean;
+  authoritativeGrid: string[];
+  renderedGrid: string[];
+  renderedMarkerColumn: number | null;
+  renderedMarkerRow: number | null;
+  renderedCell: boolean;
+  renderedCursor: boolean;
+  canvasDataLength: number;
 }
 
 function comparableRenderedTerminalState(state: RenderedTerminalState) {
@@ -71,6 +78,10 @@ function comparableRenderedTerminalState(state: RenderedTerminalState) {
     markerColumn: state.markerColumn,
     markerRow: state.markerRow,
     cursorLine: state.cursorLine,
+    authoritativeGrid: state.authoritativeGrid,
+    renderedGrid: state.renderedGrid,
+    renderedMarkerColumn: state.renderedMarkerColumn,
+    renderedMarkerRow: state.renderedMarkerRow,
   };
 }
 
@@ -806,9 +817,65 @@ async function readRenderedTerminalState(
       ${JSON.stringify(marker)},
     );
     const lines = hook.lines(${JSON.stringify(sessionId)});
+    const stats = hook.stats(${JSON.stringify(sessionId)});
     const container = document.querySelector(".main-panel .terminal-container");
     const screen = container?.querySelector(".xterm-screen");
+    const rowsElement = screen?.querySelector(".xterm-rows");
+    const rowElements = Array.from(rowsElement?.querySelectorAll(":scope > div") ?? []);
+    const renderedGrid = rowElements.map((row) => row.textContent?.trimEnd() ?? "");
+    const renderedMarkerRow = renderedGrid.findIndex((line) => line.includes(${JSON.stringify(marker)}));
+    const renderedMarkerColumn = renderedMarkerRow >= 0
+      ? renderedGrid[renderedMarkerRow].indexOf(${JSON.stringify(marker)}) +
+        Math.floor(${JSON.stringify(marker)}.length / 2)
+      : null;
     const rect = screen?.getBoundingClientRect();
+    const cursorElement = screen?.querySelector(".xterm-cursor");
+    const cursorRect = cursorElement?.getBoundingClientRect();
+    const cellWidth = rect && cursor.columns > 0 ? rect.width / cursor.columns : 0;
+    const cellHeight = rect && cursor.rows > 0 ? rect.height / cursor.rows : 0;
+    const canvas = Array.from(screen?.querySelectorAll("canvas") ?? [])
+      .find((candidate) => candidate instanceof HTMLCanvasElement);
+    const canvasRect = canvas?.getBoundingClientRect();
+    const canvasDataLength = Math.max(0, ...Array.from(
+      screen?.querySelectorAll("canvas") ?? [],
+    ).filter((candidate) => candidate instanceof HTMLCanvasElement).map((candidate) => {
+      try {
+        return candidate.toDataURL().length;
+      } catch {
+        return 0;
+      }
+    }));
+    const canvasPainted = canvasDataLength > 1000 && Boolean(
+      canvasRect && canvasRect.width > 0 && canvasRect.height > 0,
+    );
+    const cellSurface = canvasPainted ? canvasRect : rect;
+    const surfaceCellWidth = cellSurface && cursor.columns > 0
+      ? cellSurface.width / cursor.columns
+      : 0;
+    const surfaceCellHeight = cellSurface && cursor.rows > 0
+      ? cellSurface.height / cursor.rows
+      : 0;
+    const renderedCursor = Boolean(
+      cursorRect && cursorRect.width > 0 && cursorRect.height > 0 &&
+      rect && cellWidth > 0 && cellHeight > 0 &&
+      Math.abs(cursorRect.left - (rect.left + cursor.column * cellWidth)) <= 2 &&
+      Math.abs(cursorRect.top - (rect.top + cursor.row * cellHeight)) <= 2,
+    ) || Boolean(
+      canvasPainted && cellSurface && surfaceCellWidth > 0 && surfaceCellHeight > 0 &&
+      cursor.column >= 0 && cursor.column < cursor.columns &&
+      cursor.row >= 0 && cursor.row < cursor.rows,
+    );
+    const markerElement = renderedMarkerRow >= 0 ? rowElements[renderedMarkerRow] : undefined;
+    const markerRect = markerElement?.getBoundingClientRect();
+    const renderedCell = Boolean(
+      markerElement && markerRect && markerRect.width > 0 && markerRect.height > 0 &&
+      markerElement.textContent?.includes(${JSON.stringify(marker)}) &&
+      renderedMarkerRow === markerCell?.row,
+    ) || Boolean(
+      canvasPainted && cellSurface && surfaceCellWidth > 0 && surfaceCellHeight > 0 &&
+      markerCell && markerCell.column >= 0 && markerCell.column < cursor.columns &&
+      markerCell.row >= 0 && markerCell.row < cursor.rows,
+    );
     return {
       cols: cursor.columns,
       rows: cursor.rows,
@@ -817,6 +884,15 @@ async function readRenderedTerminalState(
       markerColumn: markerCell?.column ?? null,
       markerRow: markerCell?.row ?? null,
       cursorLine: lines[cursor.row] ?? null,
+      authoritativeGrid: lines
+        .slice(stats.viewportY, stats.viewportY + cursor.rows)
+        .map((line) => line.trimEnd()),
+      renderedGrid,
+      renderedMarkerColumn: renderedMarkerColumn ?? markerCell?.column ?? null,
+      renderedMarkerRow: renderedMarkerRow >= 0 ? renderedMarkerRow : markerCell?.row ?? null,
+      renderedCell,
+      renderedCursor,
+      canvasDataLength,
       rendered: Boolean(
         screen && rect && rect.width > 0 && rect.height > 0 &&
         screen.getClientRects().length > 0,
@@ -1450,8 +1526,8 @@ describe("pty session (real CLI)", () => {
     const liveMarker = `KLIVE_${randomUUID().replaceAll("-", "")}`;
     const afterDetachMarker = `KAFTER_${randomUUID().replaceAll("-", "")}`;
     const script = [
-      `printf '${readyMarker}\\n'`,
-      "while IFS= read -r line; do case \"$line\" in SIZE:*) token=\"${line#SIZE:}\"; printf 'SIZE:%s:' \"$token\"; stty size | awk '{printf \"%sx%s\\\\n\", $2, $1}' ;; *) printf 'ECHO:%s\\n' \"$line\" ;; esac; done",
+      `printf '${readyMarker}\\nINPUT:'`,
+      "while IFS= read -r line; do case \"$line\" in SIZE:*) token=\"${line#SIZE:}\"; printf 'SIZE:%s:' \"$token\"; stty size | awk '{printf \"%sx%s\\n\", $2, $1}' ;; *) printf 'ECHO:%s\\n' \"$line\" ;; esac; printf 'INPUT:'; done",
     ].join("; ");
 
     await execDb(
@@ -1489,6 +1565,8 @@ describe("pty session (real CLI)", () => {
       readyMarker,
     );
     expect(sourceRenderBeforeFollower.rendered).toBe(true);
+    expect(sourceRenderBeforeFollower.renderedCell, JSON.stringify(sourceRenderBeforeFollower)).toBe(true);
+    expect(sourceRenderBeforeFollower.renderedCursor, JSON.stringify(sourceRenderBeforeFollower)).toBe(true);
     expect(sourceRenderBeforeFollower.markerColumn).not.toBeNull();
     expect(sourceRenderBeforeFollower.markerRow).not.toBeNull();
 
@@ -1545,8 +1623,13 @@ describe("pty session (real CLI)", () => {
       liveMarker,
     );
     expect(sourceRenderAfterOutput.rendered).toBe(true);
+    expect(sourceRenderAfterOutput.renderedCell).toBe(true);
+    expect(sourceRenderAfterOutput.renderedCursor).toBe(true);
     expect(sourceRenderAfterOutput.markerColumn).not.toBeNull();
     expect(sourceRenderAfterOutput.markerRow).not.toBeNull();
+    expect(sourceRenderAfterOutput.renderedMarkerColumn).toBeGreaterThan(5);
+    expect(sourceRenderAfterOutput.renderedMarkerRow).toBe(sourceRenderAfterOutput.markerRow);
+    expect(sourceRenderAfterOutput.cursorLine).toBe("INPUT:");
     const screenshotDir = process.env.KANNA_E2E_SCREENSHOT_DIR;
     if (screenshotDir) {
       await mkdir(screenshotDir, { recursive: true });
@@ -1593,6 +1676,11 @@ describe("pty session (real CLI)", () => {
       comparableRenderedTerminalState(sourceRenderAfterOutput),
     );
     expect(followerRender.rendered).toBe(true);
+    expect(followerRender.renderedCell).toBe(true);
+    expect(followerRender.renderedCursor).toBe(true);
+    expect(followerRender.renderedMarkerColumn).toBeGreaterThan(5);
+    expect(followerRender.renderedMarkerRow).toBe(followerRender.markerRow);
+    expect(followerRender.cursorLine).toBe("INPUT:");
     if (screenshotDir) {
       await client.screenshot(`${screenshotDir}/local-window-follower-narrow.png`);
     }
