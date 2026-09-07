@@ -578,6 +578,13 @@ impl HeadlessTerminal {
 /// the task-logs tail is a rendered frame flattened to text, and an agent
 /// reading it cannot be left to guess which line is the prompt. One rule, one
 /// place, so the tail and the snippet agree on what the composer is.
+///
+/// This file is compiled into both the `kanna_daemon` library and the daemon
+/// binary, which declare their own module trees over it. The only caller is
+/// `kanna-server`'s `http_api::task_logs`, which links the library target, so
+/// per-crate dead-code analysis of the binary cannot see it. Same reason as
+/// the module-level allow in `detection`.
+#[allow(dead_code)]
 pub fn line_is_composer(line: &str) -> bool {
     crate::detection::classify::starts_with_glyph(
         line,
@@ -586,6 +593,11 @@ pub fn line_is_composer(line: &str) -> bool {
 }
 
 /// The text a composer line carries, without its prompt glyph.
+///
+/// Allowed dead in the binary target for the same reason as
+/// [`line_is_composer`]: its only caller is `kanna-server`'s
+/// `http_api::task_logs`, which links the library target.
+#[allow(dead_code)]
 pub fn composer_line_text(line: &str) -> String {
     crate::detection::classify::prompt_remainder(line, &crate::detection::global_composer_prompts())
         .unwrap_or("")
