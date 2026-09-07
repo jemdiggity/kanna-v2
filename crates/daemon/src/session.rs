@@ -1026,16 +1026,6 @@ impl SessionHandle {
         self.state.lock().await.operator_input_only
     }
 
-    pub async fn reclassify_inherited_input(&self) -> bool {
-        let mut state = self.state.lock().await;
-        if !state.operator_input_only || state.input_policy_classified {
-            return false;
-        }
-        state.operator_input_only = false;
-        state.input_policy_classified = true;
-        true
-    }
-
     pub async fn classify_input(&self, operator_input_only: bool) {
         let mut state = self.state.lock().await;
         state.operator_input_only = operator_input_only;
@@ -3009,12 +2999,9 @@ mod tests {
         let handle = SessionHandle::new(record);
 
         assert!(handle.operator_input_only().await);
-        assert!(handle.reclassify_inherited_input().await);
+        handle.classify_input(false).await;
         assert!(!handle.operator_input_only().await);
-        assert!(!handle.reclassify_inherited_input().await);
         handle.classify_input(true).await;
-        assert!(handle.operator_input_only().await);
-        assert!(!handle.reclassify_inherited_input().await);
         assert!(handle.operator_input_only().await);
         handle.classify_input(false).await;
         assert!(!handle.operator_input_only().await);

@@ -1205,6 +1205,22 @@ fn authenticated_generations_reclassify_only_unclassified_legacy_handoff_session
             version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION
         }
     ));
+    control.send(&Cmd::Input {
+        session_id: "legacy-unclassified".to_string(),
+        data: b"negotiation alone must not open the fence\n".to_vec(),
+    });
+    assert!(matches!(
+        control.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+    control.send(&Cmd::ClassifyInput {
+        session_id: "legacy-unclassified".to_string(),
+        operator_input_only: false,
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
     control.send(&Cmd::ClassifyInput {
         session_id: "deliberately-protected".to_string(),
         operator_input_only: true,
