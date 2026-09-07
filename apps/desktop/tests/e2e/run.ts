@@ -10,7 +10,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../../tools/kd/src/runtime/process-inventory";
 import { fileURLToPath } from "node:url";
 import { realE2eTierFiles } from "./realTiers";
-import { buildRealE2eAgentEnv } from "./runEnv";
+import { buildAppActivationEnv, buildRealE2eAgentEnv } from "./runEnv";
 import { createInstanceConfig, type InstanceConfig } from "./runConfig";
 import {
   buildAgentProviderIsolationEnv,
@@ -369,6 +369,7 @@ function buildInstanceConfig(input: {
   webDriverPortEnvValue: number;
 }): InstanceConfig {
   const env = toSpawnEnv({
+    ...buildAppActivationEnv(process.env),
     KANNA_DAEMON_DIR: input.daemonDir,
     KANNA_DB_NAME: input.dbName,
     KANNA_DEV_PORT: String(input.devPortEnvValue),
@@ -557,6 +558,9 @@ async function main(): Promise<void> {
     runtimeEnv: Record<string, string>,
   ): Record<string, string> {
     return toSpawnEnv({
+      // The suites read this to know whether the instances they drive were launched
+      // non-activating; it must match what `buildInstanceConfig` gave them.
+      ...buildAppActivationEnv(process.env),
       KANNA_DAEMON_DIR: primaryDaemonDir,
       KANNA_DB_NAME: primaryDbName,
       KANNA_DEV_PORT: String(primaryDevPort),

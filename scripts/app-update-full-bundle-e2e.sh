@@ -432,9 +432,12 @@ SERVER_PID="$!"
 wait_for_server
 
 echo "[update-e2e] launching old app from $INSTALLED_APP"
+# KANNA_E2E_NO_ACTIVATE keeps this instance — and the copy the updater relaunches,
+# which inherits this environment — from taking the operator's focus mid-run.
 env -u KANNA_WORKTREE \
     KANNA_DB_NAME="kanna-update-full-bundle-e2e-test.db" \
     KANNA_DAEMON_DIR="$TMP_ROOT/daemon" \
+    KANNA_E2E_NO_ACTIVATE="${KANNA_E2E_NO_ACTIVATE:-1}" \
     KANNA_WEBDRIVER_PORT="$WEBDRIVER_PORT" \
 "$INSTALLED_APP/Contents/MacOS/kanna-desktop" >"$APP_LOG" 2>&1 &
 APP_PID="$!"

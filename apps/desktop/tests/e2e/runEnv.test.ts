@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRealE2eAgentEnv } from "./runEnv";
+import { buildAppActivationEnv, buildRealE2eAgentEnv } from "./runEnv";
 
 describe("buildRealE2eAgentEnv", () => {
   it("returns opencode and the free pickle model for real suites by default", () => {
@@ -47,6 +47,18 @@ describe("buildRealE2eAgentEnv", () => {
     ).toEqual({
       KANNA_E2E_REAL_AGENT_PROVIDER: "opencode",
       KANNA_E2E_REAL_AGENT_MODEL: "opencode/big-pickle",
+    });
+  });
+});
+
+describe("buildAppActivationEnv", () => {
+  it("keeps launched app instances out of the foreground by default", () => {
+    expect(buildAppActivationEnv({})).toEqual({ KANNA_E2E_NO_ACTIVATE: "1" });
+  });
+
+  it("lets an operator opt back into a foreground run", () => {
+    expect(buildAppActivationEnv({ KANNA_E2E_NO_ACTIVATE: "0" })).toEqual({
+      KANNA_E2E_NO_ACTIVATE: "0",
     });
   });
 });

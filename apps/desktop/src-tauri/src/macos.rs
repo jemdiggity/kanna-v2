@@ -92,6 +92,35 @@ pub(crate) fn setup_fn_f_fullscreen(app: tauri::AppHandle) {
     }
 }
 
+/// The env var an E2E harness sets to keep its app instances out of the
+/// foreground. Nothing else sets it, so `kd dev up` and shipped builds keep the
+/// regular, activating launch.
+#[cfg(target_os = "macos")]
+pub(crate) const NO_ACTIVATE_ENV: &str = "KANNA_E2E_NO_ACTIVATE";
+
+/// Activation policy this process should adopt, or `None` to keep Tauri's default.
+///
+/// A Tauri app launches as a regular macOS app: it gets a Dock icon and, in
+/// `applicationDidFinishLaunching`, tao calls `activateIgnoringOtherApps:` on it.
+/// That is right for Kanna and wrong for the desktop E2E harness, which starts one
+/// or two real app instances per run and took the owner's keyboard focus with each
+/// one.
+///
+/// `Prohibited` is the policy that actually fixes it: tao applies the policy just
+/// before that activate call, and a prohibited app cannot be activated, so the call
+/// becomes a no-op. `Accessory` would only drop the Dock icon — an accessory app is
+/// still activatable, so it would still steal focus at launch. The window is still
+/// created and rendered, and WebDriver still drives it: `tauri-plugin-webdriver`
+/// reaches the WKWebView through `evaluateJavaScript:` and snapshots it with
+/// `takeSnapshotWithConfiguration:`, neither of which needs the app to be active.
+#[cfg(target_os = "macos")]
+pub(crate) fn requested_activation_policy(value: Option<&str>) -> Option<tauri::ActivationPolicy> {
+    match value {
+        Some("1") => Some(tauri::ActivationPolicy::Prohibited),
+        _ => None,
+    }
+}
+
 /// Resolve the user's full PATH from their interactive login shell.
 /// macOS apps launched from Finder/Spotlight inherit a minimal PATH
 /// (/usr/bin:/bin:/usr/sbin:/sbin) that doesn't include tools like
@@ -169,5 +198,20 @@ mod tests {
         assert_eq!(desired_child_nofile_soft_limit(256, 8192), 4096);
         assert_eq!(desired_child_nofile_soft_limit(256, 1024), 1024);
         assert_eq!(desired_child_nofile_soft_limit(8192, 8192), 8192);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn activation_policy_is_prohibited_only_when_the_e2e_flag_is_set() {
+        use super::requested_activation_policy;
+
+        assert!(matches!(
+            requested_activation_policy(Some("1")),
+            Some(tauri::ActivationPolicy::Prohibited)
+        ));
+        // An unset, empty or explicitly disabled flag must leave a normal launch alone.
+        assert!(requested_activation_policy(None).is_none());
+        assert!(requested_activation_policy(Some("")).is_none());
+        assert!(requested_activation_policy(Some("0")).is_none());
     }
 }
