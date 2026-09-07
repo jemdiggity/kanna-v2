@@ -1,4 +1,4 @@
-# Logical-message PTY receipt: what is covered, and what could not run here
+# Logical-message PTY receipt: what the incident was, and what now covers it
 
 Task eb296b63 investigated the 2026-09-06 incident in which a 1,047-byte
 single-line manager message was accepted by the daemon, recorded whole in the
@@ -52,28 +52,49 @@ decides to wrap the bytes; it does not prove the process on the far side of a
 real PTY receives all 1,047 of them as one input event with exactly one Enter,
 which is the part that failed in production.
 
-## Coverage that could not run here
+## Coverage through the full path
 
 `tests/remote-e2e/src/terminal-flow.e2e.test.ts` gains
 `delivers a long single-line logical message whole and submits it exactly once`,
 which drives the same payload through the real path — HTTP `POST
 /v1/tasks/{id}/input`, the server, the daemon, a real PTY agent — and asserts
 the agent's own NUL-delimited input trace file equals the message exactly, with
-one `task_input` row and nothing behind it.
+one `task_input` row and nothing behind it. That leg is what the incident
+actually exercised: the MCP/HTTP hop answered `ok:true` while the recipient held
+a fragment, and the daemon tests above do not touch it.
 
-It was not executed here. At this branch's base (`7e8e066e`) the whole
-remote-e2e lane cannot start: `waitForHttpOk` in
-`tests/remote-e2e/src/processes.ts` polls `/v1/status` with `fetch`, and Node
-24's undici attaches `sec-fetch-mode: cors` to every request, which
-`lan_trust.rs` classifies as browser-originated and refuses with 403 before a
-single test runs (confirmed 2026-09-06 on Node v24.15.0). The blocker was
-pre-existing and blocked every test in the lane.
+It passes, observed 2026-09-07: twice on the `terminal-flow` spec alone
+(`✓ delivers a long single-line logical message whole and submits it exactly
+once`, 4574ms), and again inside `./kd test remote-e2e`, whose sequential runner
+only reaches the fifth spec if the third one passed. 4.6s sits against the
+test's own 20s trace deadline.
+That margin is worth knowing because this test is the first end-to-end consumer
+of the `inputTraceFile` plumbing in `tests/remote-e2e/src/scriptedAgent.ts`,
+whose reader forks `dd bs=1 count=1` per byte and had never been driven with a
+1,047-byte payload. The scripted agent runs non-canonical
+(`stty -icanon min 1 time 0`), so the 1,024-byte `MAX_CANON` ceiling that would
+otherwise bound a single line does not apply to it.
 
-It has since been fixed on `main`, after this base: test code now reaches Kanna
-servers through a local-process fetch helper, with a contract test enforcing it.
-So this test is expected to be runnable once this branch is on a `main` carrying
-that fix — **run it there before merging, and drop this section if it passes.**
-Nothing about it has been observed to pass or fail.
+An earlier revision of this note deferred that run: at this branch's base
+(`7e8e066e`) the whole remote-e2e lane could not start, because `waitForHttpOk`
+in `tests/remote-e2e/src/processes.ts` polled `/v1/status` with bare `fetch` and
+Node 24's undici stamps every request with `sec-fetch-mode: cors`, which
+`lan_trust.rs` refuses as browser-originated. That line now calls
+`localProcessFetch`, so merging `origin/main` into this branch was enough to
+make the lane start.
+
+The lane as a whole still exits 1, on a spec this branch does not touch.
+`tests/remote-e2e/src/lan-layer.e2e.test.ts` fails 11 tests, most of them 403
+`browser requests must present this desktop's local control credential`. Its
+`nodeFetch` at line 742 is still `async (input, init) => fetch(input, init)` —
+the same bare-`fetch` shape that was fixed in `processes.ts` but not here, even
+though this file already imports `localProcessFetch` and uses it in one other
+place. That line is byte-identical on `origin/main`, and this branch's entire
+delta from `origin/main` is three files (a daemon test, the `terminal-flow`
+spec, and this note) with no product code, so the failure is inherited rather
+than caused. Converting `nodeFetch` looks like one line, but several of the 11
+failures are snapshot timeouts rather than 403s, so the WebSocket side may need
+the credential too; that is its own task, not this one.
 
 ## The contract, stated rather than overclaimed
 
