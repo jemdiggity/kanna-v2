@@ -12,6 +12,7 @@ import {
   resolveDesktopServerUrlForTarget
 } from "./helpers/desktop";
 import { resolveRequiredMobileE2eEnv } from "./helpers/env";
+import { localProcessFetch } from "./helpers/local-process-fetch";
 import {
   assertSimulatorAppInstalled,
   bootSimulator,
@@ -30,7 +31,7 @@ async function main(): Promise<void> {
   const driverSummary = await listInstalledAppiumDrivers(processEnv);
   await assertDesktopServerReachable(desktopServerUrl);
   const serverStatus = (await (
-    await fetch(`${desktopServerUrl}/v1/status`)
+    await localProcessFetch(`${desktopServerUrl}/v1/status`)
   ).json()) as Record<string, unknown>;
   if (env.target === "device") {
     const appiumVisibleUdids = await listXcuitestConnectedDeviceUdids(processEnv);

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 import type { TaskActivity } from "../../src/lib/api/types";
 import { DEFAULT_MOBILE_TERMINAL_GEOMETRY } from "../../src/mobileTerminalGeometry";
+import { localProcessFetch, type LocalProcessFetch } from "./local-process-fetch";
 
 const RELAY_TASK_TITLE = "Relay card current title";
 const RELAY_ORIGINAL_PROMPT = "Original relay request must stay hidden";
@@ -295,7 +296,7 @@ export interface HarnessPairingSession {
 
 export async function createHarnessPairingSession(
   baseUrl: string,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: LocalProcessFetch = localProcessFetch
 ): Promise<HarnessPairingSession> {
   const response = await fetchImpl(`${baseUrl}/v1/pairing/sessions`, {
     method: "POST"
@@ -315,7 +316,7 @@ export async function updateHarnessMobileMachineControls(
     expirePairingSession?: boolean;
     lanHttpEnabled?: boolean;
   },
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: LocalProcessFetch = localProcessFetch
 ): Promise<void> {
   const response = await fetchImpl(
     `${baseUrl}/v1/e2e/mobile-machine-controls`,
@@ -988,7 +989,7 @@ async function assertHybridLanFixture(
   harness: RemoteHarness,
   tasks: readonly ScriptedTask[]
 ): Promise<void> {
-  const response = await fetch(`${harness.lanBaseUrl}/v1/tasks/recent`);
+  const response = await localProcessFetch(`${harness.lanBaseUrl}/v1/tasks/recent`);
   const body = await response.json().catch(() => null) as unknown;
   if (!response.ok || !Array.isArray(body)) {
     throw new Error(
@@ -1038,7 +1039,7 @@ async function setLocalTaskRuntimeStatus(
   taskId: string,
   status: "busy" | "idle",
 ): Promise<void> {
-  const response = await fetch(
+  const response = await localProcessFetch(
     `${harness.lanBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/runtime-status`,
     {
       method: "POST",
@@ -1059,7 +1060,7 @@ async function postLocalTaskAction(
   taskId: string,
   action: "mark-read"
 ): Promise<void> {
-  const response = await fetch(
+  const response = await localProcessFetch(
     `${harness.lanBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`,
     { method: "POST" }
   );
@@ -1080,7 +1081,7 @@ async function waitForLocalTaskActivity(
   const deadline = Date.now() + timeoutMs;
   let lastObserved: unknown = null;
   while (Date.now() < deadline) {
-    const response = await fetch(
+    const response = await localProcessFetch(
       `${harness.lanBaseUrl}/v1/repos/${encodeURIComponent(task.repoId)}/tasks`,
     );
     if (response.ok) {

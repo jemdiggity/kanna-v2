@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../tools/kd/src/runtime/process-inventory";
+import { localProcessFetch } from "./localProcessFetch";
 
 export interface ManagedProcess {
   readonly name: string;
@@ -39,7 +40,7 @@ export async function waitForHttpOk(url: string, timeoutMs: number): Promise<voi
   const deadline = Date.now() + timeoutMs;
   let lastError = "";
   while (Date.now() < deadline) {
-    const response = await fetch(url).catch((error: unknown) => {
+    const response = await localProcessFetch(url).catch((error: unknown) => {
       lastError = error instanceof Error ? error.message : String(error);
       return null;
     });
