@@ -17,7 +17,7 @@ filegroup(
 
 cargo_build_script(
     name = "daemon_build_script",
-    srcs = ["build.rs"],
+    srcs = ["build.rs"] + glob(["build_support/**/*.rs"]),
     crate_root = "build.rs",
     edition = "2021",
     data = ["//:VERSION"],

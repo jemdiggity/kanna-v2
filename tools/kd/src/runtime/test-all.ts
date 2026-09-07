@@ -1,8 +1,8 @@
 import type { CommandResult, CommandRunner } from "./process";
 
 export interface TestAllCommand {
-  lane: "workspace" | "rust";
-  command: "pnpm" | "./kd";
+  lane: "workspace" | "bazel-build-script" | "rust";
+  command: "pnpm" | "bazel" | "./kd";
   args: string[];
 }
 
@@ -11,6 +11,11 @@ interface ExecutedTestAllCommand extends TestAllCommand, CommandResult {}
 export function buildTestAllCommands(): TestAllCommand[] {
   return [
     { lane: "workspace", command: "pnpm", args: ["test"] },
+    {
+      lane: "bazel-build-script",
+      command: "bazel",
+      args: ["build", "//crates/daemon:daemon_build_script"],
+    },
     { lane: "rust", command: "./kd", args: ["test", "rust"] },
   ];
 }
