@@ -54,7 +54,7 @@ interface RelayTaskFlowOptions {
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
-  beginMobileTerminalGeometryObservation(): Promise<void>;
+  waitForMobileTerminalGeometry(): Promise<void>;
   waitForQuickReplyInput(): Promise<void>;
 }
 
@@ -1573,7 +1573,6 @@ export async function runRelayTaskFlow(
     options.fixture.taskId,
     options.setTaskActivity,
   );
-  let mobileGeometryAfterDetailMount: Promise<void> | null = null;
   await runRelayTaskJourneys({
     verifyQuickReplyPersistence: () =>
       verifyRelayQuickReplyPersistenceJourney(
@@ -1587,11 +1586,6 @@ export async function runRelayTaskFlow(
     verifyMarkedRead: () => verifyRelayTaskMarkedRead(ui, options.fixture.taskId, {
       prepareUnread: options.prepareTaskUnreadForMarkRead,
       async openTask() {
-        // Arm the raw KSP observer before the first mobile detail mount. A
-        // later attachment snapshot cannot satisfy this promise, so it proves
-        // the mounted product path resized the creation-time 80x24 PTY.
-        mobileGeometryAfterDetailMount =
-          options.beginMobileTerminalGeometryObservation();
         await openRelayFixtureTask(ui, options.fixture.taskId);
         const backButton = await ui.getBackButton();
         await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
@@ -1599,7 +1593,7 @@ export async function runRelayTaskFlow(
       waitForOwnerIdle: () => options.waitForLocalTaskActivity("idle"),
       async waitForSelectedDetailIdle() {
         await waitForSelectedTaskDetailActivity(ui, "idle");
-        await mobileGeometryAfterDetailMount;
+        await options.waitForMobileTerminalGeometry();
       },
       closeTask: () => returnToTaskListShell(ui),
     }),

@@ -23,6 +23,21 @@ describe("mobile relay harness helpers", () => {
     expect(fixture?.sentinel).toMatch(/MOBILE.*SNAPSHOT/);
   });
 
+  it("does not compare encoded snapshots across terminal geometries", () => {
+    expect(relayHarness.mobileRelayTerminalGeometryExpectation({
+      taskId: "task-1",
+      sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL",
+      expectedCols: 80,
+      expectedRows: 48,
+      minDecodedBytes: 5_517,
+    })).toEqual({
+      cols: 80,
+      minEncodedChars: relayHarness.MOBILE_RELAY_PTY_HISTORY_FIXTURE.minEncodedChars,
+      rows: 48,
+      sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL",
+    });
+  });
+
   it("uses the publisher's stable cloud task identity instead of the legacy fallback", () => {
     expect(relayHarness.publishedCloudTaskId(
       { cloudTaskId: { stringValue: " stable-task-id " } },
