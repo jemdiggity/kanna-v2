@@ -79,6 +79,11 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    SubmitInputIfSession {
+        session_id: String,
+        expected_pid: u32,
+        data: Vec<u8>,
+    },
     InputNoReply {
         session_id: String,
         data: Vec<u8>,
@@ -4688,4 +4693,669 @@ fn fenced_navigation_keys_do_not_hold_a_delivered_message() {
     // this asserts is the daemon's: the message went out with its own Enter
     // rather than being parked behind a draft those keys never created.
     await_snapshot_containing(&mut conn, session_id, "delivered anyway>");
+}
+
+// ---- What the PTY actually received ----
+//
+// Everything below measures one thing the rest of this file cannot: the bytes a
+// process on the far side of the PTY read from its own stdin, and the
+// boundaries of the reads that delivered them.
+//
+// The distinction is not academic. On 2026-09-06 a 1,047-byte single-line
+// manager message was accepted by the daemon, recorded whole in the durable
+// input ledger, and answered `ok` — and the recipient received only its last 25
+// bytes and said so. Nothing in the ledger, the daemon's reply, or the rendered
+// snapshot could have caught that, because every one of them describes what was
+// *written*. A CLI decides what one input event is from its own `read` returns,
+// and a macOS PTY master accepts about a kilobyte per write, so a longer
+// message is split by the kernel however the daemon issues it. Reproduced here
+// with a paced reader, an unframed 1,047-byte write splits into exactly
+// 1,022 + 25 bytes — the 25-byte tail being precisely the fragment the
+// recipient quoted back.
+//
+// The fix that shipped in `fe98eca1` is in-band: a message of at least
+// `PASTE_FRAMING_MIN_LEN` bytes, or one carrying a newline, is bracketed with
+// the paste markers when the application has enabled that mode, so a consumer
+// that implements bracketed paste rejoins the pieces into one editor operation
+// no matter where the queue divides them. These tests hold that contract to the
+// byte, and state its limit: when the application never advertised the mode,
+// the daemon can still guarantee every byte, in order, with exactly one Enter —
+// but not the consumer's read boundaries.
+
+/// Records the exact bytes its stdin delivered, and the size of every read.
+///
+/// The reader is deliberately paced. The kernel split is there either way, but
+/// pacing puts it on a fixed boundary instead of a scheduling race, so these
+/// tests measure a contract rather than a timing.
+///
+/// `$ARGV`: bytes file, read-size file, non-empty to advertise bracketed paste,
+/// non-zero to repaint for that many seconds after the first read. The read
+/// size is recorded before the bytes, so a complete byte file implies a
+/// complete read log.
+const STDIN_RECORDER_PROGRAM: &str = r#"
+use Time::HiRes qw(time sleep);
+$| = 1;
+system('stty raw -echo');
+my ($bytes_path, $reads_path, $paste, $repaint_seconds) = @ARGV;
+open(my $bytes, '>', $bytes_path) or die "bytes: $!";
+open(my $reads, '>', $reads_path) or die "reads: $!";
+binmode($bytes);
+select((select($bytes), $| = 1)[0]);
+select((select($reads), $| = 1)[0]);
+print "\e[?2004h" if $paste;
+print "READY\r\n";
+my $repainted = 0;
+while (1) {
+    my $buf = '';
+    my $n = sysread(STDIN, $buf, 65536);
+    last unless defined($n) && $n > 0;
+    print $reads "$n\n";
+    print $bytes $buf;
+    if ($repaint_seconds && !$repainted) {
+        $repainted = 1;
+        my $until = time() + $repaint_seconds;
+        while (time() < $until) {
+            print "\e[2K\rrepainting";
+            sleep(0.02);
+        }
+    }
+    sleep(0.05);
+}
+"#;
+
+const PASTE_BEGIN: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// The 2026-09-06 incident's geometry, reproduced without its content.
+///
+/// The message itself was an operator directive and is not this repository's to
+/// carry; its measurements are what the test needs. It was 1,047 bytes on one
+/// line, and the recipient received the 25 bytes after the queue's 1,022-byte
+/// boundary.
+const INCIDENT_MESSAGE_LEN: usize = 1_047;
+const INCIDENT_TAIL: &[u8] = b"and this is the tail only";
+
+/// A single-line message of exactly the incident's length whose final
+/// [`INCIDENT_TAIL`] is distinguishable from everything before it.
+fn incident_shaped_message() -> Vec<u8> {
+    let mut message = b"HEAD ".to_vec();
+    message.resize(INCIDENT_MESSAGE_LEN - INCIDENT_TAIL.len(), b'x');
+    message.extend_from_slice(INCIDENT_TAIL);
+    assert_eq!(message.len(), INCIDENT_MESSAGE_LEN);
+    message
+}
+
+fn bracketed(payload: &[u8]) -> Vec<u8> {
+    let mut framed = PASTE_BEGIN.to_vec();
+    framed.extend_from_slice(payload);
+    framed.extend_from_slice(PASTE_END);
+    framed
+}
+
+fn submitted(payload: &[u8]) -> Vec<u8> {
+    let mut expected = payload.to_vec();
+    expected.push(b'\r');
+    expected
+}
+
+fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+struct StdinRecorder {
+    bytes_path: PathBuf,
+    reads_path: PathBuf,
+}
+
+impl StdinRecorder {
+    fn bytes(&self) -> Vec<u8> {
+        std::fs::read(&self.bytes_path).unwrap_or_default()
+    }
+
+    /// The size of each `read` the recorder's stdin returned, in order.
+    fn reads(&self) -> Vec<usize> {
+        std::fs::read_to_string(&self.reads_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect()
+    }
+
+    fn wait_for_bytes(&self, expected: usize, timeout: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let received = self.bytes();
+            if received.len() >= expected {
+                return received;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the PTY received {} of {expected} bytes: {:?}",
+                received.len(),
+                String::from_utf8_lossy(&received)
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Prove the delivery was exactly once: nothing more arrives after it.
+    fn assert_settled_at(&self, expected: &[u8], settle: Duration) {
+        thread::sleep(settle);
+        let received = self.bytes();
+        assert_eq!(
+            received.len(),
+            expected.len(),
+            "the PTY received more than the message and its single Enter: {:?}",
+            String::from_utf8_lossy(&received)
+        );
+        assert_eq!(received, expected);
+    }
+
+    /// The read boundary the kernel imposed on the message, once there is one.
+    ///
+    /// The Enter is written separately by design, so a message that fits one
+    /// queue-load still produces two reads; a *split* message is one whose
+    /// first read ends before its text does.
+    fn first_read(&self) -> usize {
+        *self.reads().first().expect("stdin recorder read nothing")
+    }
+}
+
+fn spawn_stdin_recorder(
+    daemon: &DaemonHandle,
+    conn: &mut ClientConn,
+    session_id: &str,
+    bracketed_paste_mode: bool,
+    repaint_seconds: f64,
+) -> StdinRecorder {
+    let bytes_path = daemon._dir.join(format!("{session_id}-stdin.bin"));
+    let reads_path = daemon._dir.join(format!("{session_id}-reads.txt"));
+    let _ = std::fs::remove_file(&bytes_path);
+    let _ = std::fs::remove_file(&reads_path);
+
+    conn.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/usr/bin/perl".to_string(),
+        args: vec![
+            "-e".to_string(),
+            STDIN_RECORDER_PROGRAM.to_string(),
+            bytes_path.to_string_lossy().into_owned(),
+            reads_path.to_string_lossy().into_owned(),
+            if bracketed_paste_mode { "1" } else { "" }.to_string(),
+            format!("{repaint_seconds}"),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    match conn.recv() {
+        Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
+        other => panic!("expected SessionCreated, got: {other:?}"),
+    }
+
+    // Bracketed-paste mode is learned from the session's own output, so nothing
+    // may be enqueued before the byte that sets it has been mirrored. READY is
+    // printed after it in the same stream, so seeing READY is seeing the mode.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        conn.send(&Cmd::Snapshot {
+            session_id: session_id.to_string(),
+        });
+        let snapshot = recv_snapshot(conn, session_id);
+        if snapshot.vt.contains("READY") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stdin recorder never became ready: {:?}",
+            snapshot.vt
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    StdinRecorder {
+        bytes_path,
+        reads_path,
+    }
+}
+
+fn session_pid(conn: &mut ClientConn, session_id: &str) -> u32 {
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => sessions
+            .iter()
+            .find(|session| session["session_id"] == session_id)
+            .and_then(|session| session["pid"].as_u64())
+            .and_then(|pid| u32::try_from(pid).ok())
+            .expect("spawned session should have a pid"),
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+}
+
+/// The mechanism, measured rather than asserted from the source.
+///
+/// This is the failure the incident was: raw bytes carry no framing, so the
+/// kernel's queue boundary is the consumer's input-event boundary. Every byte
+/// arrives — the daemon's partial-write loop is correct — but they arrive as two
+/// separate reads, and the second one is a 25-byte fragment that reads as a
+/// complete sentence.
+#[test]
+fn raw_input_at_the_incident_length_is_split_by_the_pty_queue() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "pty-queue-split";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    let message = incident_shaped_message();
+
+    conn.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+
+    let received = recorder.wait_for_bytes(message.len(), Duration::from_secs(15));
+    assert_eq!(
+        received, message,
+        "every byte of the message must reach the PTY"
+    );
+
+    let reads = recorder.reads();
+    assert!(
+        reads.len() >= 2,
+        "a {INCIDENT_MESSAGE_LEN}-byte unframed write is larger than the PTY queue and must \
+         reach the process as more than one read; it arrived as {reads:?}"
+    );
+    let split = recorder.first_read();
+    assert!(
+        split < message.len(),
+        "the split must fall inside the message: first read {split} of {}",
+        message.len()
+    );
+    assert_eq!(
+        &received[split..],
+        INCIDENT_TAIL,
+        "the fragment left after the queue boundary is what an unframed consumer submits \
+         alone; the first read was {split} bytes (1022 in the 2026-09-06 incident)"
+    );
+}
+
+/// The same message as a logical message, which is what a manager or an owner
+/// actually sends.
+///
+/// The kernel still splits it. The guarantee is in-band: one paste region
+/// containing every byte, closed before a separately written Enter, so the
+/// consumer's read boundaries stop deciding what the message was.
+#[test]
+fn a_long_single_line_logical_message_survives_the_pty_queue_split() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "long-logical-message";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    let message = incident_shaped_message();
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    expect_ok(&mut conn);
+
+    let expected = submitted(&bracketed(&message));
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(30));
+    assert_eq!(
+        received,
+        expected,
+        "the PTY must receive the whole message inside one paste region, then its Enter; got {:?}",
+        String::from_utf8_lossy(&received)
+    );
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+
+    assert_eq!(
+        received.iter().filter(|byte| **byte == b'\r').count(),
+        1,
+        "exactly one submission"
+    );
+    assert_eq!(occurrences(&received, PASTE_BEGIN), 1);
+    assert_eq!(occurrences(&received, PASTE_END), 1);
+
+    let reads = recorder.reads();
+    assert!(
+        reads.len() >= 2,
+        "the kernel queue must still have split this message — the fix is in-band framing, \
+         not a single write; it arrived as {reads:?}"
+    );
+    assert!(
+        recorder.first_read() < expected.len() - 1,
+        "the split must fall inside the paste region, not at its Enter: {reads:?}"
+    );
+    assert_eq!(
+        reads.last().copied(),
+        Some(1),
+        "the Enter must arrive as its own input event, after the paste closed: {reads:?}"
+    );
+}
+
+/// A character cut in half by the queue boundary is still one character.
+///
+/// The payload is entirely three-byte characters, so the measured 1,022-byte
+/// boundary lands inside one of them.
+#[test]
+fn a_logical_message_split_inside_a_character_is_not_corrupted() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "multibyte-logical-message";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+
+    let text = "日本語のメッセージ、".repeat(45);
+    let message = text.as_bytes().to_vec();
+    assert!(message.len() > 1_100, "the payload must outgrow the queue");
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    expect_ok(&mut conn);
+
+    let expected = submitted(&bracketed(&message));
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(30));
+    assert_eq!(received, expected);
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+
+    let split = recorder.first_read();
+    assert_eq!(
+        expected[split] & 0b1100_0000,
+        0b1000_0000,
+        "this test only proves reassembly if the read boundary cut a character; the split \
+         landed at {split}, on a character boundary"
+    );
+
+    let inner = &received[PASTE_BEGIN.len()..received.len() - PASTE_END.len() - 1];
+    assert_eq!(
+        std::str::from_utf8(inner).expect("the pasted text must still be valid UTF-8"),
+        text
+    );
+}
+
+/// Embedded newlines are inside the paste, so they submit nothing.
+#[test]
+fn a_multiline_logical_message_is_one_paste_with_one_submission() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "multiline-logical-message";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    let message = b"first line\nsecond line\nthird line".to_vec();
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    expect_ok(&mut conn);
+
+    let expected = submitted(&bracketed(&message));
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(15));
+    assert_eq!(received, expected);
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+
+    assert_eq!(
+        received.iter().filter(|byte| **byte == b'\r').count(),
+        1,
+        "the two embedded newlines must not become submissions"
+    );
+    let paste_end = received
+        .windows(PASTE_END.len())
+        .position(|window| window == PASTE_END)
+        .expect("the paste must be closed");
+    assert!(
+        !received[..paste_end].contains(&b'\r'),
+        "nothing inside the paste region may submit"
+    );
+}
+
+/// Short messages stay unframed: paste markers around a provider slash command
+/// would be a corruption of their own.
+#[test]
+fn a_short_logical_message_is_delivered_unframed_and_whole() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "short-logical-message";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    let message = b"/compact".to_vec();
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    expect_ok(&mut conn);
+
+    let expected = submitted(&message);
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(15));
+    assert_eq!(received, expected);
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+    assert_eq!(occurrences(&received, PASTE_BEGIN), 0);
+}
+
+/// The contract's limit, stated as a test rather than left to be discovered.
+///
+/// A terminal that never advertised bracketed paste cannot be sent the markers
+/// — they would land at its composer as literal text. The daemon still
+/// guarantees every byte, in order, followed by exactly one Enter; it does not
+/// guarantee the consumer's read boundaries, and this is where that ends.
+#[test]
+fn without_bracketed_paste_mode_a_long_message_is_whole_but_the_split_remains() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "unframed-logical-message";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, false, 0.0);
+    let message = incident_shaped_message();
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    expect_ok(&mut conn);
+
+    let expected = submitted(&message);
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(30));
+    assert_eq!(
+        received, expected,
+        "every byte, in order, and exactly one Enter"
+    );
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+    assert_eq!(
+        occurrences(&received, PASTE_BEGIN),
+        0,
+        "unsupported markers must never be written as composer text"
+    );
+    assert!(
+        recorder.reads().len() >= 2,
+        "without the mode the queue split is still the consumer's input-event boundary"
+    );
+}
+
+/// A CLI repainting while it consumes the message is not evidence that it did
+/// not, so the Enter waits for quiet rather than for a clock.
+#[test]
+fn a_logical_message_is_submitted_once_after_the_terminal_stops_repainting() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "repainting-logical-message";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.8);
+    let message = b"manager message delivered into a busy composer".to_vec();
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    expect_ok(&mut conn);
+
+    let expected = submitted(&message);
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(30));
+    assert_eq!(received, expected);
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+}
+
+/// A terminal that never settles is never proven to have consumed anything, so
+/// its Enter is withheld and the caller is told — and the next message meets
+/// the parked composer instead of being concatenated onto it.
+#[test]
+fn a_terminal_that_never_settles_withholds_the_enter_and_refuses_what_follows() {
+    let daemon = DaemonHandle::start_with_env([(
+        "KANNA_DAEMON_TEST_LOGICAL_CONSUMPTION_TIMEOUT_MS",
+        "1200",
+    )]);
+    let mut conn = daemon.connect();
+    let session_id = "never-settling-terminal";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 8.0);
+    let message = b"manager message into a terminal that never goes quiet".to_vec();
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    match conn.recv() {
+        Evt::Error { code, .. } => {
+            assert_eq!(code, Some(ErrorCode::LogicalInputSubmissionUnproven))
+        }
+        other => panic!("an unproven submission must not answer Ok, got: {other:?}"),
+    }
+
+    let received = recorder.wait_for_bytes(message.len(), Duration::from_secs(10));
+    assert_eq!(received, message, "the text reached the composer");
+    assert!(
+        !received.contains(&b'\r'),
+        "no Enter may be written into a repaint that would swallow it"
+    );
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"a second message".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::InheritedDraftStateUnknown)),
+        other => panic!("a message behind a parked composer must be refused, got: {other:?}"),
+    }
+    recorder.assert_settled_at(&message, Duration::from_millis(400));
+}
+
+/// Task ids are reused across a rerun and a stage's own respawn, so a message
+/// discovered against one incarnation must never land in the next one.
+#[test]
+fn submit_input_if_session_rejects_a_replaced_session_and_writes_nothing() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "replaced-session-logical";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    let pid = session_pid(&mut conn, session_id);
+
+    conn.send(&Cmd::SubmitInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid.wrapping_add(1),
+        data: b"a message for a session that no longer exists".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::SessionIncarnationMismatch)),
+        other => panic!("a stale incarnation must be refused, got: {other:?}"),
+    }
+    recorder.assert_settled_at(&[], Duration::from_millis(400));
+
+    conn.send(&Cmd::SubmitInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid: pid,
+        data: b"a message for the live session".to_vec(),
+    });
+    expect_ok(&mut conn);
+    let expected = submitted(b"a message for the live session");
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(15));
+    assert_eq!(received, expected);
+}
+
+/// A human's half-typed line and a delivered message share one composer, and
+/// the delivered one must not be appended to it or interleaved into it.
+#[test]
+fn a_logical_message_never_interleaves_with_a_concurrent_raw_draft() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "raw-and-logical";
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+
+    conn.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"half-typed".to_vec(),
+    });
+    let draft = recorder.wait_for_bytes(b"half-typed".len(), Duration::from_secs(15));
+    assert_eq!(draft, b"half-typed");
+
+    let message = incident_shaped_message();
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: message.clone(),
+    });
+    match conn.recv() {
+        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
+        other => panic!("a message behind a typed draft must not answer Ok, got: {other:?}"),
+    }
+    recorder.assert_settled_at(b"half-typed", Duration::from_millis(400));
+
+    // The human submits their own line; the held message follows it whole.
+    conn.send(&Cmd::InputBoundary {
+        session_id: session_id.to_string(),
+        data: b"\r".to_vec(),
+    });
+    expect_ok(&mut conn);
+
+    let mut expected = b"half-typed\r".to_vec();
+    expected.extend_from_slice(&submitted(&bracketed(&message)));
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(30));
+    assert_eq!(
+        received,
+        expected,
+        "the draft submits first, then the whole message in its own paste: {:?}",
+        String::from_utf8_lossy(&received)
+    );
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+}
+
+/// The framing threshold itself, pinned from outside the crate.
+///
+/// It is a real boundary in behaviour, not a tuning knob: below it a message is
+/// written untouched so a provider slash command reaches the composer as a
+/// command, and at it a message is pasted so the queue cannot divide it. Both
+/// halves are asserted against the bytes the process read.
+#[test]
+fn the_paste_framing_threshold_is_where_framing_starts() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+
+    let below = vec![b'b'; 255];
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, "below-threshold", true, 0.0);
+    conn.send(&Cmd::SubmitInput {
+        session_id: "below-threshold".to_string(),
+        data: below.clone(),
+    });
+    expect_ok(&mut conn);
+    let expected = submitted(&below);
+    assert_eq!(
+        recorder.wait_for_bytes(expected.len(), Duration::from_secs(15)),
+        expected,
+        "255 bytes is below the threshold and must reach the composer untouched"
+    );
+    recorder.assert_settled_at(&expected, Duration::from_millis(300));
+
+    let at = vec![b'a'; 256];
+    let recorder = spawn_stdin_recorder(&daemon, &mut conn, "at-threshold", true, 0.0);
+    conn.send(&Cmd::SubmitInput {
+        session_id: "at-threshold".to_string(),
+        data: at.clone(),
+    });
+    expect_ok(&mut conn);
+    let expected = submitted(&bracketed(&at));
+    assert_eq!(
+        recorder.wait_for_bytes(expected.len(), Duration::from_secs(15)),
+        expected,
+        "256 bytes is the threshold and must be framed as one paste"
+    );
+    recorder.assert_settled_at(&expected, Duration::from_millis(300));
 }

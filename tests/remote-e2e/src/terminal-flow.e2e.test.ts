@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
 import { createRemoteTransport } from "../../../apps/mobile/src/lib/transports/remoteTransport";
@@ -340,6 +342,80 @@ describe("remote task terminal flow E2E", () => {
       events.close();
     }
   }, 45_000);
+
+  /**
+   * The lines the scripted agent actually read from its stdin, NUL-delimited by
+   * the agent itself.
+   *
+   * Rendered terminal output cannot settle a truncation question: it is what the
+   * emulator drew, wrapped and repainted. This file is what the process on the
+   * far side of the PTY received.
+   */
+  async function readInputTrace(
+    worktreePath: string | null,
+    traceFile: string,
+    expected: number,
+    timeoutMs = 20_000,
+  ): Promise<string[]> {
+    if (!worktreePath) throw new Error("scripted task has no worktree path");
+    const path = join(worktreePath, traceFile);
+    const deadline = Date.now() + timeoutMs;
+    let received: string[] = [];
+    while (Date.now() < deadline) {
+      const raw = await readFile(path, "utf8").catch(() => "");
+      received = raw.split("\0").slice(0, -1);
+      if (received.length >= expected) return received;
+      await sleep(100);
+    }
+    throw new Error(
+      `scripted agent received ${received.length} of ${expected} inputs: ${JSON.stringify(received)}`,
+    );
+  }
+
+  /**
+   * The incident of 2026-09-06: a 1,047-byte single-line manager message was
+   * accepted, recorded whole in the durable input ledger and answered `ok`,
+   * while the recipient received only its last 25 bytes.
+   *
+   * A macOS PTY master accepts about a kilobyte per write, so a message this
+   * long reaches the agent as more than one input event however the daemon
+   * issues it. The daemon frames it as one bracketed paste, and that framing is
+   * what has to survive the whole delivery path — MCP/HTTP, the server, the
+   * daemon writer, the PTY — for the agent to read one message rather than a
+   * sentence-shaped fragment.
+   */
+  it("delivers a long single-line logical message whole and submits it exactly once", async () => {
+    const traceFile = ".kanna-e2e-inputs";
+    const task = await createScriptedTask(harness, {
+      displayName: "Long logical input task",
+      terminalPasteSemantics: true,
+      inputTraceFile: traceFile,
+    });
+    const events = collectTerminalEvents(harness, task.taskId);
+    const message = `HEAD ${"x".repeat(1017)}and this is the tail only`;
+    expect(message).toHaveLength(1047);
+
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_INPUT_READY");
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: message },
+      });
+
+      const received = await readInputTrace(task.worktreePath, traceFile, 1);
+      expect(received).toEqual([message]);
+
+      // Exactly once: nothing arrives behind it, and no fragment of it is
+      // submitted as a second message.
+      await sleep(500);
+      expect(await readInputTrace(task.worktreePath, traceFile, 1)).toEqual([message]);
+      expect(await taskInputCount(harness, task.taskId)).toBe(1);
+    } finally {
+      events.close();
+    }
+  }, 60_000);
 
   it("submits a multiline logical message as one bracketed terminal paste", async () => {
     const task = await createScriptedTask(harness, {
