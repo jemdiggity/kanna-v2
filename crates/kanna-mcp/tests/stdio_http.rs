@@ -392,6 +392,46 @@ fn info_call(id: i64) -> Value {
     })
 }
 
+#[test]
+fn machine_stats_tool_uses_the_aggregate_server_route() {
+    let response_body = json!({
+        "machines": [{
+            "machineId": "desktop-local",
+            "loadAverages": { "one": 0.5, "five": 0.75, "fifteen": 1.0 },
+            "cpuCoreCount": 8,
+            "memory": {
+                "totalBytes": 16_u64, "usedBytes": 8_u64,
+                "freeBytes": 4_u64, "availableBytes": 8_u64,
+                "pressure": "normal"
+            },
+            "heavyProcessCount": 1,
+            "heavyProcesses": {
+                "bazel": 0, "cargo": 1, "nodeTestRunner": 0,
+                "rustc": 0, "vitest": 0, "xcodebuild": 0
+            },
+            "busyTaskCount": 1
+        }],
+        "machineErrors": []
+    });
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "GET",
+        path: "/v1/machine-stats",
+        body: None,
+        response_status: "200 OK",
+        response_body: response_body.clone(),
+    }]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0", "id": 33, "method": "tools/call",
+            "params": { "name": "kanna_machine_stats", "arguments": {} }
+        })],
+    );
+
+    assert_eq!(tool_text(&responses[0]), response_body);
+    assert_eq!(server.join().expect("fixture server").len(), 1);
+}
+
 fn status_fixture(environment: &str, version: &str, lan_port: u16) -> Value {
     json!({
         "state": "running",
@@ -1305,6 +1345,9 @@ fn tools_list_advertises_machine_routing_on_operational_tools() {
         .find(|tool| tool["name"] == "kanna_list_machines")
         .expect("machine discovery tool");
     assert!(list_machines["inputSchema"]["properties"]["machine_id"].is_null());
+    assert!(tools
+        .iter()
+        .any(|tool| tool["name"] == "kanna_machine_stats"));
     let list_tasks = tools
         .iter()
         .find(|tool| tool["name"] == "kanna_list_recent_tasks")

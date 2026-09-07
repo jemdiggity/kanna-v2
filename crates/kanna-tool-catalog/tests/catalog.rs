@@ -24,6 +24,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_info",
             "kanna_list_machines",
             "kanna_guide",
+            "kanna_machine_stats",
             "kanna_list_transfer_peers",
             "kanna_list_repos",
             "kanna_add_repo",
@@ -1459,7 +1460,7 @@ fn preserves_validation_error_strings() {
     assert!(
         unknown_tool.contains(
             "available tools: kanna_info, kanna_list_machines, kanna_guide, \
-             kanna_list_transfer_peers, kanna_list_repos,"
+             kanna_machine_stats, kanna_list_transfer_peers, kanna_list_repos,"
         ),
         "unknown tool error should list available tools: {unknown_tool}"
     );

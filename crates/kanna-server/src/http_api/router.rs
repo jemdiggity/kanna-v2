@@ -11,6 +11,7 @@ use super::ksp::{ksp_stream, legacy_ksp_stream};
 use super::lan_trust::{
     attach_trusted_lan_device, require_http_access, require_local_client_authority,
 };
+use super::machine_stats::machine_stats;
 use super::mobile_notifications::{mobile_push_registration, notify_mobile};
 use super::operator_events::post_operator_events;
 use super::pairing::{
@@ -81,6 +82,7 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 pub fn router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/machine-stats", get(machine_stats))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/backup", post(create_backup))
         .route(

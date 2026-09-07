@@ -62,6 +62,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_machine_stats",
+            TypedToolSurface {
+                command_path: &["machine", "stats"],
+                param_args: &[],
+            },
+        ),
+        (
             "kanna_list_transfer_peers",
             TypedToolSurface {
                 command_path: &["machine", "transfer-peers"],

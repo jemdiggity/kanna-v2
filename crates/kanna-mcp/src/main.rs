@@ -1749,6 +1749,7 @@ mod tests {
                 "kanna_info",
                 "kanna_list_machines",
                 "kanna_guide",
+                "kanna_machine_stats",
                 "kanna_list_transfer_peers",
                 "kanna_list_repos",
                 "kanna_add_repo",

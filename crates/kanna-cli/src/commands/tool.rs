@@ -476,6 +476,9 @@ pub(crate) async fn run_machine(command: MachineCommands) {
         MachineCommands::List { server_url } => {
             ("kanna_list_machines", serde_json::json!({}), server_url)
         }
+        MachineCommands::Stats { server_url } => {
+            ("kanna_machine_stats", serde_json::json!({}), server_url)
+        }
         MachineCommands::TransferPeers {
             machine_id,
             server_url,
