@@ -10,15 +10,20 @@
     "agentProvider": {
       "enum": ["claude", "copilot", "codex", "opencode", "antigravity"]
     },
+    "agentProviderSpec": {
+      "description": "A compact provider selector: provider[-model[-effort]]. A plain provider id (see agentProvider) inherits the CLI's own model and effort; an optional model rides after the provider (passed to the CLI verbatim, so multi-segment ids like gpt-5-codex work); a trailing effort token (lo/low, med/medium, hi/high, xhi/xhigh, max) sets the reasoning effort. Examples: claude, codex-sol, claude-fable-hi, codex-astra-lo. A model is rejected for providers without a model flag, and effort is checked against the provider's published vocabulary when one exists.",
+      "type": "string",
+      "pattern": "^(claude|copilot|codex|opencode|antigravity)(-[A-Za-z0-9][A-Za-z0-9._-]*)?$"
+    },
     "agentProviderSelection": {
       "oneOf": [
         {
-          "$ref": "#/$defs/agentProvider"
+          "$ref": "#/$defs/agentProviderSpec"
         },
         {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/agentProvider"
+            "$ref": "#/$defs/agentProviderSpec"
           },
           "minItems": 1
         }

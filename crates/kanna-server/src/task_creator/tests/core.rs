@@ -982,6 +982,7 @@ fn model_resolution_prefers_explicit_then_repo_then_layered_agent_definition() {
             explicit_provider,
             explicit_model.map(str::to_string),
             explicit_effort.map(str::to_string),
+            None,
             Some(&preference),
             Some(&agent),
         )
@@ -1037,12 +1038,12 @@ fn model_resolution_prefers_explicit_then_repo_then_layered_agent_definition() {
         None
     );
     assert_eq!(
-        super::super::agent_tuning_plan(None, None, None, None, None)
+        super::super::agent_tuning_plan(None, None, None, None, None, None)
             .model_for(AgentProvider::Claude),
         None,
     );
     assert_eq!(
-        super::super::agent_tuning_plan(None, None, None, None, None)
+        super::super::agent_tuning_plan(None, None, None, None, None, None)
             .effort_for(AgentProvider::Claude),
         None,
     );
@@ -1075,8 +1076,14 @@ fn model_resolution_skips_layers_written_for_another_provider() {
 
     // A task already stamped `codex` keeps codex, and gets neither the
     // claude-targeted model nor the opencode-targeted one.
-    let stamped_codex =
-        super::super::agent_tuning_plan(Some("codex"), None, None, Some(&preference), Some(&agent));
+    let stamped_codex = super::super::agent_tuning_plan(
+        Some("codex"),
+        None,
+        None,
+        None,
+        Some(&preference),
+        Some(&agent),
+    );
     assert_eq!(stamped_codex.model_for(AgentProvider::Codex), None);
     assert_eq!(stamped_codex.effort_for(AgentProvider::Codex), None);
 
@@ -1085,6 +1092,7 @@ fn model_resolution_skips_layers_written_for_another_provider() {
         Some("codex"),
         Some("gpt-5-codex".to_string()),
         Some("high".to_string()),
+        None,
         Some(&preference),
         Some(&agent),
     );
@@ -1099,7 +1107,7 @@ fn model_resolution_skips_layers_written_for_another_provider() {
 
     // When the local entry does win provider selection, its pair applies.
     let unstamped =
-        super::super::agent_tuning_plan(None, None, None, Some(&preference), Some(&agent));
+        super::super::agent_tuning_plan(None, None, None, None, Some(&preference), Some(&agent));
     assert_eq!(
         unstamped.model_for(AgentProvider::Claude).as_deref(),
         Some("opus"),
@@ -1128,7 +1136,7 @@ fn model_resolution_skips_layers_written_for_another_provider() {
         effort: Some("xhigh".to_string()),
     };
     let ordered =
-        super::super::agent_tuning_plan(None, None, None, Some(&ordered_preference), None);
+        super::super::agent_tuning_plan(None, None, None, None, Some(&ordered_preference), None);
     assert_eq!(
         ordered.model_for(AgentProvider::Claude).as_deref(),
         Some("opus")
@@ -1161,7 +1169,7 @@ fn model_resolution_skips_layers_written_for_another_provider() {
         visibility: DefinitionVisibility::Public,
     };
     let ordered_agent_plan =
-        super::super::agent_tuning_plan(None, None, None, None, Some(&ordered_agent));
+        super::super::agent_tuning_plan(None, None, None, None, None, Some(&ordered_agent));
     assert_eq!(
         ordered_agent_plan
             .model_for(AgentProvider::Codex)
@@ -1176,6 +1184,7 @@ fn model_resolution_skips_layers_written_for_another_provider() {
         Some("codex,claude"),
         Some("gpt-5-codex".to_string()),
         Some("high".to_string()),
+        None,
         Some(&preference),
         Some(&agent),
     );
@@ -3150,6 +3159,150 @@ fn read_workflow_definition_rejects_legacy_csv_provider_selections() {
         assert!(
             error.contains("agent_provider"),
             "{location}: expected provider-specific error, got {error:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+}
+
+/// Workflow stage/post entries are compact provider selectors
+/// (`provider[-model[-effort]]`). Each selector carries its own coherent
+/// model/effort pair, so an ordered fallback list finally expresses what a
+/// single-model layer cannot: whichever candidate availability lands on runs
+/// with the values written beside it, not the leading candidate's.
+#[test]
+fn workflow_provider_selectors_supply_per_candidate_model_and_effort() {
+    let repo_root = init_git_repo_without_provider_fixtures("workflow-provider-selectors");
+    let workflow_dir = repo_root.join(".kanna/workflows");
+    std::fs::create_dir_all(&workflow_dir).unwrap();
+    std::fs::write(
+        workflow_dir.join("qa.json"),
+        serde_json::json!({
+            "name": "qa",
+            "stages": [{
+                "name": "in progress",
+                "transition": "manual",
+                "agent_provider": ["claude-fable-hi", "codex-astra-lo"],
+                "post": {
+                    "name": "commit",
+                    "agent_provider": "claude-haiku",
+                },
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish selector workflow");
+
+    let workflow = resolve_test_workflow_definition(&repo_root, "qa").unwrap();
+    let stage = &workflow.stages[0];
+    // Selectors keep their written form — snapshots round-trip verbatim.
+    assert_eq!(
+        stage.agent_provider.as_deref(),
+        Some(&["claude-fable-hi".to_string(), "codex-astra-lo".to_string()][..]),
+    );
+    assert_eq!(
+        stage
+            .post
+            .as_ref()
+            .and_then(|post| post.agent_provider.as_deref()),
+        Some(&["claude-haiku".to_string()][..]),
+    );
+
+    // Candidate resolution reads the provider part of each selector …
+    let stage_providers = stage.agent_provider.clone().unwrap();
+    assert_eq!(
+        resolve_agent_provider_with(None, Some(&stage_providers), None, None, None, |_| true)
+            .unwrap(),
+        AgentProvider::Claude,
+    );
+    assert_eq!(
+        resolve_agent_provider_with(None, Some(&stage_providers), None, None, None, |provider| {
+            provider == AgentProvider::Codex
+        })
+        .unwrap(),
+        AgentProvider::Codex,
+    );
+
+    // … and the tuning plan gives every candidate exactly its own pair.
+    let tuning =
+        super::super::agent_tuning_plan(None, None, None, Some(&stage_providers), None, None);
+    assert_eq!(
+        tuning.model_for(AgentProvider::Claude).as_deref(),
+        Some("fable")
+    );
+    assert_eq!(
+        tuning.effort_for(AgentProvider::Claude).as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        tuning.model_for(AgentProvider::Codex).as_deref(),
+        Some("astra")
+    );
+    assert_eq!(
+        tuning.effort_for(AgentProvider::Codex).as_deref(),
+        Some("low")
+    );
+    // A provider no selector names draws nothing from the stage layer.
+    assert_eq!(tuning.model_for(AgentProvider::Opencode), None);
+
+    // An explicit override (a run stamp) still outranks the stage selectors.
+    let stamped = super::super::agent_tuning_plan(
+        Some("claude"),
+        Some("stamped-model".to_string()),
+        Some("max".to_string()),
+        Some(&stage_providers),
+        None,
+        None,
+    );
+    assert_eq!(
+        stamped.model_for(AgentProvider::Claude).as_deref(),
+        Some("stamped-model")
+    );
+    assert_eq!(
+        stamped.effort_for(AgentProvider::Claude).as_deref(),
+        Some("max")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// A selector whose pair its own provider cannot take fails definition
+/// resolution naming the field, instead of surviving to fail at spawn.
+#[test]
+fn workflow_provider_selectors_reject_pairs_their_provider_cannot_take() {
+    let cases = [
+        // Antigravity has no model flag.
+        ("model-for-antigravity", "antigravity-gemini"),
+        // `max` is outside Antigravity's effort vocabulary.
+        ("effort-outside-vocabulary", "antigravity-max"),
+        // Empty trailing segment.
+        ("empty-segment", "claude-"),
+    ];
+    for (label, selector) in cases {
+        let repo_root =
+            init_git_repo_without_provider_fixtures(&format!("workflow-selector-{label}"));
+        let workflow_dir = repo_root.join(".kanna/workflows");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        std::fs::write(
+            workflow_dir.join("qa.json"),
+            serde_json::json!({
+                "name": "qa",
+                "stages": [{
+                    "name": "in progress",
+                    "transition": "manual",
+                    "agent_provider": selector,
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        publish_origin_main(&repo_root, "publish invalid selector workflow");
+
+        let error = resolve_test_workflow_definition(&repo_root, "qa")
+            .expect_err("invalid provider selector should fail definition resolution");
+        assert!(
+            error.contains("agent_provider"),
+            "{label}: expected selector-specific error, got {error:?}"
         );
         let _ = std::fs::remove_dir_all(&repo_root);
     }

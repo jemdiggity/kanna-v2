@@ -4,7 +4,7 @@ import type {
   WorkflowStage,
   WorkflowStagePolicy,
 } from "./workflow-types";
-import { isAgentProvider, type AgentProvider } from "../config/agent-providers";
+import { parseAgentProviderSelector } from "../config/agent-providers";
 
 function formatRawValue(value: unknown): string {
   if (value === undefined) {
@@ -23,7 +23,7 @@ function validationError(message: string): Error {
 function parseAgentProviderSelection(
   value: unknown,
   location: string,
-): AgentProvider | AgentProvider[] | undefined {
+): string | string[] | undefined {
   if (value === undefined) return undefined;
 
   const values = typeof value === "string"
@@ -36,15 +36,19 @@ function parseAgentProviderSelection(
     throw validationError(`${location} has an invalid agent_provider value`);
   }
 
-  const invalid = values.filter((provider) => !isAgentProvider(provider));
+  // Entries are compact provider selectors (`provider[-model[-effort]]`,
+  // e.g. `claude`, `codex-sol`, `claude-fable-hi`); they keep their written
+  // form — the server derives each candidate's model/effort at spawn time.
+  const invalid = values.filter(
+    (provider) => parseAgentProviderSelector(provider) === null,
+  );
   if (invalid.length > 0) {
     throw validationError(
       `${location} has unsupported agent_provider values: ${invalid.join(", ")}`,
     );
   }
 
-  const providers = values.filter(isAgentProvider);
-  return typeof value === "string" ? providers[0] : providers;
+  return typeof value === "string" ? values[0] : values;
 }
 
 function parseTransition(

@@ -151,6 +151,40 @@ describe("parseWorkflowJson", () => {
     expect(result.stages[0].agent_provider).toEqual(["codex", "claude"]);
   });
 
+  it("parses compact provider selectors on stages and posts", () => {
+    const json = JSON.stringify({
+      name: "My Workflow",
+      stages: [
+        {
+          name: "Stage 1",
+          transition: "auto",
+          agent_provider: ["claude-fable-hi", "codex-astra-lo"],
+          post: { name: "commit", agent_provider: "claude-haiku" },
+        },
+      ],
+    });
+    const result = parseWorkflowJson(json);
+    // Selectors keep their written form; the server derives each candidate's
+    // model/effort at spawn time.
+    expect(result.stages[0].agent_provider).toEqual([
+      "claude-fable-hi",
+      "codex-astra-lo",
+    ]);
+    expect(result.stages[0].post?.agent_provider).toBe("claude-haiku");
+  });
+
+  it("rejects a selector whose provider segment is unknown", () => {
+    const json = JSON.stringify({
+      name: "My Workflow",
+      stages: [
+        { name: "Stage 1", transition: "auto", agent_provider: "clod-fable" },
+      ],
+    });
+    expect(() => parseWorkflowJson(json)).toThrow(
+      /Stage "Stage 1" has unsupported agent_provider values: clod-fable/,
+    );
+  });
+
   it("rejects a stage agent_provider array containing non-strings", () => {
     const json = JSON.stringify({
       name: "My Workflow",
