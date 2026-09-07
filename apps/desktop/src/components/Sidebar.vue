@@ -9,6 +9,7 @@ import { computed, ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";
 import { taskSearchMatch } from "../utils/taskSearch";
+import { isTaskWorking, showsUnreadMark } from "../utils/taskActivityDisplay";
 import {
   groupedSidebarTaskItemsByStage,
   sidebarTaskSubtreeRows,
@@ -786,8 +787,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     v-else
                     class="item-title"
                     :style="{
-                      fontWeight: row.item.activity === 'unread' ? 'bold' : 'normal',
-                      fontStyle: row.item.activity === 'working' ? 'italic' : 'normal',
+                      fontWeight: showsUnreadMark(row.item) ? 'bold' : 'normal',
+                      fontStyle: isTaskWorking(row.item) ? 'italic' : 'normal',
                       textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
                       opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
                     }"
@@ -895,8 +896,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       v-else
                       class="item-title"
                       :style="{
-                        fontWeight: row.item.activity === 'unread' ? 'bold' : 'normal',
-                        fontStyle: row.item.activity === 'working' ? 'italic' : 'normal',
+                        fontWeight: showsUnreadMark(row.item) ? 'bold' : 'normal',
+                        fontStyle: isTaskWorking(row.item) ? 'italic' : 'normal',
                         textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
                         opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
                       }"
@@ -1019,8 +1020,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   v-else
                   class="item-title"
                   :style="{
-                    fontWeight: item.activity === 'unread' ? 'bold' : 'normal',
-                    fontStyle: item.activity === 'working' ? 'italic' : 'normal',
+                    fontWeight: showsUnreadMark(item) ? 'bold' : 'normal',
+                    fontStyle: isTaskWorking(item) ? 'italic' : 'normal',
                     textDecoration: isTaskTearingDown(item) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(item) ? 0.5 : 1,
                   }"

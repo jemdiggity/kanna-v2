@@ -133,7 +133,16 @@ impl Db {
                     task_transfer.target_peer_id,
                     task_transfer.source_desktop_id,
                     task_transfer.target_desktop_id,
-                    task_transfer.error
+                    task_transfer.error,
+                    -- The two dimensions the sidebar draws from. `activity`
+                    -- blends them and cannot answer either alone, so a cold
+                    -- snapshot that carried only `activity` left a reloaded
+                    -- window unable to tell a busy task from a finished one
+                    -- until the next live change arrived. `read_state` mirrors
+                    -- the server's own derivation so both surfaces agree.
+                    pipeline_item.runtime_status AS runtime_state,
+                    CASE WHEN pipeline_item.activity = 'unread'
+                         THEN 'unread' ELSE 'read' END AS read_state
              FROM pipeline_item
              LEFT JOIN task_transfer ON task_transfer.id = (
                SELECT candidate.id
@@ -218,6 +227,8 @@ impl Db {
                 transfer_source_desktop_id: row.get(44)?,
                 transfer_target_desktop_id: row.get(45)?,
                 transfer_error: row.get(46)?,
+                runtime_state: row.get(47)?,
+                read_state: row.get(48)?,
             })
         })?;
         rows.collect()
