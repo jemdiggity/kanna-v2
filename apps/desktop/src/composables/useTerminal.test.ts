@@ -3451,22 +3451,41 @@ describe("useTerminal", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(attachCount).toBe(2);
 
+    const expectVisibleRetryState = (retrySeconds: number, writeCount: number) => {
+      const writes = terminals[0]?.write.mock.calls.filter(
+        ([data]) => typeof data === "string" && data.includes("Failed to reconnect"),
+      ) ?? [];
+      expect(writes).toHaveLength(writeCount);
+      expect(writes.at(-1)?.[0]).toContain(`Retrying in ${retrySeconds}s`);
+      if (writeCount > 1) {
+        expect(writes.at(-1)?.[0]).toMatch(/^\x1b\[1A\r\x1b\[2K/);
+        expect(writes.at(-1)?.[0]).not.toMatch(/^\r\n/);
+      }
+    };
+    expectVisibleRetryState(2, 2);
+
     // The duplicate callbacks above produced no doomed attach or resize and
     // did not inflate this second backoff interval.
     expect(client.sendTermResize).toHaveBeenCalledTimes(initialResizeCount);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(attachCount).toBe(3);
+    expectVisibleRetryState(4, 3);
     expect(client.sendTermResize).toHaveBeenCalledTimes(initialResizeCount);
     await vi.advanceTimersByTimeAsync(4_000);
     expect(attachCount).toBe(4);
+    expectVisibleRetryState(8, 4);
     await vi.advanceTimersByTimeAsync(8_000);
     expect(attachCount).toBe(5);
+    expectVisibleRetryState(16, 5);
     await vi.advanceTimersByTimeAsync(16_000);
     expect(attachCount).toBe(6);
+    expectVisibleRetryState(30, 6);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(attachCount).toBe(7);
+    expectVisibleRetryState(30, 7);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(attachCount).toBe(8);
+    expectVisibleRetryState(30, 7);
     await vi.advanceTimersByTimeAsync(3_000);
     expect(setTimeoutSpy.mock.calls.map(([, delay]) => delay)).toEqual(
       expect.arrayContaining([1_000, 2_000, 4_000, 8_000, 16_000, 30_000]),

@@ -96,10 +96,13 @@ export function createTerminalSessionLifecycle(params: {
     if (params.state.attachRetryTimer || params.state.paused || params.state.disposed) return
     const delayMs = Math.min(1_000 * 2 ** params.state.attachRetryAttempt, 30_000)
     params.state.attachRetryAttempt += 1
-    if (params.state.attachFailureMessage !== message) {
-      params.terminal.value?.write(formatAttachFailureMessage(message, delayMs / 1_000))
-      params.state.attachFailureMessage = message
-    }
+    const formattedMessage = formatAttachFailureMessage(message, delayMs / 1_000)
+    params.terminal.value?.write(
+      params.state.attachFailureMessage === null
+        ? formattedMessage
+        : `\x1b[1A\r\x1b[2K${formattedMessage.slice(2)}`,
+    )
+    params.state.attachFailureMessage = message
     params.state.attachRetryTimer = setTimeout(() => {
       params.state.attachRetryTimer = null
       if (params.state.paused || params.state.disposed) return
