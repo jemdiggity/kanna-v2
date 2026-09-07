@@ -955,35 +955,20 @@ export class StreamClient {
         }
         // Re-attach everything we track, resuming agent streams from the
         // last seen seq, then flush queued frames.
+        if (this.supportsCapability("terminal_geometry")) {
+          for (const [taskId, registration] of this.terminalViewerRegistrations) {
+            if (registration.flushTimer !== undefined) {
+              clearTimeout(registration.flushTimer);
+              registration.flushTimer = undefined;
+            }
+            this.sendTerminalViewerRegistration(registration, taskId);
+          }
+        }
         for (const [key, attachment] of this.attachments) {
           const { taskId, kind } = parseAttachmentKey(key);
           if (attachment.kind === "companion" && !this.supports("companion")) {
             attachment.handlers.onUnavailable();
             continue;
-          }
-          if (kind === "terminal") {
-            const registration = this.terminalViewerRegistrations.get(taskId);
-            if (
-              registration &&
-              this.supportsCapability("terminal_geometry")
-            ) {
-              if (registration.flushTimer !== undefined) {
-                clearTimeout(registration.flushTimer);
-                registration.flushTimer = undefined;
-              }
-              this.rawSend({
-                type: "term_viewer_register",
-                task_id: taskId,
-                viewer_id: registration.viewerId,
-                role: registration.role,
-                generation: registration.generation,
-                cols: registration.cols,
-                rows: registration.rows,
-                visible: registration.visible,
-              });
-              registration.sentCols = registration.cols;
-              registration.sentRows = registration.rows;
-            }
           }
           const sent = this.rawSend({
             type: "attach",

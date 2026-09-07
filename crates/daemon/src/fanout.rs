@@ -280,15 +280,6 @@ impl FanoutState {
         report
     }
 
-    /// Publish an authoritative geometry snapshot only to rendered clients.
-    /// Passive observers derive task activity from output and must not treat a
-    /// resize-only snapshot as fresh agent work.
-    pub(crate) fn enqueue_attached(&mut self, line: &EventLine) -> EnqueueReport {
-        let mut report = EnqueueReport::default();
-        enqueue_to_list(&mut self.attached, line, self.budget, &mut report);
-        report
-    }
-
     /// True when at least one lagged subscriber has fully drained its
     /// backlog and awaits a snapshot resync.
     pub(crate) fn has_drained_lagged(&self) -> bool {

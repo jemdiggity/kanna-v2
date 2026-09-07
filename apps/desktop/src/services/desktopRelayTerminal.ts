@@ -251,7 +251,11 @@ export function createDesktopRelayTerminalClient({
       }
     },
     async resize(options) {
-      clientForDesktop(options.desktopId).sendTermResize(options.taskId, options.cols, options.rows);
+      clientForDesktop(options.desktopId).registerTerminalViewer(
+        options.taskId,
+        options.cols,
+        options.rows,
+      );
     },
     async closeTask(options) {
       const response = await clientForDesktop(options.desktopId).request(

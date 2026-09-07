@@ -16,8 +16,7 @@ use crate::client::{
 };
 use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::{
-    existing_session_fanout, session_fanout, EventLine, SessionFanout, SessionFanouts,
-    SubscriberKind,
+    existing_session_fanout, session_fanout, SessionFanout, SessionFanouts, SubscriberKind,
 };
 use crate::handoff::{blank_snapshot, handle_handoff};
 use crate::operator_auth::OperatorAuthorizer;

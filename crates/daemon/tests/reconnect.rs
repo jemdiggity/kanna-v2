@@ -108,6 +108,15 @@ enum Cmd {
         cols: u16,
         rows: u16,
     },
+    RegisterViewer {
+        session_id: String,
+        viewer_id: String,
+        role: TerminalViewerRole,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+        visible: bool,
+    },
     Snapshot {
         session_id: String,
     },
@@ -125,6 +134,14 @@ enum RawInputClass {
     Draft,
     Submission,
     Control,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalViewerRole {
+    Local,
+    Remote,
 }
 
 #[allow(dead_code)]
@@ -4083,10 +4100,14 @@ fn test_one_way_follower_resize_applies_without_attached_size_owner() {
     // Model the KSP close/reopen race where the pointer-derived writer id for
     // the new control socket is still present in the terminal-client set.
     attach_snapshot_and_capture(&mut follower, "sess-follower-resize");
-    follower.send(&Cmd::ResizeNoReply {
+    follower.send(&Cmd::RegisterViewer {
         session_id: "sess-follower-resize".to_string(),
+        viewer_id: "remote-follower".to_string(),
+        role: TerminalViewerRole::Remote,
+        generation: 1,
         cols: 80,
         rows: 48,
+        visible: true,
     });
 
     let snapshot = recv_snapshot(&mut follower, "sess-follower-resize");

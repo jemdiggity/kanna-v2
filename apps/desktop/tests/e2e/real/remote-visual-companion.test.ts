@@ -420,12 +420,10 @@ async function createFullscreenOwnerTask(options: {
   // its first local registration is measured from the wide layout.
   await primary.setWindowRect({ width: 2200, height: 1200, x: 40, y: 40 });
   const { baseUrl } = await resolveAppKannaServer(primary);
-  const credential = await tauriInvoke(primary, "local_control_credential") as string;
-  const response = await fetch(`${baseUrl}/v1/tasks`, {
+  const response = await localProcessFetch(`${baseUrl}/v1/tasks`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${credential}`,
     },
     body: JSON.stringify({
       repoId: primaryRepoId,

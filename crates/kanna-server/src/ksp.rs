@@ -2793,7 +2793,7 @@ impl StreamConn {
         let control = self.create_terminal_control(task_id.to_string(), Some(session_id.clone()));
         if let Some((cols, rows)) = pending_resize {
             let replay_result = control
-                .tx
+                .queue
                 .try_send(TerminalControlCommand::Resize { cols, rows });
             log::info!(
                 "[ksp] replayed pre-attach resize (task={task_id}, session={session_id}, cols={cols}, rows={rows}, queued={})",
