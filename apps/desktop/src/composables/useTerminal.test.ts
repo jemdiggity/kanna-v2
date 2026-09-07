@@ -3391,4 +3391,40 @@ describe("useTerminal", () => {
     expect(forwardTerminalRuntimeStatusMock).toHaveBeenCalledWith("session-1", "busy");
     wrapper.unmount();
   });
+  it("renders one sticky failure while identical attach refusals repeat", async () => {
+    const { useTerminal } = await import("./useTerminal");
+    installKspStreamClient();
+    const TestHarness = defineComponent({
+      setup() {
+        const terminalApi = useTerminal("refused-session", undefined, {
+          agentProvider: "codex",
+          worktreePath: "/tmp/task",
+        });
+        return terminalApi;
+      },
+      render() { return h("div"); },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+    await wrapper.vm.startListening();
+
+    const refusal = "session requires authenticated operator input: refused-session";
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      terminalStreamHandlers.get("refused-session")?.onError?.("input_unauthorized", refusal);
+      await flushAsyncWork();
+    }
+
+    const failureWrites = terminals[0]?.write.mock.calls.filter(
+      ([data]) => typeof data === "string" && data.includes("Failed to reconnect"),
+    ) ?? [];
+    expect(failureWrites).toHaveLength(1);
+    expect(failureWrites[0]?.[0]).toContain("Retrying in 1s");
+    expect(failureWrites[0]?.[0]).toContain("reopen the task to retry now");
+    wrapper.vm.dispose();
+  });
 });

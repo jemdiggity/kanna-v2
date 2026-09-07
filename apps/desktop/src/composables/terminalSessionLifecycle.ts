@@ -79,8 +79,38 @@ export function createTerminalSessionLifecycle(params: {
   })
   let outputPerf: TerminalOutputPerfHandle | null = null
 
+  function clearAttachRetry(resetFailure: boolean): void {
+    if (params.state.attachRetryTimer) clearTimeout(params.state.attachRetryTimer)
+    params.state.attachRetryTimer = null
+    if (resetFailure) {
+      params.state.attachRetryAttempt = 0
+      params.state.attachFailureMessage = null
+    }
+  }
+
+  function reportAttachFailure(message: string): void {
+    const delayMs = Math.min(1_000 * 2 ** params.state.attachRetryAttempt, 30_000)
+    params.state.attachRetryAttempt += 1
+    if (params.state.attachFailureMessage !== message) {
+      params.terminal.value?.write(formatAttachFailureMessage(message, delayMs / 1_000))
+      params.state.attachFailureMessage = message
+    }
+    if (params.state.attachRetryTimer || params.state.paused || params.state.disposed) return
+    params.state.attachRetryTimer = setTimeout(() => {
+      params.state.attachRetryTimer = null
+      if (params.state.paused || params.state.disposed) return
+      void connectSession().catch((error) =>
+        console.error("[terminal] backed-off re-attach failed:", error)
+      )
+    }, delayMs)
+  }
+
   async function connectSession() {
     if (params.state.paused) return
+    // Every recovery signal funnels through the same timer once an attach has
+    // been refused. This prevents daemon-ready, stream-lost, and shared-stream
+    // events from bypassing the backoff and repeating the same doomed resize.
+    if (params.state.attachRetryTimer) return
     if (params.state.sessionExited) {
       console.warn("[terminal][connect] skip: session exited", {
         sessionId: params.sessionId,
@@ -215,6 +245,7 @@ export function createTerminalSessionLifecycle(params: {
       params.state.attached = true
       params.state.hasAttachedOnce = true
       params.state.sessionExited = false
+      clearAttachRetry(false)
     } catch (e) {
       const msg = getAppErrorMessage(e)
       console.warn("[terminal][connect] attach:error", {
@@ -225,7 +256,7 @@ export function createTerminalSessionLifecycle(params: {
       if (isMissingDaemonSessionFailure(e) && getTerminalRecoveryMode(params.spawnOptions, params.options) === "spawn-on-missing") {
         params.state.terminalStreamAttached = false
       }
-      params.terminal.value?.write(formatAttachFailureMessage(msg))
+      reportAttachFailure(msg)
     } finally {
       params.state.connecting = false
       console.warn("[terminal][connect] end", {
@@ -246,6 +277,7 @@ export function createTerminalSessionLifecycle(params: {
           params.state.attached = false
           params.state.terminalStreamAttached = false
           params.state.resetTerminalOnNextSnapshot = true
+          clearAttachRetry(true)
           void connectSession().catch((e) =>
             console.error("[terminal] deferred session_created re-attach failed:", e)
           )
@@ -302,11 +334,11 @@ export function createTerminalSessionLifecycle(params: {
     const recoveryState = await loadSessionRecoveryState(params.sessionId).catch(() => null)
     const hasRecoveryState = Boolean(recoveryState?.serialized)
     if (!shouldRespawnAfterAttachFailure(normalizedError, params.state.hasAttachedOnce, hasRecoveryState, params.spawnOptions, params.options)) {
-      params.terminal.value?.write(
-        isMissingDaemonSessionFailure(normalizedError) && getTerminalRecoveryMode(params.spawnOptions, params.options) === "attach-only"
-          ? formatMissingInitialTaskSessionMessage()
-          : formatAttachFailureMessage(normalizedError.message)
-      )
+      if (isMissingDaemonSessionFailure(normalizedError) && getTerminalRecoveryMode(params.spawnOptions, params.options) === "attach-only") {
+        params.terminal.value?.write(formatMissingInitialTaskSessionMessage())
+      } else {
+        reportAttachFailure(normalizedError.message)
+      }
       return
     }
 
@@ -433,6 +465,7 @@ export function createTerminalSessionLifecycle(params: {
           // dead incarnation's content, whatever the provider's ordinary
           // reconnect behavior is (see TerminalRuntimeState).
           params.state.resetTerminalOnNextSnapshot = true
+          clearAttachRetry(true)
           connectSession().catch((e) =>
             console.error("[terminal] session_created re-attach failed:", e)
           )
@@ -521,7 +554,7 @@ export function createTerminalSessionLifecycle(params: {
         }
         params.state.attached = true
         const liveTerminal = getLiveTerminal()
-        if (!liveTerminal || params.state.connecting) return
+        if (!liveTerminal || params.state.connecting || params.state.attachFailureMessage) return
         params.layout.fit()
         void params.layout.resizeLiveSession(liveTerminal.cols, liveTerminal.rows, shouldForceDoubleResizeOnReconnect(params.options))
       })
@@ -543,6 +576,7 @@ export function createTerminalSessionLifecycle(params: {
     params.state.attached = false
     params.state.terminalStreamAttached = false
     params.state.connecting = false
+    clearAttachRetry(true)
     if (shouldDetach) {
       params.state.streamClient?.detach(params.sessionId, "terminal")
     }
@@ -592,6 +626,10 @@ export function createTerminalSessionLifecycle(params: {
    *  If the session is dead, re-attach or re-spawn. */
   async function redraw() {
     if (!params.terminal.value) return
+    if (params.state.attachFailureMessage) {
+      await connectSession()
+      return
+    }
     params.layout.fit()
     // Try resize; if it fails, the session is dead, so re-run startListening.
     try {
@@ -609,6 +647,10 @@ export function createTerminalSessionLifecycle(params: {
    *  attached. If the daemon restarted while it was hidden, reconnect on demand. */
   async function ensureConnected() {
     if (!params.terminal.value) return
+    if (params.state.attachFailureMessage) {
+      await connectSession()
+      return
+    }
     if (getTerminalRecoveryMode(params.spawnOptions, params.options) === "attach-only") {
       await reconcileStaleExitLatch()
       await connectSession()
@@ -626,6 +668,7 @@ export function createTerminalSessionLifecycle(params: {
   }
 
   function dispose() {
+    clearAttachRetry(true)
     outputPerf?.dispose()
     outputPerf = null
     disposal.dispose()

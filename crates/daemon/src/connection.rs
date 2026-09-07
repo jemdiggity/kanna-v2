@@ -264,7 +264,26 @@ pub(crate) async fn handle_connection(
                     .negotiate_protected_input(raw_fd, version)
                     .await
                 {
-                    Ok(()) => Event::ProtectedInputReady { version },
+                    Ok(()) => {
+                        // The authenticated server generation is the authority
+                        // that clears the fail-closed policy inherited from a
+                        // legacy handoff. Do this at negotiation as well as via
+                        // explicit ClassifyInput replay so a transient replay
+                        // refusal cannot strand a fenced session forever.
+                        let handles = sessions.lock().await.handles();
+                        let mut reclassified = 0;
+                        for (_, session) in handles {
+                            if session.reclassify_inherited_input().await {
+                                reclassified += 1;
+                            }
+                        }
+                        if reclassified > 0 {
+                            log::info!(
+                                "[protected-input] authenticated generation reclassified {reclassified} inherited session(s)"
+                            );
+                        }
+                        Event::ProtectedInputReady { version }
+                    }
                     Err(message) => error_event(
                         Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
                         message,

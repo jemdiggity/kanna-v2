@@ -172,8 +172,11 @@ export function buildTaskShellCommand(
   return commandParts.join(" && ");
 }
 
-export function formatAttachFailureMessage(message: string): string {
-  return `\r\n\x1b[31mFailed to reconnect to existing session: ${message}\x1b[0m\r\n`;
+export function formatAttachFailureMessage(message: string, retrySeconds?: number): string {
+  const retry = retrySeconds == null
+    ? ""
+    : ` Retrying in ${retrySeconds}s; reopen the task to retry now.`;
+  return `\r\n\x1b[31mFailed to reconnect to existing session: ${message}${retry}\x1b[0m\r\n`;
 }
 
 export function formatMissingInitialTaskSessionMessage(): string {

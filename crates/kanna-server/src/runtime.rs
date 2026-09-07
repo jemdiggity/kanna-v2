@@ -6,7 +6,7 @@ async fn prepare_daemon_generation(
 ) -> Result<u32, String> {
     let connected_pid = daemon.connected_pid();
     daemon.negotiate_protected_input().await?;
-    classify_sessions_on_connected_daemon(daemon).await?;
+    classify_sessions_on_connected_daemon(daemon).await;
     Ok(connected_pid)
 }
 
@@ -118,23 +118,19 @@ async fn maintain_protected_input_generations(
     }
 }
 
-async fn classify_sessions_on_connected_daemon(
-    daemon: &mut crate::daemon_client::DaemonClient,
-) -> Result<(), String> {
+async fn classify_sessions_on_connected_daemon(daemon: &mut crate::daemon_client::DaemonClient) {
     let sessions = match daemon
         .send_command(&kanna_daemon::protocol::Command::List)
         .await
     {
         Ok(kanna_daemon::protocol::Event::SessionList { sessions }) => sessions,
         Ok(event) => {
-            return Err(format!(
-                "failed to list daemon sessions for input classification: {event:?}"
-            ));
+            log::error!("failed to list daemon sessions for input classification: {event:?}");
+            return;
         }
         Err(error) => {
-            return Err(format!(
-                "failed to list daemon sessions for input classification: {error}"
-            ));
+            log::error!("failed to list daemon sessions for input classification: {error}");
+            return;
         }
     };
     for session in sessions {
@@ -158,19 +154,16 @@ async fn classify_sessions_on_connected_daemon(
                 code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
                 ..
             }) => {}
-            Ok(event) => {
-                return Err(format!(
-                    "daemon refused input classification for session {session_id}: {event:?}"
-                ))
-            }
+            Ok(event) => log::error!(
+                "daemon refused input classification for session {session_id}; it remains fenced until the next authenticated generation retries it: {event:?}"
+            ),
             Err(error) => {
-                return Err(format!(
-                    "failed to classify existing session {session_id}: {error}"
-                ));
+                log::error!(
+                    "failed to classify existing session {session_id}; it remains fenced until the next authenticated generation retries it: {error}"
+                );
             }
         }
     }
-    Ok(())
 }
 
 async fn run_human_control_service(state: Arc<http_api::AppState>) {
@@ -297,19 +290,20 @@ mod tests {
     async fn serve_generation_replay(
         listener: UnixListener,
         sessions: Vec<kanna_daemon::protocol::SessionInfo>,
-        classify_response: kanna_daemon::protocol::Event,
+        classify_responses: Vec<kanna_daemon::protocol::Event>,
     ) -> Vec<kanna_daemon::protocol::Command> {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(read);
         let mut commands = Vec::new();
-        for response in [
+        let mut responses = vec![
             kanna_daemon::protocol::Event::ProtectedInputReady {
                 version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
             },
             kanna_daemon::protocol::Event::SessionList { sessions },
-            classify_response,
-        ] {
+        ];
+        responses.extend(classify_responses);
+        for response in responses {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             commands.push(serde_json::from_str(line.trim()).unwrap());
@@ -336,7 +330,7 @@ mod tests {
                     kanna_daemon::protocol::SessionKind::Agent,
                 ),
             ],
-            kanna_daemon::protocol::Event::Ok,
+            vec![kanna_daemon::protocol::Event::Ok],
         ));
         let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir)
             .await
@@ -371,10 +365,10 @@ mod tests {
                 "short-lived-pty",
                 kanna_daemon::protocol::SessionKind::Pty,
             )],
-            kanna_daemon::protocol::Event::Error {
+            vec![kanna_daemon::protocol::Event::Error {
                 code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
                 message: "session exited after inventory".to_string(),
-            },
+            }],
         ));
         let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir)
             .await
@@ -392,6 +386,48 @@ mod tests {
             Some(kanna_daemon::protocol::Command::ClassifyInput { session_id, .. })
                 if session_id == "short-lived-pty"
         ));
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn generation_readiness_continues_after_mid_list_refusal() {
+        let daemon_dir = unique_path("refused-generation-replay", "dir");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(serve_generation_replay(
+            listener,
+            vec![
+                listed_session("first-pty", kanna_daemon::protocol::SessionKind::Pty),
+                listed_session("refused-pty", kanna_daemon::protocol::SessionKind::Pty),
+                listed_session("last-pty", kanna_daemon::protocol::SessionKind::Pty),
+            ],
+            vec![
+                kanna_daemon::protocol::Event::Ok,
+                kanna_daemon::protocol::Event::Error {
+                    code: Some(kanna_daemon::protocol::ErrorCode::InputUnauthorized),
+                    message: "temporary classification refusal".to_string(),
+                },
+                kanna_daemon::protocol::Event::Ok,
+            ],
+        ));
+        let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir)
+            .await
+            .unwrap();
+
+        super::prepare_daemon_generation(&mut daemon).await.unwrap();
+
+        let commands = server.await.unwrap();
+        let classified: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                kanna_daemon::protocol::Command::ClassifyInput { session_id, .. } => {
+                    Some(session_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(classified, ["first-pty", "refused-pty", "last-pty"]);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
