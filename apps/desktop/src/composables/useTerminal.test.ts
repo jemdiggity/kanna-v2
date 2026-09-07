@@ -369,6 +369,7 @@ describe("useTerminal", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     const { resetTerminalOutputSubscriptionsForTests } = await import("./useTerminal");
     resetTerminalOutputSubscriptionsForTests();
     streamClientMock.getSharedStreamClient.mockReset();
@@ -3391,16 +3392,31 @@ describe("useTerminal", () => {
     expect(forwardTerminalRuntimeStatusMock).toHaveBeenCalledWith("session-1", "busy");
     wrapper.unmount();
   });
-  it("renders one sticky failure while identical attach refusals repeat", async () => {
+  it("backs off repeated attach refusals once per interval and resets after recovery", async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     const { useTerminal } = await import("./useTerminal");
-    installKspStreamClient();
+    const refusal = "session requires authenticated operator input: refused-session";
+    let attachCount = 0;
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        attachCount += 1;
+        if (attachCount <= 7) {
+          throw new AppError(refusal, "input_unauthorized");
+        }
+      },
+    });
     const TestHarness = defineComponent({
       setup() {
         const terminalApi = useTerminal("refused-session", undefined, {
           agentProvider: "codex",
           worktreePath: "/tmp/task",
         });
-        return terminalApi;
+        return {
+          ...terminalApi,
+          redraw: terminalApi.redraw,
+          ensureConnected: terminalApi.ensureConnected,
+        };
       },
       render() { return h("div"); },
     });
@@ -3413,10 +3429,10 @@ describe("useTerminal", () => {
     wrapper.vm.init(terminalElement);
     await wrapper.vm.startListening();
 
-    const refusal = "session requires authenticated operator input: refused-session";
     for (let attempt = 0; attempt < 4; attempt += 1) {
       terminalStreamHandlers.get("refused-session")?.onError?.("input_unauthorized", refusal);
-      await flushAsyncWork();
+      await Promise.resolve();
+      await Promise.resolve();
     }
 
     const failureWrites = terminals[0]?.write.mock.calls.filter(
@@ -3425,6 +3441,61 @@ describe("useTerminal", () => {
     expect(failureWrites).toHaveLength(1);
     expect(failureWrites[0]?.[0]).toContain("Retrying in 1s");
     expect(failureWrites[0]?.[0]).toContain("reopen the task to retry now");
+
+    const initialResizeCount = client.sendTermResize.mock.calls.length;
+    expect(attachCount).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(attachCount).toBe(1);
+    expect(client.sendTermResize).toHaveBeenCalledTimes(initialResizeCount);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attachCount).toBe(2);
+
+    // The duplicate callbacks above produced no doomed attach or resize and
+    // did not inflate this second backoff interval.
+    expect(client.sendTermResize).toHaveBeenCalledTimes(initialResizeCount);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(attachCount).toBe(3);
+    expect(client.sendTermResize).toHaveBeenCalledTimes(initialResizeCount);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(attachCount).toBe(4);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(attachCount).toBe(5);
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(attachCount).toBe(6);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(attachCount).toBe(7);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(attachCount).toBe(8);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(setTimeoutSpy.mock.calls.map(([, delay]) => delay)).toEqual(
+      expect.arrayContaining([1_000, 2_000, 4_000, 8_000, 16_000, 30_000]),
+    );
+    expect(setTimeoutSpy.mock.calls.filter(([, delay]) => delay === 30_000)).toHaveLength(2);
+
+    // Successful attach/resize clears both the visible latch and the retry
+    // attempt. Ordinary redraw, explicit reconnect checks, and shared-stream
+    // resize all resume after recovery.
+    const resizeCountAfterRecovery = client.sendTermResize.mock.calls.length;
+    await wrapper.vm.redraw();
+    await wrapper.vm.ensureConnected();
+    const connectionListener = streamClientMock.onSharedStreamConnectionChange.mock.calls[0]?.[0] as
+      | ((connected: boolean) => void)
+      | undefined;
+    connectionListener?.(true);
+    await Promise.resolve();
+    expect(client.sendTermResize.mock.calls.length).toBeGreaterThan(resizeCountAfterRecovery);
+
+    terminalStreamHandlers.get("refused-session")?.onError?.("input_unauthorized", refusal);
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(attachCount).toBe(8);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attachCount).toBe(9);
+    expect(setTimeoutSpy.mock.calls.filter(([, delay]) => delay === 1_000)).toHaveLength(2);
+
     wrapper.vm.dispose();
+    vi.useRealTimers();
   });
 });

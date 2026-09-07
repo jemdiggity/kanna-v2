@@ -78,6 +78,7 @@ export function createTerminalSessionLifecycle(params: {
     layout: params.layout,
   })
   let outputPerf: TerminalOutputPerfHandle | null = null
+  let attachFailureSignal = 0
 
   function clearAttachRetry(resetFailure: boolean): void {
     if (params.state.attachRetryTimer) clearTimeout(params.state.attachRetryTimer)
@@ -89,13 +90,16 @@ export function createTerminalSessionLifecycle(params: {
   }
 
   function reportAttachFailure(message: string): void {
+    // Several recovery signals can report the same refusal before the pending
+    // retry fires. They all belong to that one attempt and must not advance
+    // the exponential backoff independently.
+    if (params.state.attachRetryTimer || params.state.paused || params.state.disposed) return
     const delayMs = Math.min(1_000 * 2 ** params.state.attachRetryAttempt, 30_000)
     params.state.attachRetryAttempt += 1
     if (params.state.attachFailureMessage !== message) {
       params.terminal.value?.write(formatAttachFailureMessage(message, delayMs / 1_000))
       params.state.attachFailureMessage = message
     }
-    if (params.state.attachRetryTimer || params.state.paused || params.state.disposed) return
     params.state.attachRetryTimer = setTimeout(() => {
       params.state.attachRetryTimer = null
       if (params.state.paused || params.state.disposed) return
@@ -120,6 +124,7 @@ export function createTerminalSessionLifecycle(params: {
     }
     if (shouldSkipReconnect(params.state.connecting, params.state.attached)) return
     const generation = params.state.connectionGeneration
+    const failureSignalAtStart = attachFailureSignal
     params.state.connecting = true
     params.state.connectSpawnedSession = false
     const shouldApplyReconnectEffects = params.state.hasAttachedOnce
@@ -213,6 +218,12 @@ export function createTerminalSessionLifecycle(params: {
         params.state.terminalStreamAttached = true
       }
 
+      // A structured refusal can arrive while attachTerminal registers the
+      // stream. Leave its failure handler and timer in charge; applying the
+      // reconnect redraw/resize here would be both doomed and capable of
+      // outliving the pending backoff interval.
+      if (attachFailureSignal !== failureSignalAtStart) return
+
       console.warn("[terminal][connect] attach:ok", {
         sessionId: params.sessionId,
         instanceId: params.instanceId,
@@ -245,7 +256,9 @@ export function createTerminalSessionLifecycle(params: {
       params.state.attached = true
       params.state.hasAttachedOnce = true
       params.state.sessionExited = false
-      clearAttachRetry(false)
+      if (attachFailureSignal === failureSignalAtStart) {
+        clearAttachRetry(true)
+      }
     } catch (e) {
       const msg = getAppErrorMessage(e)
       console.warn("[terminal][connect] attach:error", {
@@ -323,6 +336,7 @@ export function createTerminalSessionLifecycle(params: {
   }
 
   async function handleAttachError(error: { code?: string; message: string }) {
+    attachFailureSignal += 1
     if (params.state.respawningAfterAttachFailure) return
     const normalizedError = {
       ...error,
