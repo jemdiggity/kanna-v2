@@ -874,6 +874,12 @@ pub(crate) enum MachineCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Report resource stats for this machine and reachable siblings
+    Stats {
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// List the machines a task can be moved to or from, with the route each
     /// one currently has
     TransferPeers {

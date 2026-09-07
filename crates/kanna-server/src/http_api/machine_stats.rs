@@ -2,10 +2,14 @@ use super::state::AppState;
 use crate::db::Db;
 use axum::extract::{Query, State};
 use axum::Json;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+const REMOTE_STATS_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,19 +72,33 @@ pub(super) async fn machine_stats(
     let mut machine_errors = Vec::new();
     match state.list_active_relay_desktops().await {
         Ok(machine_ids) => {
+            let mut requests = FuturesUnordered::new();
             for machine_id in machine_ids {
                 if machine_id == state.config.desktop_id {
                     continue;
                 }
-                match state
-                    .invoke_relay_desktop(
-                        machine_id.clone(),
-                        "GET".to_string(),
-                        "/v1/machine-stats?localOnly=true".to_string(),
-                        serde_json::Value::Null,
+                let state = Arc::clone(&state);
+                requests.push(async move {
+                    let result = tokio::time::timeout(
+                        REMOTE_STATS_TIMEOUT,
+                        state.invoke_relay_desktop(
+                            machine_id.clone(),
+                            "GET".to_string(),
+                            "/v1/machine-stats?localOnly=true".to_string(),
+                            serde_json::Value::Null,
+                        ),
                     )
-                    .await
-                {
+                    .await;
+                    (machine_id, result)
+                });
+            }
+            while let Some((machine_id, result)) = requests.next().await {
+                match result {
+                    Err(_) => machine_errors.push(serde_json::json!({
+                        "machineId": machine_id,
+                        "error": "machine-stats request timed out",
+                    })),
+                    Ok(result) => match result {
                     Ok(response) if response.status == 200 => match response.body {
                         Some(body) => match serde_json::from_value::<MachineStatsResponse>(body) {
                             Ok(mut remote) => machines.append(&mut remote.machines),
@@ -102,6 +120,7 @@ pub(super) async fn machine_stats(
                         "machineId": machine_id,
                         "error": error,
                     })),
+                    },
                 }
             }
         }
@@ -177,15 +196,11 @@ fn heavy_process_kind(process: &sysinfo::Process) -> Option<&'static str> {
         .iter()
         .map(|part| part.to_string_lossy().to_ascii_lowercase())
         .collect::<Vec<_>>();
-    let argument_names = arguments
-        .iter()
-        .map(|argument| {
-            std::path::Path::new(argument)
-                .file_name()
-                .and_then(|part| part.to_str())
-                .unwrap_or(argument)
-        })
-        .collect::<Vec<_>>();
+    let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    heavy_process_kind_from_command(&name, &arguments)
+}
+
+fn heavy_process_kind_from_command(name: &str, arguments: &[&str]) -> Option<&'static str> {
     if name == "rustc" {
         Some("rustc")
     } else if name == "cargo" {
@@ -201,7 +216,7 @@ fn heavy_process_kind(process: &sysinfo::Process) -> Option<&'static str> {
         Some("vitest")
     } else if name == "xcodebuild" {
         Some("xcodebuild")
-    } else if name == "node" && is_node_test_runner(&argument_names) {
+    } else if name == "node" && is_node_test_runner(arguments) {
         Some("nodeTestRunner")
     } else {
         None
@@ -210,10 +225,13 @@ fn heavy_process_kind(process: &sysinfo::Process) -> Option<&'static str> {
 
 fn is_node_test_runner(arguments: &[&str]) -> bool {
     arguments.iter().any(|argument| {
-        matches!(*argument, "jest" | "mocha" | "ava" | "tap") || *argument == "--test"
-    }) || arguments
-        .windows(2)
-        .any(|pair| pair[0] == "playwright" && pair[1] == "test")
+        *argument == "--test"
+            || ["jest", "mocha", "ava", "tap"]
+                .iter()
+                .any(|tool| tool_argument(argument, tool))
+    }) || arguments.iter().enumerate().any(|(index, argument)| {
+        tool_argument(argument, "playwright") && arguments[index + 1..].contains(&"test")
+    })
 }
 
 fn tool_argument(argument: &str, tool: &str) -> bool {
@@ -260,4 +278,64 @@ fn internal_error(error: impl std::fmt::Display) -> (axum::http::StatusCode, Str
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         format!("machine stats error: {error}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::heavy_process_kind_from_command;
+
+    #[test]
+    fn classifies_node_test_runner_command_shapes() {
+        let cases = [
+            (
+                "jest",
+                vec!["node", "node_modules/jest/bin/jest.js"],
+                Some("nodeTestRunner"),
+            ),
+            (
+                "mocha",
+                vec!["node", "node_modules/mocha/bin/mocha.js"],
+                Some("nodeTestRunner"),
+            ),
+            (
+                "ava",
+                vec!["node", "node_modules/ava/entrypoints/cli.mjs"],
+                Some("nodeTestRunner"),
+            ),
+            (
+                "tap",
+                vec!["node", "node_modules/tap/bin/run.js"],
+                Some("nodeTestRunner"),
+            ),
+            (
+                "node test",
+                vec!["node", "--test", "test/unit.js"],
+                Some("nodeTestRunner"),
+            ),
+            (
+                "playwright",
+                vec!["node", "node_modules/playwright/cli.js", "test"],
+                Some("nodeTestRunner"),
+            ),
+            (
+                "vitest",
+                vec!["node", "node_modules/vitest/vitest.mjs", "run"],
+                Some("vitest"),
+            ),
+            ("application", vec!["node", "server.js"], None),
+            (
+                "playwright browser",
+                vec!["node", "node_modules/playwright/cli.js", "install"],
+                None,
+            ),
+        ];
+
+        for (label, arguments, expected) in cases {
+            assert_eq!(
+                heavy_process_kind_from_command("node", &arguments),
+                expected,
+                "{label}"
+            );
+        }
+    }
 }

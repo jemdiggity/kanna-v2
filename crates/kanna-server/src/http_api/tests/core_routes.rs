@@ -507,7 +507,7 @@ async fn machine_stats_route_returns_sane_local_native_stats() {
 }
 
 #[tokio::test]
-async fn machine_stats_route_aggregates_siblings_and_reports_peer_errors() {
+async fn machine_stats_route_keeps_successful_siblings_when_another_times_out() {
     let state = super::test_state_with_seed("desktop-local", "Local Mac", |_| {});
     let mut requests = state.take_desktop_relay_requests().unwrap();
     state.set_desktop_routing_available(true);
@@ -520,75 +520,77 @@ async fn machine_stats_route_aggregates_siblings_and_reports_peer_errors() {
         response
             .send(Ok(vec![
                 "desktop-local".to_string(),
+                "desktop-hung".to_string(),
                 "desktop-remote".to_string(),
-                "desktop-offline".to_string(),
             ]))
             .unwrap();
 
-        let super::super::state::DesktopRelayRequest::Invoke {
-            desktop_id,
-            path,
-            response,
-            ..
-        } = requests.recv().await.expect("remote stats request")
-        else {
-            panic!("expected remote stats request");
-        };
-        assert_eq!(desktop_id, "desktop-remote");
-        assert_eq!(path, "/v1/machine-stats?localOnly=true");
-        response
-            .send(Ok(crate::http_api::HttpInvokeResponse {
-                status: 200,
-                body: Some(serde_json::json!({
-                    "machines": [{
-                        "machineId": "desktop-remote",
-                        "loadAverages": { "one": 1.0, "five": 2.0, "fifteen": 3.0 },
-                        "cpuCoreCount": 8,
-                        "memory": {
-                            "totalBytes": 16000000000_u64,
-                            "usedBytes": 8000000000_u64,
-                            "freeBytes": 2000000000_u64,
-                            "availableBytes": 8000000000_u64
-                        },
-                        "heavyProcessCount": 2,
-                        "heavyProcesses": {
-                            "bazel": 0, "cargo": 1, "nodeTestRunner": 0,
-                            "rustc": 1, "vitest": 0, "xcodebuild": 0
-                        },
-                        "busyTaskCount": 1
-                    }],
-                    "machineErrors": []
-                })),
-                error: None,
-            }))
-            .unwrap();
-
-        let super::super::state::DesktopRelayRequest::Invoke {
-            desktop_id,
-            response,
-            ..
-        } = requests.recv().await.expect("offline stats request")
-        else {
-            panic!("expected offline stats request");
-        };
-        assert_eq!(desktop_id, "desktop-offline");
-        response.send(Err("peer unavailable".to_string())).unwrap();
+        let mut _hung_response = None;
+        for _ in 0..2 {
+            let super::super::state::DesktopRelayRequest::Invoke {
+                desktop_id,
+                path,
+                response,
+                ..
+            } = requests.recv().await.expect("remote stats request")
+            else {
+                panic!("expected remote stats request");
+            };
+            assert_eq!(path, "/v1/machine-stats?localOnly=true");
+            if desktop_id == "desktop-hung" {
+                _hung_response = Some(response);
+                continue;
+            }
+            assert_eq!(desktop_id, "desktop-remote");
+            response
+                .send(Ok(crate::http_api::HttpInvokeResponse {
+                    status: 200,
+                    body: Some(serde_json::json!({
+                        "machines": [{
+                            "machineId": "desktop-remote",
+                            "loadAverages": { "one": 1.0, "five": 2.0, "fifteen": 3.0 },
+                            "cpuCoreCount": 8,
+                            "memory": {
+                                "totalBytes": 16000000000_u64,
+                                "usedBytes": 8000000000_u64,
+                                "freeBytes": 2000000000_u64,
+                                "availableBytes": 8000000000_u64
+                            },
+                            "heavyProcessCount": 2,
+                            "heavyProcesses": {
+                                "bazel": 0, "cargo": 1, "nodeTestRunner": 0,
+                                "rustc": 1, "vitest": 0, "xcodebuild": 0
+                            },
+                            "busyTaskCount": 1
+                        }],
+                        "machineErrors": []
+                    })),
+                    error: None,
+                }))
+                .unwrap();
+        }
+        std::future::pending::<()>().await;
     });
 
-    let response = crate::http_api::router(state)
-        .oneshot(
+    let started = Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(4),
+        crate::http_api::router(state).oneshot(
             Request::get("/v1/machine-stats")
                 .body(Body::empty())
                 .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("machine stats exceeded its stats-specific deadline")
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(4));
     assert_eq!(
         response.status(),
         StatusCode::OK,
         "aggregate request failed"
     );
-    responder.await.unwrap();
+    responder.abort();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -599,8 +601,11 @@ async fn machine_stats_route_aggregates_siblings_and_reports_peer_errors() {
         .unwrap()
         .iter()
         .any(|machine| machine["machineId"] == "desktop-remote"));
-    assert_eq!(stats["machineErrors"][0]["machineId"], "desktop-offline");
-    assert_eq!(stats["machineErrors"][0]["error"], "peer unavailable");
+    assert_eq!(stats["machineErrors"][0]["machineId"], "desktop-hung");
+    assert_eq!(
+        stats["machineErrors"][0]["error"],
+        "machine-stats request timed out"
+    );
 }
 
 #[tokio::test]
