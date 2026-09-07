@@ -224,7 +224,15 @@ for (const relativePath of paths) {
   hash.update("\\0");
 }
 process.env.KACHE_KEY_SALT = "kanna-source-v2:" + hash.digest("hex");
-const result = spawnSync(kache, process.argv.slice(2), { stdio: "inherit", env: process.env });
+const stdio = ["inherit", "inherit", "inherit"];
+const jobserver = process.env.CARGO_MAKEFLAGS?.match(/--jobserver-(?:auth|fds)=([0-9]+),([0-9]+)/);
+if (jobserver) {
+  for (const descriptor of jobserver.slice(1).map(Number)) {
+    while (stdio.length <= descriptor) stdio.push("ignore");
+    stdio[descriptor] = descriptor;
+  }
+}
+const result = spawnSync(kache, process.argv.slice(2), { stdio, env: process.env });
 if (result.error) { console.error(result.error.message); process.exit(1); }
 process.exit(result.status == null ? 1 : result.status);
 `;

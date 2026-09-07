@@ -163,6 +163,59 @@ describeMac("kache Cargo wiring", () => {
     expect(existsSync(join(repoRoot, ".build", "debug", "libkd_kache_probe.rlib"))).toBe(true);
   }, 120_000);
 
+  it("preserves Cargo's inherited GNU make jobserver descriptors through the generated wrapper", async () => {
+    const { root, repoRoot, homeDir } = await fixture();
+    const binary = resolveKachePaths(homeDir).binary;
+    const descriptorLog = join(root, "jobserver-descriptors.json");
+    mkdirSync(dirname(binary), { recursive: true });
+    writeFileSync(
+      binary,
+      `#!/usr/bin/env node
+const { fstatSync, writeFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const [rustc, ...args] = process.argv.slice(2);
+const match = process.env.CARGO_MAKEFLAGS?.match(/--jobserver-(?:auth|fds)=([0-9]+),([0-9]+)/);
+const descriptors = match?.slice(1).map(Number) ?? [];
+writeFileSync(${JSON.stringify(descriptorLog)}, JSON.stringify(descriptors.map((fd) => fstatSync(fd).isFIFO())));
+const stdio = ["inherit", "inherit", "inherit"];
+for (const descriptor of descriptors) {
+  while (stdio.length <= descriptor) stdio.push("ignore");
+  stdio[descriptor] = descriptor;
+}
+const result = spawnSync(rustc, args, { stdio });
+process.exit(result.status ?? 1);
+`,
+      { mode: 0o755 }
+    );
+    chmodSync(binary, 0o755);
+
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), KANNA_RUST_CACHE: "on", CI: "" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    const fifo = join(root, "jobserver.fifo");
+    await run("mkfifo", [fifo]);
+    const result = await nodeCommandRunner.run(
+      "/bin/sh",
+      ["-c", 'exec 8<>"$JOBSERVER_FIFO"; exec 9>&8; cargo build'],
+      {
+        cwd: repoRoot,
+        env: {
+          ...cache.env,
+          JOBSERVER_FIFO: fifo,
+          CARGO_MAKEFLAGS: "--jobserver-auth=8,9 -j"
+        }
+      }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("failed to connect to jobserver");
+    expect(JSON.parse(readFileSync(descriptorLog, "utf8")) as boolean[]).toEqual([true, true]);
+  }, 120_000);
+
   it("builds directly against rustc when the cache is opted out", async () => {
     const { repoRoot, homeDir, log } = await fixture();
     installWrapperProbe(homeDir, log);
