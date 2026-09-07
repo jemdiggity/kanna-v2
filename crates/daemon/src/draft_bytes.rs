@@ -36,11 +36,29 @@
 const CONTENT_CAPABLE_SEQUENCE_FINALS: [u8; 2] = [b'A', b'B'];
 
 const ESC: u8 = 0x1b;
+const BEL: u8 = 0x07;
 const DEL: u8 = 0x7f;
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 /// `ESC [ M` plus three raw coordinate bytes.
 const X10_MOUSE_REPORT_LEN: usize = 6;
+
+/// The escapes that carry a *string* payload: DCS, OSC, SOS, PM and APC.
+///
+/// No key produces one. They are how a terminal emulator answers the
+/// application's own questions — XTVERSION, XTGETTCAP
+/// and DECRQSS replies, and the OSC 10/11/4 colour reports Claude Code asks for
+/// at startup and after every resize — and they travel back up the same PTY
+/// input path a human's keystrokes use. The bytes between the introducer and
+/// the terminator are payload, not characters typed at a composer, and counting
+/// them armed the ledger with a draft nobody had written. That is the second
+/// half of the 2026-09-05 report: a queued-input banner with no unsent line
+/// under it, this time on a terminal nobody had even touched.
+///
+/// A producer that forwards its emulator's replies as declared draft bytes —
+/// which the plain `Input` command and the KSP `TermInput` frame both do
+/// unless the client marks them control — therefore declares nothing here.
+const STRING_ESCAPE_INTRODUCERS: [u8; 5] = [b'P', b']', b'X', b'^', b'_'];
 
 /// C0 controls that cannot put a character at the composer.
 ///
@@ -55,6 +73,35 @@ fn is_inert_control(byte: u8) -> bool {
         byte,
         0x00..=0x08 | 0x0b | 0x0c | 0x15 | 0x17 | 0x1a | 0x1c..=0x1f | DEL
     )
+}
+
+/// How far a terminated string escape starting at `data[0]` extends, or `None`
+/// when this write contains no terminator for it.
+///
+/// The terminator is what makes the classification safe. `ESC ]` is also
+/// Alt-`]`, and the desktop coalesces consecutive draft keydowns into one
+/// write, so an Alt chord followed by typing would otherwise have its typed
+/// characters swallowed as reply payload. A well-formed reply carries its own
+/// `ST` (`ESC \`) or, for OSC, `BEL`; an Alt chord never does, and falls
+/// through to the two-byte chord rule below.
+fn string_escape_len(data: &[u8]) -> Option<usize> {
+    let mut index = 2;
+    while index < data.len() {
+        if data[index] == BEL {
+            return Some(index + 1);
+        }
+        if data[index] == ESC {
+            return match data.get(index + 1) {
+                Some(b'\\') => Some(index + 2),
+                // A nested introducer cannot terminate the string; anything
+                // else after `ESC` is not `ST` either, so keep scanning from
+                // the byte after it rather than stopping on a false match.
+                _ => None,
+            };
+        }
+        index += 1;
+    }
+    None
 }
 
 /// How many bytes the escape sequence starting at `data[0]` occupies, and
@@ -90,6 +137,15 @@ fn escape_sequence(data: &[u8]) -> (usize, bool) {
             Some(final_byte) => (3, CONTENT_CAPABLE_SEQUENCE_FINALS.contains(final_byte)),
             None => (data.len(), false),
         },
+        // A terminal reply carrying a string payload — see
+        // [`STRING_ESCAPE_INTRODUCERS`]. Consumed whole, payload included,
+        // because none of it was typed.
+        Some(introducer) if STRING_ESCAPE_INTRODUCERS.contains(introducer) => {
+            match string_escape_len(data) {
+                Some(len) => (len, false),
+                None => (2, false),
+            }
+        }
         // An Alt chord. Meta-prefixed keys are command bindings, never
         // self-inserting; macOS Option keys that do compose a character arrive
         // as that character rather than as an escape prefix.
@@ -218,6 +274,71 @@ mod tests {
         for bytes in [b"\r".as_slice(), b"\n", b"\t", b"\x16", b"\x19", b"\x12"] {
             assert!(draft_content_byte_count(bytes) > 0, "{bytes:?} inserts");
         }
+    }
+
+    /// The reply bytes an emulator writes back up the PTY input path when the
+    /// application asks it something. Nobody typed any of them, and a producer
+    /// that forwards them as declared draft bytes must declare nothing.
+    #[test]
+    fn terminal_replies_are_never_composer_content() {
+        for (name, bytes) in [
+            (
+                "osc 11 background colour report",
+                b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\".as_slice(),
+            ),
+            (
+                "osc 10 foreground colour report",
+                b"\x1b]10;rgb:c5c5/c8c8/c6c6\x07",
+            ),
+            ("osc 4 palette report", b"\x1b]4;1;rgb:cccc/6666/6666\x1b\\"),
+            ("xtversion reply", b"\x1bP>|Ghostty 1.2.0\x1b\\"),
+            ("xtgettcap reply", b"\x1bP1+r62656c=5C61\x1b\\"),
+            ("decrqss reply", b"\x1bP1$r0m\x1b\\"),
+            ("apc reply", b"\x1b_Gi=31;OK\x1b\\"),
+            ("privacy message", b"\x1b^status\x1b\\"),
+            ("start of string", b"\x1bXpayload\x1b\\"),
+            ("primary device attributes", b"\x1b[?62;1;2;6;9;15;22c"),
+            ("secondary device attributes", b"\x1b[>1;10;0c"),
+            ("cursor position report", b"\x1b[41;3R"),
+            ("device status report", b"\x1b[0n"),
+            ("kitty keyboard flags report", b"\x1b[?1u"),
+            ("text area size report", b"\x1b[8;81;260t"),
+            ("colour scheme report", b"\x1b[?997;1n"),
+            ("focus in", b"\x1b[I"),
+            ("focus out", b"\x1b[O"),
+        ] {
+            assert_eq!(
+                draft_content_byte_count(bytes),
+                0,
+                "{name} is a terminal reply, not a keystroke"
+            );
+        }
+    }
+
+    /// The whole poisoning burst as one write, the way a producer that batches
+    /// its emulator's output would send it.
+    #[test]
+    fn a_burst_of_terminal_replies_declares_no_draft() {
+        let burst = b"\x1b[?62;1;2;6;9;15;22c\x1b[>1;10;0c\x1bP>|Ghostty 1.2.0\x1b\\\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\\x1b]10;rgb:c5c5/c8c8/c6c6\x07\x1b[41;3R\x1b[I";
+        assert_eq!(draft_content_byte_count(burst), 0);
+    }
+
+    /// `ESC ]` is also Alt-`]`, and the desktop coalesces consecutive draft
+    /// keydowns into one write. An unterminated introducer is that chord, so
+    /// the characters after it are still someone typing.
+    #[test]
+    fn an_unterminated_string_introducer_stays_an_alt_chord() {
+        assert_eq!(draft_content_byte_count(b"\x1b]hello"), 5);
+        assert_eq!(draft_content_byte_count(b"\x1bPtyped"), 5);
+    }
+
+    /// A reply followed by real typing in one write keeps the typing.
+    #[test]
+    fn typing_after_a_reply_in_the_same_write_still_counts() {
+        assert_eq!(
+            draft_content_byte_count(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\hi"),
+            2
+        );
     }
 
     #[test]
