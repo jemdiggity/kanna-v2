@@ -1,5 +1,30 @@
 use super::*;
 
+/// A router whose database actually contains the tasks a test names.
+///
+/// The push and task-transfers routes resolve their `{task_id}` path parameter
+/// against `pipeline_item` — a task id or one of its branch names, like every
+/// other task route — so a test that names a task the database has never heard
+/// of is answered 404 rather than exercising the transfer surface.
+fn test_router_with_tasks(desktop_id: &str, task_ids: &[&str]) -> axum::Router {
+    let task_ids = task_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    super::test_router_with_seed(desktop_id, "Studio Mac", move |db| {
+        db.insert_test_repo("repo-transfer", "Transfer Repo")
+            .expect("repo");
+        for task_id in &task_ids {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-transfer",
+                "transfer fixture task",
+                Some("Transfer Fixture"),
+                "in progress",
+                "2026-09-06 00:00:00",
+            )
+            .expect("task");
+        }
+    })
+}
+
 fn outgoing_transfer_body(transfer_id: &str, source_task_id: &str) -> String {
     serde_json::json!({
         "transfer": {
@@ -150,7 +175,7 @@ async fn active_outgoing_route_reports_only_transfers_the_index_still_holds() {
 /// `idx_task_transfer_active_outgoing_source`, not by this key.
 #[tokio::test]
 async fn each_push_is_its_own_intent_unless_the_caller_supplies_a_key() {
-    let app = super::test_router("desktop-1", "Studio Mac");
+    let app = test_router_with_tasks("desktop-push-intent-key", &["task-source"]);
 
     let push = |intent_key: Option<&'static str>| {
         let app = app.clone();
@@ -283,7 +308,7 @@ async fn incoming_intents_require_an_incoming_transfer_and_are_idempotent() {
 /// says so in the same breath it says the work was queued.
 #[tokio::test]
 async fn a_push_response_states_that_nothing_has_moved_yet() {
-    let app = super::test_router("desktop-push-intent", "Studio Mac");
+    let app = test_router_with_tasks("desktop-push-intent", &["task-source"]);
 
     let response = app
         .clone()
@@ -331,7 +356,7 @@ async fn a_push_response_states_that_nothing_has_moved_yet() {
 /// the refusal names the argument that replaces that.
 #[tokio::test]
 async fn a_push_with_no_destination_is_refused_rather_than_queued() {
-    let app = super::test_router("desktop-push-nodest", "Studio Mac");
+    let app = test_router_with_tasks("desktop-push-nodest", &["task-source"]);
 
     let response = app
         .oneshot(
@@ -359,7 +384,7 @@ async fn a_push_with_no_destination_is_refused_rather_than_queued() {
 /// would read as a second move.
 #[tokio::test]
 async fn a_push_at_a_task_already_in_flight_names_the_transfer_that_owns_it() {
-    let app = super::test_router("desktop-push-dup", "Studio Mac");
+    let app = test_router_with_tasks("desktop-push-dup", &["task-source"]);
     let (status, _) = post_transfer(&app, "transfer-live", "task-source").await;
     assert_eq!(status, StatusCode::OK);
 
@@ -394,7 +419,10 @@ async fn a_push_at_a_task_already_in_flight_names_the_transfer_that_owns_it() {
 /// vocabulary is longer than an agent should have to learn.
 #[tokio::test]
 async fn task_transfers_report_each_recorded_move_with_a_coarse_verdict() {
-    let app = super::test_router("desktop-task-transfers", "Studio Mac");
+    let app = test_router_with_tasks(
+        "desktop-task-transfers",
+        &["task-source", "task-other", "task-arrived"],
+    );
 
     let read = |task_id: &'static str| {
         let app = app.clone();
@@ -494,7 +522,7 @@ async fn task_transfers_report_each_recorded_move_with_a_coarse_verdict() {
 /// distinction is the whole reason the coarse verdict exists.
 #[tokio::test]
 async fn a_failed_transfer_reports_failed_with_its_reason() {
-    let app = super::test_router("desktop-failed-transfer", "Studio Mac");
+    let app = test_router_with_tasks("desktop-failed-transfer", &["task-source"]);
     let (status, _) = post_transfer(&app, "transfer-doomed", "task-source").await;
     assert_eq!(status, StatusCode::OK);
 
@@ -579,4 +607,178 @@ async fn a_pull_is_reachable_only_from_this_desktop_s_own_loopback_connection() 
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The catalog promises both spellings of a task's identity, and an agent
+/// routinely holds the branch one — `kanna_get_task` reports it as `branch` and
+/// it names the worktree directory.
+///
+/// Answering a branch name with `transfers: []` is the worst shape this surface
+/// can take: the tool description tells the caller to read an empty list as
+/// "nothing has arrived yet, never that a pull was not requested", so an
+/// unresolved identifier turns a real transfer into a confident "no".
+#[tokio::test]
+async fn task_transfers_answer_to_a_branch_name_exactly_as_to_the_task_id() {
+    let app = super::test_router_with_seed("desktop-transfers-branch", "Studio Mac", |db| {
+        db.insert_test_repo("repo-branch", "Branch Repo")
+            .expect("repo");
+        db.insert_test_pipeline_item(
+            "task-source",
+            "repo-branch",
+            "moved by branch name",
+            Some("Branch Task"),
+            "in progress",
+            "2026-09-06 00:00:00",
+        )
+        .expect("task");
+    });
+
+    let read = |identifier: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::get(format!("/v1/tasks/{identifier}/transfers"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                from_slice::<serde_json::Value>(&body).unwrap_or_default(),
+            )
+        }
+    };
+
+    let (status, _) = post_transfer(&app, "transfer-by-branch", "task-source").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, by_id) = read("task-source").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(by_id["transfers"][0]["id"], "transfer-by-branch");
+
+    // `insert_test_pipeline_item` names the branch `branch-{id}`, so this is a
+    // genuinely different string from the durable id.
+    let (status, by_branch) = read("branch-task-source").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        by_branch, by_id,
+        "a branch name must answer with the task's own records, not an empty list"
+    );
+    // …including the id the caller can carry onward, which is the durable one.
+    assert_eq!(by_branch["taskId"], "task-source");
+
+    // An identifier that names no task is a 404, not an empty list that reads
+    // as "nothing has arrived yet".
+    let (status, _) = read("task-does-not-exist").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The same resolution on the push, where an unresolved identifier fails
+/// *silently and forever*.
+///
+/// The route answered `scheduled: true` and the engine then failed
+/// `SourceTask::load` with a **retriable** "task not found"
+/// (`transfer_engine/push.rs`), so no `task_transfer` row was ever written and
+/// the work item retried out of sight — while the caller polled a surface the
+/// engine had given nothing to report.
+#[tokio::test]
+async fn a_push_named_by_branch_queues_work_for_the_durable_task_id() {
+    let state = super::test_state_with_seed("desktop-push-branch", "Studio Mac", |db| {
+        db.insert_test_repo("repo-branch", "Branch Repo")
+            .expect("repo");
+        db.insert_test_pipeline_item(
+            "task-source",
+            "repo-branch",
+            "pushed by branch name",
+            Some("Branch Task"),
+            "in progress",
+            "2026-09-06 00:00:00",
+        )
+        .expect("task");
+    });
+    let app = super::router(std::sync::Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/branch-task-source/actions/push-to-peer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "peerId": "peer-target", "transport": "lan" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = from_slice::<serde_json::Value>(&body).unwrap();
+
+    assert_eq!(body["scheduled"], true);
+    assert_eq!(
+        body["sourceTaskId"], "task-source",
+        "the answer must name the task the engine will actually load"
+    );
+    assert!(
+        body["workId"]
+            .as_str()
+            .is_some_and(|work_id| work_id.starts_with("push:task-source:")),
+        "{body}"
+    );
+
+    // The payload the engine reads is the part that used to be unloadable.
+    let db = state.transfer_work().open_db().expect("db");
+    let queued = db
+        .claim_next_transfer_work(&Vec::<String>::new())
+        .expect("claim")
+        .expect("the push queued work");
+    let payload = serde_json::from_str::<serde_json::Value>(&queued.payload_json).expect("payload");
+    assert_eq!(payload["sourceTaskId"], "task-source");
+}
+
+/// An identifier that resolves to no task must be refused before anything is
+/// queued, rather than answering like a scheduled push.
+#[tokio::test]
+async fn a_push_at_an_unknown_task_is_refused_with_nothing_queued() {
+    let state = super::test_state_with_seed("desktop-push-unknown", "Studio Mac", |db| {
+        db.insert_test_repo("repo-branch", "Branch Repo")
+            .expect("repo");
+    });
+    let app = super::router(std::sync::Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-does-not-exist/actions/push-to-peer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "peerId": "peer-target" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("task not found"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let db = state.transfer_work().open_db().expect("db");
+    assert!(
+        db.claim_next_transfer_work(&Vec::<String>::new())
+            .expect("claim")
+            .is_none(),
+        "a refused push must leave the engine nothing to retry",
+    );
 }

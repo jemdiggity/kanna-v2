@@ -335,9 +335,18 @@ fn pull_request_memo() -> &'static Mutex<HashMap<(String, String), String>> {
 /// later on a relay socket.
 pub(super) async fn push_task_to_peer(
     State(state): State<Arc<AppState>>,
-    Path(source_task_id): Path<String>,
+    Path(task_or_branch_id): Path<String>,
     Json(payload): Json<PushTaskRequest>,
 ) -> Result<Json<PushTaskResponse>, (axum::http::StatusCode, String)> {
+    // The durable id, resolved the way every other task route resolves one.
+    // An agent routinely holds the branch spelling — `kanna_get_task` reports it
+    // as `branch` and it names the worktree directory — and the catalog promises
+    // both. Passing it through raw enqueued a push the engine could never load a
+    // source for, which fails *retriably*: no `task_transfer` row is ever
+    // written, so the caller polls a surface that stays empty forever while the
+    // work item retries out of sight.
+    let source_task_id =
+        super::task_actions::resolve_task_id_for_mutation(&state, &task_or_branch_id).await?;
     let selector = payload
         .target_machine
         .as_deref()
@@ -663,8 +672,14 @@ fn remember_pull_request(peer_id: &str, source_task_id: &str, request_id: &str) 
 pub(super) async fn list_task_transfers(
     _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,
-    Path(task_id): Path<String>,
+    Path(task_or_branch_id): Path<String>,
 ) -> Result<Json<TaskTransfersResponse>, (axum::http::StatusCode, String)> {
+    // Same resolution as the push, for the same reason and with worse
+    // consequences: `transfers: []` is documented as "nothing has arrived yet",
+    // so an unresolved branch name answers a question about a real transfer with
+    // a confident, wrong "no".
+    let task_id =
+        super::task_actions::resolve_task_id_for_mutation(&state, &task_or_branch_id).await?;
     let db = open_db(&state)?;
     let transfers = db
         .list_task_transfers(&task_id)
