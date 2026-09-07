@@ -78,6 +78,9 @@ enum Cmd {
     AuthorizeServer {
         pid: u32,
     },
+    NegotiateProtectedInput {
+        version: u32,
+    },
     Snapshot {
         session_id: String,
     },
@@ -177,6 +180,9 @@ enum Evt {
         event: NeutralAgentEvent,
     },
     Ok,
+    ProtectedInputReady {
+        version: u32,
+    },
     Error {
         code: Option<ErrorCode>,
         message: String,
@@ -1144,6 +1150,136 @@ fn previous_daemon_fixture_is_the_shipped_v2_binary() {
         .expect("run previous daemon");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("kanna-daemon"));
+}
+
+#[test]
+fn authenticated_generations_reclassify_only_unclassified_legacy_handoff_sessions() {
+    let Some(previous) = support::previous_daemon::binary_or_skip(
+        "authenticated_generations_reclassify_only_unclassified_legacy_handoff_sessions",
+    ) else {
+        return;
+    };
+    let dir = test_dir("legacy-protected-input-reclassification");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
+    let mut legacy = DaemonHandle::start_binary_in(&previous, &dir);
+    for session_id in ["legacy-unclassified", "deliberately-protected"] {
+        spawn_echo(&mut legacy.connect(), session_id);
+    }
+
+    let server_executable = std::fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let mut first_successor = DaemonHandle::start_in_with_env(
+        &dir,
+        &[("KANNA_SERVER_EXECUTABLE", server_executable.as_str())],
+    );
+    assert!(
+        wait_for_child_exit(&mut legacy.child, EVENTUAL_PROGRESS_GUARD).is_some(),
+        "legacy daemon should hand its sessions to the first successor"
+    );
+
+    let mut control = first_successor.connect();
+    control.send(&Cmd::Input {
+        session_id: "legacy-unclassified".to_string(),
+        data: b"before negotiation\n".to_vec(),
+    });
+    assert!(matches!(
+        control.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+    control.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
+    control.send(&Cmd::NegotiateProtectedInput {
+        version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+    });
+    assert!(matches!(
+        control.recv(),
+        Evt::ProtectedInputReady {
+            version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION
+        }
+    ));
+    control.send(&Cmd::Input {
+        session_id: "legacy-unclassified".to_string(),
+        data: b"negotiation alone must not open the fence\n".to_vec(),
+    });
+    assert!(matches!(
+        control.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+    control.send(&Cmd::ClassifyInput {
+        session_id: "legacy-unclassified".to_string(),
+        operator_input_only: false,
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
+    control.send(&Cmd::ClassifyInput {
+        session_id: "deliberately-protected".to_string(),
+        operator_input_only: true,
+    });
+    assert!(matches!(control.recv(), Evt::Ok));
+    drop(control);
+
+    let mut second_successor = spawn_replacement_without_wait(
+        &dir,
+        &[("KANNA_SERVER_EXECUTABLE", server_executable.as_str())],
+    );
+    assert!(
+        wait_for_child_exit(&mut first_successor.child, EVENTUAL_PROGRESS_GUARD).is_some(),
+        "first successor should hand its sessions to the next generation"
+    );
+    let second_pid = second_successor.id();
+    let stream = wait_for_published_socket(
+        &dir.join("daemon.pid"),
+        &compute_socket_path(&dir),
+        second_pid,
+    );
+    stream
+        .set_read_timeout(Some(EVENTUAL_PROGRESS_GUARD))
+        .unwrap();
+    let mut adopted = ClientConn {
+        reader: BufReader::new(stream.try_clone().unwrap()),
+        writer: stream,
+    };
+    adopted.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(adopted.recv(), Evt::Ok));
+    adopted.send(&Cmd::NegotiateProtectedInput {
+        version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+    });
+    assert!(matches!(adopted.recv(), Evt::ProtectedInputReady { .. }));
+
+    adopted.send(&Cmd::Input {
+        session_id: "legacy-unclassified".to_string(),
+        data: b"accepted after negotiation\n".to_vec(),
+    });
+    assert!(matches!(adopted.recv(), Evt::Ok));
+    adopted.send(&Cmd::Input {
+        session_id: "deliberately-protected".to_string(),
+        data: b"must remain fenced\n".to_vec(),
+    });
+    assert!(matches!(
+        adopted.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+
+    let _ = second_successor.kill();
+    let _ = second_successor.wait();
+    drop(first_successor);
+    drop(legacy);
+    cleanup(&dir);
 }
 
 #[test]

@@ -34,6 +34,9 @@ export interface TerminalRuntimeState {
   resetTerminalOnNextSnapshot: boolean
   streamClient: StreamClient | null
   respawningAfterAttachFailure: boolean
+  attachFailureMessage: string | null
+  attachRetryAttempt: number
+  attachRetryTimer: ReturnType<typeof setTimeout> | null
 }
 
 export function createTerminalRuntimeState(): TerminalRuntimeState {
@@ -63,6 +66,9 @@ export function createTerminalRuntimeState(): TerminalRuntimeState {
     resetTerminalOnNextSnapshot: false,
     streamClient: null,
     respawningAfterAttachFailure: false,
+    attachFailureMessage: null,
+    attachRetryAttempt: 0,
+    attachRetryTimer: null,
   }
 }
 

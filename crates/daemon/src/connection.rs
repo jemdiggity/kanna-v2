@@ -264,6 +264,10 @@ pub(crate) async fn handle_connection(
                     .negotiate_protected_input(raw_fd, version)
                     .await
                 {
+                    // Negotiation authenticates this server generation, but
+                    // deliberately does not alter any session. A legacy PTY
+                    // remains fail-closed until its own ClassifyInput command
+                    // succeeds.
                     Ok(()) => Event::ProtectedInputReady { version },
                     Err(message) => error_event(
                         Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
