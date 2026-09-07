@@ -20,6 +20,7 @@ import {
   type SessionStore
 } from "../state/sessionStore";
 import { terminalOutputToString } from "../state/terminalOutputBuffer";
+import type { LocalTaskListPreferences } from "../state/taskListPreferences";
 import { buildInitialNavigationState } from "./navigationState";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -892,6 +893,101 @@ describe("RootNavigator task collection integration", () => {
     expect(saved.at(-1)?.pins).toEqual([
       { taskId: "task-older", repoId: "repo-1" }
     ]);
+  });
+
+  it("moves the row while its write is still in flight, and honours the last toggle", async () => {
+    const newer: TaskSummary = {
+      id: "task-newer",
+      repoId: "repo-1",
+      title: "Newer task",
+      stage: "in progress",
+      createdAt: "2026-08-18T08:00:00.000Z"
+    };
+    const older: TaskSummary = {
+      id: "task-older",
+      repoId: "repo-1",
+      title: "Older task",
+      stage: "in progress",
+      createdAt: "2026-08-01T08:00:00.000Z"
+    };
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([newer, older]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([newer, older]);
+    const store = createSessionStore();
+    let stored: LocalTaskListPreferences = {
+      pins: [],
+      dismissedActivity: [],
+      pinsSeededFromServer: false
+    };
+    // Every write is held open, so the list can only be reordering from the
+    // phone's own record rather than from anything that reached storage.
+    const writes: Array<{
+      preferences: LocalTaskListPreferences;
+      release(): void;
+    }> = [];
+    controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: {
+        load: async () => ({
+          status: "loaded" as const,
+          preferences: structuredClone(stored)
+        }),
+        save: (preferences) => {
+          const settled = createDeferred<LocalTaskListPreferences>();
+          writes.push({
+            preferences: structuredClone(preferences),
+            release: () => {
+              stored = structuredClone(preferences);
+              settled.resolve(structuredClone(preferences));
+            }
+          });
+          return settled.promise;
+        }
+      }
+    });
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+      await flushMicrotasks();
+    });
+    expect(renderedTaskRowIds()).toEqual(["task-newer", "task-older"]);
+
+    const swipeRow = async (taskId: string) => {
+      await act(async () => {
+        const gesture = rowGestureConfig(taskId);
+        gesture.onPanResponderGrant?.({}, { dx: 0, dy: 0 });
+        gesture.onPanResponderMove?.({}, { dx: -70, dy: 0 });
+        gesture.onPanResponderRelease?.({}, { dx: -70, dy: 0 });
+        await flushMicrotasks();
+      });
+    };
+
+    await swipeRow("task-older");
+    // Nothing has been allowed to finish writing, and the row has moved.
+    expect(renderedTaskRowIds()).toEqual(["task-older", "task-newer"]);
+
+    // Unpin and pin again straight away, still with no write allowed through.
+    await swipeRow("task-older");
+    expect(renderedTaskRowIds()).toEqual(["task-newer", "task-older"]);
+    await swipeRow("task-older");
+    expect(renderedTaskRowIds()).toEqual(["task-older", "task-newer"]);
+
+    await act(async () => {
+      // Writes are serialized, so letting one through releases the next.
+      for (let pass = 0; pass < 10 && writes.length > 0; pass += 1) {
+        for (const write of writes.splice(0, writes.length)) write.release();
+        await flushMicrotasks();
+      }
+    });
+
+    // The list kept the state the owner left it in, and so did the disk.
+    expect(renderedTaskRowIds()).toEqual(["task-older", "task-newer"]);
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-older", repoId: "repo-1" }
+    ]);
+    expect(stored.pins).toEqual([{ taskId: "task-older", repoId: "repo-1" }]);
   });
 
   it("switches repos from the all-repo cache before the repo refresh settles", async () => {

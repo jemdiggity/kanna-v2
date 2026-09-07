@@ -821,51 +821,109 @@ export function createMobileController(
     options.taskListPreferencesStore ?? createDefaultTaskListPreferencesStore();
   let taskListPreferencesStatus: "pending" | "loaded" | "failed" = "pending";
   let taskListPreferencesLoad: Promise<void> | null = null;
+  /**
+   * Edits the phone applied before hydration finished. The load replays them
+   * over whatever it read, so a pin made in the first frames after launch is
+   * composed with the record on disk instead of being snapped back by it.
+   */
+  let pendingTaskListPreferenceEdits: Array<
+    (current: LocalTaskListPreferences) => LocalTaskListPreferences
+  > = [];
+  /** The record last written to disk: what the next launch will read. */
+  let persistedTaskListPreferences: LocalTaskListPreferences | null = null;
+  /**
+   * Writes run one at a time and each one writes the record as it stands when
+   * its turn comes, so a burst of toggles collapses to the state the owner
+   * actually left the row in rather than racing to land out of order.
+   */
+  let taskListPreferenceWrites: Promise<void> = Promise.resolve();
 
   /**
-   * Hydrates this phone's own pin/dismiss record. Every mutation waits on it,
-   * which is what stops a swipe from replacing a record the phone has not read
-   * yet; once it has landed, a toggle is a local write and the list reorders
-   * from that write alone.
+   * Hydrates this phone's own pin/dismiss record. A mutation never waits on
+   * it: the edit is applied to the in-memory record immediately and replayed
+   * over the hydrated one when it lands, which is what makes the swipe move
+   * the row on the frame it commits.
    */
   const ensureTaskListPreferences = (): Promise<void> => {
     taskListPreferencesLoad ??= taskListPreferencesStore
       .load()
       .then((result) => {
         taskListPreferencesStatus = result.status;
-        store.setLocalTaskListPreferences(result.preferences);
+        persistedTaskListPreferences =
+          result.status === "loaded" ? result.preferences : null;
+        const replayed = pendingTaskListPreferenceEdits;
+        pendingTaskListPreferenceEdits = [];
+        store.setLocalTaskListPreferences(
+          replayed.reduce((current, edit) => edit(current), result.preferences)
+        );
       })
       .catch(() => {
         // A store that cannot even report its failure leaves the phone with
-        // the empty record it started with, and saving stays blocked below
-        // rather than replacing whatever is really on disk.
+        // the record it already holds — including edits made since launch,
+        // which are not undone by a read that failed — and saving stays
+        // blocked below rather than replacing whatever is really on disk.
         taskListPreferencesStatus = "failed";
+        persistedTaskListPreferences = null;
+        pendingTaskListPreferenceEdits = [];
       });
     return taskListPreferencesLoad;
   };
 
-  const updateLocalTaskListPreferences = async (
-    update: (current: LocalTaskListPreferences) => LocalTaskListPreferences,
+  /**
+   * Writes the current record to disk behind the interaction. `revertTo` is
+   * the record to show if the write fails — the last one this phone knows is
+   * really on disk, or the pre-edit record when it knows of none.
+   */
+  const persistLocalTaskListPreferences = (
+    revertTo: LocalTaskListPreferences,
     describeFailure: (detail: string) => string
   ): Promise<void> => {
-    await ensureTaskListPreferences();
-    const previous = store.getState().localTaskListPreferences;
-    const next = update(previous);
-    if (next === previous) return;
-    // There is no round-trip to wait for: the list reorders (or drops the row)
-    // from this write, and the record on disk follows it.
-    store.setLocalTaskListPreferences(next);
-    try {
-      await taskListPreferencesStore.save(next);
-    } catch (error) {
-      // A write the phone could not keep is not a preference. Put the previous
-      // record back so the list matches what the next launch will read.
-      if (store.getState().localTaskListPreferences === next) {
-        store.setLocalTaskListPreferences(previous);
+    let attempted: LocalTaskListPreferences | null = null;
+    const attempt = taskListPreferenceWrites.then(async () => {
+      await ensureTaskListPreferences();
+      const desired = store.getState().localTaskListPreferences;
+      if (desired === persistedTaskListPreferences) return;
+      attempted = desired;
+      await taskListPreferencesStore.save(desired);
+      persistedTaskListPreferences = desired;
+    });
+    taskListPreferenceWrites = attempt.then(
+      () => undefined,
+      () => undefined
+    );
+    return attempt.catch((error: unknown) => {
+      // A write the phone could not keep is not a preference. Put back what
+      // the next launch will read — unless a newer edit has already replaced
+      // the record this write was carrying, in which case that edit owns the
+      // row and its own write reports its own failure.
+      if (
+        attempted !== null &&
+        store.getState().localTaskListPreferences === attempted
+      ) {
+        store.setLocalTaskListPreferences(
+          persistedTaskListPreferences ?? revertTo
+        );
       }
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(describeFailure(detail));
+    });
+  };
+
+  const updateLocalTaskListPreferences = (
+    update: (current: LocalTaskListPreferences) => LocalTaskListPreferences,
+    describeFailure: (detail: string) => string
+  ): Promise<void> => {
+    const previous = store.getState().localTaskListPreferences;
+    const next = update(previous);
+    if (next === previous) return Promise.resolve();
+    // There is no round-trip to wait for and no hydration to wait on: the list
+    // reorders (or drops the row) from this write, on this frame, and the
+    // record on disk follows it.
+    store.setLocalTaskListPreferences(next);
+    if (taskListPreferencesStatus === "pending") {
+      pendingTaskListPreferenceEdits.push(update);
     }
+    return persistLocalTaskListPreferences(previous, describeFailure);
   };
 
   /**
@@ -894,13 +952,13 @@ export function createMobileController(
     );
     if (next === current) return;
     store.setLocalTaskListPreferences(next);
-    void taskListPreferencesStore.save(next).catch(() => {
-      // Nothing was lost: the record on disk still holds what this pass wanted
-      // to drop, so show that instead of a list the next launch contradicts.
-      if (store.getState().localTaskListPreferences === next) {
-        store.setLocalTaskListPreferences(current);
-      }
-    });
+    // Through the same serialized write as a toggle, so a prune and a pin the
+    // owner made in the same moment cannot land on disk out of order. Nothing
+    // is lost when it fails: the record on disk still holds what this pass
+    // wanted to drop, and that is what the row goes back to showing.
+    void persistLocalTaskListPreferences(current, (detail) => detail).catch(
+      () => undefined
+    );
   };
 
   const markTaskRead = (
