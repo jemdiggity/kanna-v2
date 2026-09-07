@@ -24,8 +24,8 @@ use crate::operator_auth::OperatorAuthorizer;
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{
-    pty_occupancy_snapshot, LogicalInputAccepted, RawInputKind, SessionHandle, SessionManager,
-    SessionRecord, StreamControl, WriteOutcome,
+    pty_occupancy_snapshot, DraftSwapOutcome, LogicalInputAccepted, RawInputKind, SessionHandle,
+    SessionManager, SessionRecord, StreamControl, WriteOutcome,
 };
 use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
@@ -54,11 +54,16 @@ fn inherited_draft_state_unknown_message(session_id: &str) -> String {
 /// different: nothing is wrong with this daemon's knowledge, a human simply
 /// has an unsent line open at that terminal, and the message goes out the
 /// moment they submit it.
+///
+/// This is now the uncommon answer. A draft on a composer this daemon can read
+/// and verify is lifted off, delivered over, and put back; reaching here means
+/// the composer could not be read or the swap could not be verified.
 fn logical_input_held_by_draft_message(session_id: &str) -> String {
     format!(
         "logical input for session {session_id} was not submitted: a human has an unsent line at \
-         that terminal, and appending to it would submit a sentence nobody wrote. The message is \
-         queued and will be written when that terminal submits — do not send it again."
+         that terminal and this daemon could not verifiably take it off the composer and put it \
+         back, so appending to it would submit a sentence nobody wrote. The message is queued \
+         and will be written when that terminal submits — do not send it again."
     )
 }
 
@@ -83,23 +88,48 @@ async fn enqueue_logical_input_with_attestation(
     if !withheld {
         return first;
     }
-    match session.attest_empty_composer().await {
+    let attested = match session.attest_empty_composer().await {
         Ok(true) => match first {
             // Attestation dispatched the message this call already queued,
             // carrying its own acknowledgement. Queuing it again would write
             // it twice.
-            Ok(accepted) => Ok(LogicalInputAccepted {
-                written: accepted.written,
-                held_by_raw_draft: false,
-            }),
+            Ok(accepted) => {
+                return Ok(LogicalInputAccepted {
+                    written: accepted.written,
+                    held_by_raw_draft: false,
+                })
+            }
             // The refusal happened before the message reached the queue, so it
             // still has to be submitted.
-            Err(_) => session.enqueue_logical_input(data),
+            Err(_) => return session.enqueue_logical_input(data),
         },
         Ok(false) => first,
         Err(error) => {
             log::warn!("[input] composer attestation failed: {error}");
             first
+        }
+    };
+    // Attestation could not prove the composer empty, so a human really may
+    // have an unsent line there. That used to end the matter: the message
+    // waited for them, however long that took. It no longer has to — the draft
+    // can be lifted off, the message submitted, and the draft put back.
+    let Ok(accepted) = attested else {
+        return attested;
+    };
+    if !accepted.held_by_raw_draft {
+        return Ok(accepted);
+    }
+    match session.swap_draft_and_deliver().await {
+        Ok(DraftSwapOutcome::Restored)
+        | Ok(DraftSwapOutcome::DeliveredUnproven)
+        | Ok(DraftSwapOutcome::DeliveredWithoutRestore) => Ok(LogicalInputAccepted {
+            written: accepted.written,
+            held_by_raw_draft: false,
+        }),
+        Ok(DraftSwapOutcome::NotAttempted) | Ok(DraftSwapOutcome::Aborted) => Ok(accepted),
+        Err(error) => {
+            log::warn!("[input] draft swap failed: {error}");
+            Ok(accepted)
         }
     }
 }

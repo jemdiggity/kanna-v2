@@ -59,8 +59,9 @@ scope still tells an older consumer exactly what to invalidate.
 
 `POST /v1/tasks/{task_id}/input` carries one logical message, not raw terminal
 bytes. The daemon is the authoritative queue owner: it submits the message
-immediately when the composer is clear, or retains it behind an unsent human
-draft until that draft crosses a producer-declared submission boundary. The
+immediately when the composer is clear, lifts a readable human draft off the
+composer and puts it back around the delivery, and retains the message only for
+a composer it can neither read nor safely swap. The
 accepted queue is session-scoped, survives server/frontend reconnects and
 transactional daemon handoff, and is never redirected to a later run or stage.
 
@@ -70,7 +71,8 @@ so a success answer cannot be given for text still sitting unsent at the
 composer. A message retained behind a draft answers `202` with
 `status: "queued"`, `reason: "input_held_by_draft"`, and the task's
 `queuedInputCount`: it stays queued for the producer's boundary and every task
-summary exposes that backlog and reason. It is first stored in
+summary exposes that backlog and reason. **That answer is now the exception,
+not the rule** — see "A typed draft no longer waits for its human" below. It is first stored in
 `queued_task_input`, not falsely recorded as delivered. Reported by the product owner on 2026-08-20, when replies sent from
 mobile sat at the agent's prompt until someone pressed Enter at that terminal
 while the phone had been told they were delivered.
@@ -89,6 +91,38 @@ typing. A real draft still holds, and still releases at the producer's own
 submission boundary or when the composer is attested empty, which is what a
 cleared draft renders as. The full classification and why Escape/Ctrl-C/Ctrl-U
 are inert rather than clearing are in `crates/daemon/SPEC.md`.
+
+**A composer painted grey is not a draft.** Claude Code paints the last
+submitted line back as a faint tab-to-accept ghost, so a session whose ledger
+armed once never rendered a textually empty composer again and held every
+delivery for the rest of its life — reported by the owner on 2026-09-07, who
+could see the text was grey while typed text is not. The daemon now reads the
+composer row's styling and cursor as well as its text, and treats the line as
+the provider's own suggestion when *both* every cell after the prompt is faint
+and the cursor sits at the start of the composer rather than after the text.
+Either signal alone is not enough. The ledger stays the primary evidence: a
+frame may only ever clear it, never arm it.
+
+**A terminal reply is not a keystroke.** An emulator answers the application's
+own questions — colour reports, device attributes, XTVERSION — up the same PTY
+input path a human types on, and the plain terminal-input frame declares every
+byte it carries a draft unless the client marks it control. Those replies'
+payloads used to be counted as typed characters, arming the ledger on a
+terminal nobody had touched. They are now classified and excluded.
+
+**A typed draft no longer waits for its human.** When the daemon can read the
+composer, and the ledger says it watched the line being typed, it copies the
+draft off the composer, submits the message on its own, and writes the draft
+back byte for byte — attested `typed` again, as it was. Keystrokes that arrive
+mid-swap are buffered and replayed onto the restored draft in order, so nothing
+a human types is lost or lands inside the delivery. Every step is verified
+against the rendered composer and an unverifiable one abandons without writing
+anything, leaving the draft untouched and the message queued. So
+`input_held_by_draft` now means a composer the daemon could not read or could
+not verify: an unmeasured provider, a draft inherited without its ledger, a
+dialog, a busy frame, a wrapped multi-line draft, a cursor left mid-line, or a
+clear that did not clear. The mechanics, the abort cases and what happens when
+a submission cannot be proven are in `crates/daemon/SPEC.md`.
 
 A held message is kept, not dropped, and mobile's banner says so: it names the
 count, the reason, and that Kanna sends it once the draft is submitted or
@@ -1550,6 +1584,12 @@ every surface that means "what the session said":
   message and could not prove its submission, so its text is parked there).
   The field is **absent** until a session reports one, which is a different
   answer from `unknown`.
+- **`typed` is the ledger's verdict, and the rendered frame can overturn it
+  towards `not-typed`.** A composer whose every cell is painted faint with the
+  cursor still at its start is the provider's own suggestion, whatever the
+  ledger counted earlier; that frame resolves the session to `not-typed`. It
+  never goes the other way — no frame has ever been allowed to assert that
+  somebody typed something.
 - **A parked Kanna-written message is `unknown`, never `not-typed`.** It was not
   typed, but `not-typed` asserts the composer is *clear* — it is what lets the
   next delivery go straight out — and a later message written onto parked text

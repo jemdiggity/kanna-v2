@@ -45,3 +45,28 @@ They pin what 2.1.263 actually draws, which is what
 `· Tomfoolering…`, drawn with the dim `·` glyph and before the elapsed timer
 appears, which is why `CLAUDE_WORKING_FOOTER_GLYPH` exists alongside
 `line_is_claude_spinner`'s star glyphs.
+
+## 2026-09-07 faint tab-to-accept suggestion
+
+`faint-suggestion-composer.ansi` is the composer region of task `5d2f1c5c`'s
+live session, extracted unaltered from the daemon handoff record in
+`kanna-daemon_98629_2026-09-07_09-56-52.log` on desktop `desktop-aa43ab36`
+(Kanna Staging). Everything above the turn's `done` footer is trimmed off; the
+bytes that remain are the ones that were serialized, including the CLI's own
+closing cursor move. Replay it into a 260-column terminal.
+
+It is the frame behind the owner report that *"the placeholder text is grey,
+typed text is whiter"*: the composer draws
+
+```
+ESC[0m ❯ U+00A0 ESC[2m commit this
+```
+
+— SGR 2 is faint — and `ESC[3A ESC[60D` leaves the cursor at column 2, the
+start of the composer, rather than after the text. The session's typed-byte
+ledger nevertheless attested `typed` and held a delivery behind it. Both
+rendered facts together are what `ComposerState::SuggestionOnly` is measured
+from; neither alone is enough.
+
+The frame also carries the `/rc` status row, which is what
+`claude_line_is_release_channel_marker` classifies.

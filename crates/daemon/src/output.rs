@@ -663,6 +663,25 @@ pub(crate) async fn stream_output(
                         error
                     );
                 }
+                // A message queued behind a real typed draft is resolved the
+                // same way: on this tick, with nobody at the terminal. Spawned
+                // rather than awaited, because the swap waits on writes this
+                // very loop performs — awaiting it here would deadlock the
+                // writer against itself. The swap is single-flight on the
+                // session, so a tick that finds one running does nothing.
+                if !session.is_retired() && session.draft_swap_may_help() {
+                    let swapping = Arc::clone(&session);
+                    let swapping_id = session_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = swapping.swap_draft_and_deliver().await {
+                            log::warn!(
+                                "[input] draft swap failed for session {}: {}",
+                                swapping_id,
+                                error
+                            );
+                        }
+                    });
+                }
                 publish_input_blocked_transition(&session, &broadcast_tx, &session_id);
                 publish_composer_transition(&session, &broadcast_tx, &session_id).await;
             }

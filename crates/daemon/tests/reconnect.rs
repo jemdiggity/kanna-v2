@@ -648,6 +648,416 @@ fn a_typed_draft_still_holds_a_message_behind_a_rendered_suggestion() {
     }
 }
 
+/// A composer that behaves like Claude's: it draws `❯ <draft>` with the cursor
+/// after the draft, `Ctrl-U` clears the line, and Enter records the submitted
+/// line to a file and clears.
+///
+/// `$clear_delay` is how long it waits before repainting after a `Ctrl-U`,
+/// which is what holds a swap open long enough for a second connection's
+/// keystrokes to arrive while the composer is not the human's.
+const FAKE_COMPOSER_PROGRAM: &str = r#"
+use Time::HiRes qw(sleep);
+$| = 1;
+system('stty raw -echo');
+my ($log_path, $clear_delay) = @ARGV;
+open(my $log, '>', $log_path) or die "log: $!";
+select((select($log), $| = 1)[0]);
+binmode(STDOUT);
+my $prompt = chr(0xe2) . chr(0x9d) . chr(0xaf) . chr(0xc2) . chr(0xa0);
+my $draft = '';
+my $esc = '';
+sub repaint { print "\r\e[2K" . $prompt . $draft; }
+print "\e[2J\e[H* Done.\r\n";
+repaint();
+while (1) {
+    my $buf = '';
+    my $n = sysread(STDIN, $buf, 65536);
+    last unless defined($n) && $n > 0;
+    for my $byte (split //, $buf) {
+        # A line editor consumes escape sequences as protocol, never as text.
+        if ($esc ne '') {
+            $esc .= $byte;
+            if (length($esc) == 2) {
+                $esc = '' unless $esc =~ /^\e[\[P\]X\^_]$/;
+                next;
+            }
+            if ($esc =~ /^\e\[/) {
+                $esc = '' if $byte =~ /[\x40-\x7e]/;
+                next;
+            }
+            $esc = '' if ($esc =~ /\e\\\z/ || $byte eq "\x07");
+            next;
+        }
+        if ($byte eq "\e") { $esc = "\e"; next; }
+        if ($byte eq "\r" || $byte eq "\n") {
+            print $log "LINE:<$draft>\n";
+            $draft = '';
+            repaint();
+        } elsif ($byte eq "\x15") {
+            $draft = '';
+            sleep($clear_delay) if $clear_delay;
+            repaint();
+        } elsif ($byte eq "\x7f") {
+            chop $draft;
+            repaint();
+        } else {
+            $draft .= $byte;
+            repaint();
+        }
+    }
+}
+"#;
+
+fn spawn_fake_composer(
+    daemon: &DaemonHandle,
+    conn: &mut ClientConn,
+    session_id: &str,
+    clear_delay_seconds: f64,
+) -> PathBuf {
+    let log_path = daemon._dir.join(format!("{session_id}-submitted.txt"));
+    let _ = std::fs::remove_file(&log_path);
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/usr/bin/perl",
+        "args": [
+            "-e",
+            FAKE_COMPOSER_PROGRAM,
+            log_path.to_string_lossy(),
+            format!("{clear_delay_seconds}"),
+        ],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "agent_provider": "claude",
+    }));
+    match conn.recv() {
+        Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
+        other => panic!("expected SessionCreated, got: {other:?}"),
+    }
+    wait_for_composer(conn, session_id, "", Duration::from_secs(10));
+    log_path
+}
+
+/// Wait until the daemon reports this session's composer as `expected`.
+fn wait_for_composer(
+    conn: &mut ClientConn,
+    session_id: &str,
+    expected: &str,
+    timeout: Duration,
+) -> Value {
+    let deadline = Instant::now() + timeout;
+    loop {
+        conn.send(&Cmd::List);
+        let session = match conn.recv() {
+            Evt::SessionList { sessions } => sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .cloned()
+                .expect("the session is listed"),
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected SessionList, got: {other:?}"),
+        };
+        let composer = session["composer_text"].as_str().unwrap_or("");
+        if composer == expected {
+            return session;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "composer never became {expected:?}; last session state was {session:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Wait for one chunk of PTY output on an observing connection.
+fn wait_for_output(conn: &mut ClientConn, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "no output was produced");
+        match conn.recv_with_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(Evt::Output { .. }) => return,
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+}
+
+fn wait_for_submitted_line(log_path: &Path, expected: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let recorded = std::fs::read_to_string(log_path).unwrap_or_default();
+        if recorded.contains(expected) {
+            return recorded;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{expected:?} was never submitted; the composer recorded {recorded:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The owner's ask, over the real wire: a message delivered while a human has
+/// a genuinely typed line at the composer no longer waits for them. The draft
+/// is copied off, the message is submitted on its own, and the draft goes back
+/// — and keystrokes typed while it was off are replayed after it, in order,
+/// rather than landing in the middle of the delivery.
+#[test]
+fn a_delivery_over_a_typed_draft_restores_the_draft_and_replays_mid_swap_typing() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let mut typist = daemon.connect();
+    let session_id = "draft-swap";
+    let submitted_lines = spawn_fake_composer(&daemon, &mut conn, session_id, 0.4);
+
+    // A human types at the composer, and the frame shows their line.
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b"half typed".to_vec(),
+    });
+    expect_ok(&mut conn);
+    let session = wait_for_composer(&mut conn, session_id, "half typed", Duration::from_secs(10));
+    assert_eq!(
+        session["composer_attestation"], "typed",
+        "the daemon watched this line being typed"
+    );
+
+    // The delivery goes out while that line is still on the composer. This is
+    // the call that used to be refused `input_held_by_draft`.
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"manager message".to_vec(),
+    });
+
+    // Meanwhile the human keeps typing, on their own connection, while the
+    // composer belongs to the delivery.
+    thread::sleep(Duration::from_millis(120));
+    typist.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b" more".to_vec(),
+    });
+    expect_ok(&mut typist);
+
+    expect_ok(&mut conn);
+
+    let recorded = wait_for_submitted_line(
+        &submitted_lines,
+        "LINE:<manager message>",
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        recorded.lines().count(),
+        1,
+        "exactly one line was submitted, and it was the agent's: {recorded:?}"
+    );
+
+    let session = wait_for_composer(
+        &mut conn,
+        session_id,
+        "half typed more",
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        session["composer_attestation"], "typed",
+        "the restored draft is the human's line again, and is attested as one"
+    );
+}
+
+/// The bytes that poisoned the ledger, replayed against a real PTY.
+///
+/// A terminal emulator answers the application's own questions up the same
+/// input path a human's keystrokes use, and the plain `Input` command declares
+/// every byte it carries a draft. Counting a colour report or an XTVERSION
+/// reply as typed characters left the session attesting `typed` with nothing
+/// on its composer, and every later delivery answered "a human has an unsent
+/// line at that terminal".
+#[test]
+fn terminal_replies_declared_as_draft_never_hold_a_delivery() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "reply-poisoned-composer";
+    let submitted_lines = spawn_fake_composer(&daemon, &mut conn, session_id, 0.0);
+
+    for reply in [
+        b"\x1b[?62;1;2;6;9;15;22c".as_slice(),
+        b"\x1b[>1;10;0c",
+        b"\x1bP>|Ghostty 1.2.0\x1b\\",
+        b"\x1bP1+r62656c=5C61\x1b\\",
+        b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\",
+        b"\x1b]10;rgb:c5c5/c8c8/c6c6\x07",
+        b"\x1b[41;3R",
+        b"\x1b[?1u",
+        b"\x1b[8;24;80t",
+        b"\x1b[I",
+        b"\x1b[O",
+    ] {
+        conn.send(&Cmd::Input {
+            session_id: session_id.to_string(),
+            data: reply.to_vec(),
+        });
+        expect_ok(&mut conn);
+    }
+
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => {
+            let session = sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .expect("the session is listed");
+            assert_eq!(
+                session["composer_attestation"], "not-typed",
+                "nobody typed any of that: {session:?}"
+            );
+        }
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"manager message".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Ok => {}
+        Evt::Error { code, message } => panic!(
+            "a delivery was held behind a draft made of terminal replies: {code:?} {message}"
+        ),
+        other => panic!("expected Ok, got: {other:?}"),
+    }
+    wait_for_submitted_line(
+        &submitted_lines,
+        "LINE:<manager message>",
+        Duration::from_secs(20),
+    );
+}
+
+/// A composer that only ever draws the CLI's own faint tab-to-accept ghost,
+/// with the cursor left at the start of the line, and repaints on every read.
+///
+/// Its `$line` accumulates whatever is written to it so the submitted text is
+/// observable; what it never does is paint that text as a draft, which is the
+/// point — the screen shows a suggestion while the daemon's ledger has counted
+/// real typed bytes.
+const FAKE_SUGGESTION_COMPOSER_PROGRAM: &str = r#"
+$| = 1;
+my ($log_path) = @ARGV;
+open(my $log, '>', $log_path) or die "log: $!";
+select((select($log), $| = 1)[0]);
+system('stty raw -echo');
+binmode(STDOUT);
+my $prompt = chr(0xe2) . chr(0x9d) . chr(0xaf) . chr(0xc2) . chr(0xa0);
+sub paint {
+    print "\e[2J\e[H* Done.\r\n\e[0m" . $prompt . "\e[2mcommit this\r\n\e[0m\e[2;3H";
+}
+paint();
+my $line = '';
+while (1) {
+    my $buf = '';
+    my $n = sysread(STDIN, $buf, 65536);
+    last unless defined($n) && $n > 0;
+    for my $byte (split //, $buf) {
+        if ($byte eq "\r" || $byte eq "\n") {
+            print $log "LINE:<$line>\n";
+            $line = '';
+        } else {
+            $line .= $byte;
+        }
+    }
+    paint();
+}
+"#;
+
+/// The 2026-09-07 owner report, over the real wire.
+///
+/// A ledger armed once could never be cleared again: Claude Code paints the
+/// last submitted line back as a faint tab-to-accept ghost, so no frame ever
+/// read that composer textually empty and every delivery was answered "a human
+/// has an unsent line at that terminal". The owner could see the difference the
+/// daemon could not — the ghost is grey, and typed text is not — and the cells
+/// carry it: faint text with the cursor still at the start of the composer is
+/// the provider's own suggestion.
+#[test]
+fn a_faint_suggestion_with_the_cursor_at_the_start_releases_a_held_delivery() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "faint-suggestion-composer";
+    let submitted_lines = daemon._dir.join("faint-suggestion-submitted.txt");
+    let _ = std::fs::remove_file(&submitted_lines);
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/usr/bin/perl",
+        "args": ["-e", FAKE_SUGGESTION_COMPOSER_PROGRAM, submitted_lines.to_string_lossy()],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "agent_provider": "claude",
+    }));
+    match conn.recv() {
+        Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
+        other => panic!("expected SessionCreated, got: {other:?}"),
+    }
+    wait_for_composer(
+        &mut conn,
+        session_id,
+        "commit this",
+        Duration::from_secs(10),
+    );
+
+    // A human really did type here at some point, so the ledger is armed and
+    // nothing about the rendered text has changed since.
+    let mut observer = daemon.connect();
+    observe(&mut observer, session_id);
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b"commit this".to_vec(),
+    });
+    expect_ok(&mut conn);
+    // A frame is evidence only about the moment it was rendered, so the
+    // delivery below has to be made against one that post-dates the keystroke.
+    // Waiting for the provider's repaint is what makes that ordering real
+    // instead of assumed.
+    wait_for_output(&mut observer, Duration::from_secs(10));
+
+    // The frame says otherwise, and the frame is right: that line is grey and
+    // the cursor never left the start of the composer.
+    conn.send(&Cmd::SubmitInput {
+        session_id: session_id.to_string(),
+        data: b"owner reply".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Ok => {}
+        Evt::Error { code, message } => panic!(
+            "the composer renders the CLI's own faint suggestion, so nothing could be \
+             corrupted: {code:?} {message}"
+        ),
+        other => panic!("expected Ok, got: {other:?}"),
+    }
+
+    let recorded =
+        wait_for_submitted_line(&submitted_lines, "owner reply", Duration::from_secs(20));
+    assert!(recorded.contains("LINE:<"), "{recorded:?}");
+
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => {
+            let session = sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .expect("the session is listed");
+            assert_eq!(
+                session["composer_attestation"], "not-typed",
+                "a frame that proves the line is the CLI's own resets the ledger: {session:?}"
+            );
+        }
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+}
+
 /// `Ok` means submitted, not queued. The message and its terminating Enter
 /// are one delivery in two writes separated by the submit delay, so an answer
 /// that arrives before that delay elapsed cannot have seen the Enter written.
