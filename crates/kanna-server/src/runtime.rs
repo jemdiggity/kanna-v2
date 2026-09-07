@@ -149,10 +149,14 @@ async fn maintain_protected_input_generations(
         daemon =
             establish_protected_input_generation(&config, ProtectedInputWait::SteadyState).await;
         let daemon_pid = daemon.connected_pid();
+        log::info!(
+            "protected-input policy established on successor daemon pid {}",
+            daemon_pid
+        );
         let geometry_supported = establish_terminal_geometry_capability(&config).await;
         state.set_terminal_geometry_capability(daemon_pid, geometry_supported);
         log::info!(
-            "protected-input and terminal geometry policies established on successor daemon pid {} (geometry_supported={geometry_supported})",
+            "terminal geometry capability established on successor daemon pid {} (geometry_supported={geometry_supported})",
             daemon_pid
         );
     }

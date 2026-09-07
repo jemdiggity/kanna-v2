@@ -398,6 +398,9 @@ async fn serve_fake_daemon_connection(
             DaemonCommand::NegotiateProtectedInput { .. } => DaemonEvent::ProtectedInputReady {
                 version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
             },
+            DaemonCommand::NegotiateTerminalGeometry { .. } => DaemonEvent::TerminalGeometryReady {
+                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+            },
             DaemonCommand::Subscribe => DaemonEvent::Ok,
             DaemonCommand::List => DaemonEvent::SessionList {
                 sessions: Vec::new(),
@@ -419,6 +422,7 @@ async fn serve_fake_daemon_connection(
         if !matches!(
             &command,
             DaemonCommand::NegotiateProtectedInput { .. }
+                | DaemonCommand::NegotiateTerminalGeometry { .. }
                 | DaemonCommand::Subscribe
                 | DaemonCommand::List
         ) {

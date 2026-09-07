@@ -407,9 +407,14 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
         // startup gate, so either connection can win the race. Accept both
         // lifecycles in their natural order while requiring every command.
         let mut generation_ready = None;
+        let mut geometry_ready = false;
         let mut watcher_listed = false;
         let mut subscription = None;
-        while generation_ready.is_none() || !watcher_listed || subscription.is_none() {
+        while generation_ready.is_none()
+            || !geometry_ready
+            || !watcher_listed
+            || subscription.is_none()
+        {
             let (mut connection, _) = listener.accept().expect("accept daemon connection");
             let mut reader =
                 BufReader::new(connection.try_clone().expect("clone daemon connection"));
@@ -439,6 +444,18 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
                 // server reads a closed generation connection as "this daemon
                 // has been replaced" and negotiates with its successor.
                 generation_ready = Some(connection);
+            } else if line.contains("NegotiateTerminalGeometry") {
+                assert!(
+                    generation_ready.is_some(),
+                    "terminal geometry negotiated before protected-input setup"
+                );
+                assert!(!geometry_ready, "duplicate terminal geometry negotiation");
+                writeln!(
+                    connection,
+                    "{{\"type\":\"TerminalGeometryReady\",\"version\":1}}",
+                )
+                .expect("acknowledge terminal geometry negotiation");
+                geometry_ready = true;
             } else if line.contains("Subscribe") {
                 assert!(subscription.is_none(), "duplicate subscription");
                 writeln!(connection, "{{\"type\":\"Ok\"}}").expect("acknowledge subscribe");
