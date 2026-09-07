@@ -1,6 +1,7 @@
 import { networkInterfaces } from "node:os";
+import { localProcessFetch, type LocalProcessFetch } from "./local-process-fetch";
 
-type FetchLike = typeof fetch;
+type FetchLike = LocalProcessFetch;
 
 type MobileE2eTarget = "simulator" | "device";
 
@@ -64,7 +65,7 @@ export function resolveDesktopServerUrlForTarget(
 
 export async function assertDesktopServerReachable(
   baseUrl: string,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = localProcessFetch
 ): Promise<void> {
   const statusUrl = `${baseUrl}/v1/status`;
 
@@ -86,7 +87,7 @@ export async function assertDesktopServerReachable(
 
 export async function readDesktopIdentity(
   baseUrl: string,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = localProcessFetch
 ): Promise<{ desktopId: string; desktopName: string }> {
   const statusUrl = `${baseUrl}/v1/status`;
   const response = await fetchImpl(statusUrl);
