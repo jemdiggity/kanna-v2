@@ -281,6 +281,34 @@ describe("QA workflow assets", () => {
       "short human-readable name or purpose followed by its id in parentheses"
     );
     expect(agent.prompt).toContain("Never make a human decode a bare task id");
+    expect(agent.prompt).toContain("Watch Machine Capacity Before Starting Heavy Work");
+    expect(agent.prompt).toContain("No Kanna surface reports machine load");
+    expect(agent.prompt).toContain("`sysctl -n hw.logicalcpu`");
+    expect(agent.prompt).toContain(
+      "`ps -axo pcpu,command` filtered for `rustc`, `cargo`, `bazel`, `vitest`, and `xcodebuild`"
+    );
+    expect(agent.prompt).toContain(
+      "`kanna_list_recent_tasks` with `all_machines: true`"
+    );
+    expect(agent.prompt).toContain(
+      "Group the returned rows by `machineId` and count, per machine, the open tasks whose `runtimeState` is `busy`"
+    );
+    expect(agent.prompt).toContain(
+      "`runtimeState` is currently unreliable for Claude-provider tasks"
+    );
+    expect(agent.prompt).toContain("Weigh Codex rows as reported");
+    expect(agent.prompt).toContain("`kanna_task_logs` tail");
+    expect(agent.prompt).toContain("roughly two concurrent full gates per machine");
+    expect(agent.prompt).toContain("unknown capacity, never idle capacity");
+    expect(agent.prompt).toContain(
+      "Put an explicit pause-heavy-verification directive in the creation prompt"
+    );
+    expect(agent.prompt).toContain(
+      "a paused task nobody resumed is a task you parked by accident"
+    );
+    expect(agent.prompt).toContain(
+      "there is no scheduler or admission control behind them"
+    );
     expect(task).toContain("name: Task Manager");
     expect(task).toContain("agent: task-manager");
   });
