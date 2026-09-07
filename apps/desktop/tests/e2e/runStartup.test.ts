@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyAppStartup, describeAppStartupFailure } from "./runStartup";
+import {
+  advanceAppStartupDeadline,
+  classifyAppStartup,
+  describeAppStartupFailure,
+} from "./runStartup";
 
 const DEV_URL = "http://localhost:25000";
 
@@ -64,5 +68,40 @@ describe("describeAppStartupFailure", () => {
 
     expect(message).toContain("timed out waiting for app");
     expect(message).toContain("WebDriver never answered");
+  });
+});
+
+describe("advanceAppStartupDeadline", () => {
+  it("does not charge a cold build against the app boot timeout", () => {
+    const building = { deadline: 10_000, webdriverObserved: false };
+    expect(
+      advanceAppStartupDeadline(
+        building,
+        { webdriverReady: false, url: null, appReady: false },
+        9_500,
+        2_000,
+      ),
+    ).toEqual(building);
+
+    expect(
+      advanceAppStartupDeadline(
+        building,
+        { webdriverReady: true, url: DEV_URL, appReady: false },
+        9_500,
+        2_000,
+      ),
+    ).toEqual({ deadline: 11_500, webdriverObserved: true });
+  });
+
+  it("only resets the deadline for the first WebDriver response", () => {
+    const booting = { deadline: 11_500, webdriverObserved: true };
+    expect(
+      advanceAppStartupDeadline(
+        booting,
+        { webdriverReady: true, url: DEV_URL, appReady: false },
+        11_000,
+        2_000,
+      ),
+    ).toEqual(booting);
   });
 });

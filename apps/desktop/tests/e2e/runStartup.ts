@@ -19,6 +19,27 @@ export type AppStartupState = "ready" | "booting" | "wrong-url";
 /** How long a wrong URL is tolerated before failing; the initial load reports
  * `about:blank` for a moment while the first navigation is still provisional. */
 export const WRONG_URL_GRACE_MS = 30_000;
+export const WEBDRIVER_START_TIMEOUT_MS = 20 * 60_000;
+export const APP_READY_TIMEOUT_MS = 60_000;
+
+export interface AppStartupDeadline {
+  deadline: number;
+  webdriverObserved: boolean;
+}
+
+/** Start the app-boot clock only after the build has produced a WebDriver listener. */
+export function advanceAppStartupDeadline(
+  state: AppStartupDeadline,
+  probe: AppStartupProbe,
+  now: number,
+  appReadyTimeoutMs = APP_READY_TIMEOUT_MS,
+): AppStartupDeadline {
+  if (state.webdriverObserved || !probe.webdriverReady) return state;
+  return {
+    deadline: now + appReadyTimeoutMs,
+    webdriverObserved: true,
+  };
+}
 
 function originOf(url: string): string | null {
   try {

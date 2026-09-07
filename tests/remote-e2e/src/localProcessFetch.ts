@@ -27,8 +27,12 @@ export const localProcessFetch: LocalProcessFetch = async (input, init = {}) => 
         for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
           responseHeaders.append(incoming.rawHeaders[index], incoming.rawHeaders[index + 1]);
         }
-        resolve(new Response(Buffer.concat(chunks), {
-          status: incoming.statusCode ?? 500,
+        const status = incoming.statusCode ?? 500;
+        const responseBody = status === 204 || status === 205 || status === 304
+          ? null
+          : Buffer.concat(chunks);
+        resolve(new Response(responseBody, {
+          status,
           statusText: incoming.statusMessage,
           headers: responseHeaders
         }));

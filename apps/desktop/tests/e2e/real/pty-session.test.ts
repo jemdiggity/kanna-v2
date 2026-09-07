@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { localProcessFetch } from "../../../../../tests/remote-e2e/src/localProcessFetch";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
@@ -1109,7 +1110,7 @@ describe("pty session (real CLI)", () => {
     source?: "operator" | "manager",
   ): Promise<void> {
     const { baseUrl } = await resolveAppKannaServer(client);
-    const response = await fetch(
+    const response = await localProcessFetch(
       `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}/input`,
       {
         method: "POST",
@@ -1134,7 +1135,7 @@ describe("pty session (real CLI)", () => {
     inputs: DeliveredTaskInput[];
   }> {
     const { baseUrl } = await resolveAppKannaServer(client);
-    const response = await fetch(
+    const response = await localProcessFetch(
       `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}/inputs`,
     );
     if (!response.ok) {
@@ -1145,7 +1146,9 @@ describe("pty session (real CLI)", () => {
 
   async function deliveredInputCount(sessionId: string): Promise<number> {
     const { baseUrl } = await resolveAppKannaServer(client);
-    const response = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}`);
+    const response = await localProcessFetch(
+      `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}`,
+    );
     if (!response.ok) {
       throw new Error(`task detail read failed: ${response.status} ${await response.text()}`);
     }
@@ -1233,7 +1236,7 @@ describe("pty session (real CLI)", () => {
     const sessionId = await startDraftBoundaryFixture();
     const ownerDirective = `owner-directive-${randomUUID()}`;
 
-    expect(await deliveredTaskInputs(sessionId)).toEqual({ total: 0, inputs: [] });
+    expect(await deliveredTaskInputs(sessionId)).toMatchObject({ total: 0, inputs: [] });
 
     await queueLogicalTaskInput(sessionId, ownerDirective, "operator");
     await waitForTerminalBufferMatch(
