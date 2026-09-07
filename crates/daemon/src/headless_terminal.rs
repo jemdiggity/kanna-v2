@@ -92,10 +92,58 @@ pub enum ComposerState {
     /// into it. A positive match on rendered chrome, never an inference from a
     /// quiet session.
     Empty,
+    /// The composer line holds nothing but the provider's own dim suggestion
+    /// chrome — Claude Code's tab-to-accept ghost of the last thing submitted.
+    ///
+    /// A positive match on two rendered facts at once, never an inference from
+    /// text alone: every cell of that line is painted faint (SGR 2), which
+    /// Claude never paints a typed draft with, *and* the cursor sits at the
+    /// start of the composer rather than after the text, which is where it sits
+    /// only when nothing on that line was typed. Both together, because being
+    /// wrong here means appending a delivered message to a real unsent line.
+    ///
+    /// Proof of the same thing [`ComposerState::Empty`] proves — nobody has an
+    /// unsent line here — from a frame that is not textually empty. Without it
+    /// a session whose ledger was armed once can never recover: the ghost keeps
+    /// the composer permanently non-empty, so an empty-text frame never comes.
+    SuggestionOnly,
     /// Not provably empty: a draft, a suggestion the daemon cannot tell from a
     /// draft, a dialog, a busy frame, a provider whose empty composer has not
     /// been measured, or a screen that has not drawn a composer yet.
     Unknown,
+}
+
+impl ComposerState {
+    /// Whether this frame proves nobody has an unsent line at the composer.
+    pub fn proves_nothing_typed(self) -> bool {
+        matches!(self, Self::Empty | Self::SuggestionOnly)
+    }
+}
+
+/// One reading of the composer row's *cells*, with the styling and cursor the
+/// provider painted them with.
+///
+/// The line-text reads elsewhere in this file normalise whitespace and throw
+/// styling away, which is right for classifying chrome and wrong for the two
+/// questions here: whether the provider painted this line as its own
+/// suggestion, and what exactly a human has typed on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerRow {
+    /// The rendered text after the prompt glyph and its separator cell, with
+    /// the row's trailing blank cells dropped. Interior spacing is untouched.
+    pub text: String,
+    /// Whether every non-blank cell of `text` is painted faint (SGR 2).
+    pub all_faint: bool,
+    /// The text between the start of the composer and the cursor, when the
+    /// cursor is on this row at or after that start. `None` otherwise.
+    pub before_cursor: Option<String>,
+    /// Whether the cursor sits where a composer holding no typed text puts it:
+    /// at the very start, with the whole line still to its right.
+    pub cursor_at_start: bool,
+    /// Whether every cell from the cursor to the end of the row is blank —
+    /// the cursor is after everything rendered, so `before_cursor` is the
+    /// whole line.
+    pub cursor_at_end: bool,
 }
 
 pub fn initial_session_status(provider: Option<AgentProvider>) -> SessionStatus {
@@ -382,7 +430,115 @@ impl HeadlessTerminal {
             return Ok(ComposerState::Unknown);
         };
         let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
-        Ok(composer_state_from_lines(&footer_lines, provider))
+        let composer_line = match composer_reading_from_lines(&footer_lines, provider) {
+            None => return Ok(ComposerState::Unknown),
+            Some((_, "")) => return Ok(ComposerState::Empty),
+            Some((index, _)) => footer_lines[index].clone(),
+        };
+        // The line is not textually empty, so the only remaining question is
+        // whether the provider painted it as its own suggestion. Answered from
+        // the cells, and only for a provider whose suggestion styling has
+        // actually been measured off real frames.
+        if !paints_faint_suggestions(provider) {
+            return Ok(ComposerState::Unknown);
+        }
+        let Some(row) = self.composer_row_for_line(&composer_line, provider)? else {
+            return Ok(ComposerState::Unknown);
+        };
+        if row.all_faint && row.cursor_at_start && !row.text.is_empty() {
+            return Ok(ComposerState::SuggestionOnly);
+        }
+        Ok(ComposerState::Unknown)
+    }
+
+    /// The composer row a human could have a swappable draft on, read from the
+    /// cells rather than from normalised text.
+    ///
+    /// `None` whenever this frame is not a plain, idle, readable composer —
+    /// a dialog, a busy repaint, an alternate screen, a provider whose
+    /// composer has never been measured, or a line the row scan cannot pin
+    /// back to a cell row. Everything a caller needs to decide whether it may
+    /// lift text off that line is in the returned row; nothing here decides it.
+    pub fn plain_composer_row(
+        &mut self,
+        provider: Option<AgentProvider>,
+    ) -> HeadlessTerminalResult<Option<ComposerRow>> {
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+        if composer_prompt(provider).is_none() {
+            return Ok(None);
+        }
+        // Deliberately no alternate-screen guard. Claude Code draws its whole
+        // TUI — composer included — on the alternate screen (`ESC[?1049h` is
+        // in every live session's own byte stream), so refusing one would
+        // refuse every real composer there is. What actually separates a
+        // composer from a full-screen application here is the composer shape
+        // itself: a measured prompt glyph with nothing but provider chrome
+        // under it, on a frame that is neither busy nor waiting.
+        if !self.status_frame_complete() {
+            return Ok(None);
+        }
+        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
+        let Some((index, _)) = composer_reading_from_lines(&footer_lines, provider) else {
+            return Ok(None);
+        };
+        let composer_line = footer_lines[index].clone();
+        self.composer_row_for_line(&composer_line, provider)
+    }
+
+    /// Find the cell row that rendered `normalized_line` and read its styling.
+    ///
+    /// The line is located by the same text the rest of this file classifies,
+    /// so there is one answer to *which* row is the composer; this only adds
+    /// what normalisation threw away. The last matching row wins, matching
+    /// [`composer_index_from_lines`].
+    fn composer_row_for_line(
+        &mut self,
+        normalized_line: &str,
+        provider: AgentProvider,
+    ) -> HeadlessTerminalResult<Option<ComposerRow>> {
+        let Some(prompt) = composer_prompt(provider) else {
+            return Ok(None);
+        };
+        let cursor_x = self.terminal.cursor_x().unwrap_or(0);
+        let cursor_y = self.terminal.cursor_y().unwrap_or(0);
+        let snapshot = self.render_state.update(&self.terminal)?;
+        let cols = usize::from(snapshot.cols()?);
+        let mut matched: Option<(u16, Vec<ComposerCell>)> = None;
+        let mut y: u16 = 0;
+        let mut row_iteration = self.row_iterator.update(&snapshot)?;
+        while let Some(row) = row_iteration.next() {
+            let mut cells: Vec<ComposerCell> = Vec::with_capacity(cols);
+            let mut cell_iteration = self.cell_iterator.update(row)?;
+            for x in 0..cols {
+                cell_iteration.select(x as u16)?;
+                let raw_cell = cell_iteration.raw_cell()?;
+                let text = match raw_cell.wide()? {
+                    CellWide::SpacerTail | CellWide::SpacerHead => String::new(),
+                    CellWide::Narrow | CellWide::Wide => {
+                        cell_iteration.graphemes()?.into_iter().collect()
+                    }
+                };
+                let faint = cell_iteration.style()?.faint;
+                cells.push(ComposerCell { text, faint });
+            }
+            let rendered: String = cells.iter().map(|cell| cell.text.as_str()).collect();
+            if normalize_row_text(&rendered) == normalized_line
+                && line_starts_with_prompt(&rendered, &[prompt])
+            {
+                matched = Some((y, cells));
+            }
+            y = y.saturating_add(1);
+        }
+        let Some((row_y, cells)) = matched else {
+            return Ok(None);
+        };
+        Ok(Some(composer_row_from_cells(
+            &cells,
+            prompt,
+            (cursor_y == row_y).then_some(cursor_x),
+        )))
     }
 
     /// The text rendered on this frame's composer line, or `None` when the
@@ -1109,7 +1265,9 @@ fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
     None
 }
 
-/// Read the composer out of a rendered frame.
+/// Read the composer out of a rendered frame: its index in `lines` and the
+/// text rendered after its prompt glyph, or `None` when the frame draws no
+/// readable composer at all.
 ///
 /// Claude and Codex only: both draw a single-glyph prompt with the draft
 /// immediately after it, so an empty remainder on that line *is* the proof
@@ -1124,35 +1282,114 @@ fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
 /// waiting frame is refused outright: its empty composer is true but its
 /// screen is mid-repaint, and nothing needs an answer from a session that is
 /// still working.
-fn composer_state_from_lines(lines: &[String], provider: AgentProvider) -> ComposerState {
+///
+/// "There is no readable composer here" and "the composer reads as holding
+/// something" are different answers, which is why this returns the reading
+/// rather than a verdict: only the second is worth looking at the cells for.
+fn composer_reading_from_lines(lines: &[String], provider: AgentProvider) -> Option<(usize, &str)> {
     if frame_is_busy_or_waiting(lines, provider) {
-        return ComposerState::Unknown;
+        return None;
     }
-    let Some(composer_index) = composer_index_from_lines(lines, provider) else {
-        return ComposerState::Unknown;
-    };
-    if lines[composer_index + 1..]
+    let composer_index = composer_index_from_lines(lines, provider)?;
+    if claude_composer_box_tail(&lines[composer_index + 1..], provider)
         .iter()
         .any(|line| !line_is_provider_chrome(line, provider))
     {
-        return ComposerState::Unknown;
+        return None;
     }
-    if composer_line_text(&lines[composer_index]).is_empty() {
-        ComposerState::Empty
-    } else {
-        ComposerState::Unknown
+    Some((composer_index, composer_line_text(&lines[composer_index])))
+}
+
+/// Whether this provider's suggestion styling has been measured off real
+/// frames.
+///
+/// Claude Code paints its tab-to-accept ghost with SGR 2 and leaves the cursor
+/// at the start of the composer; both were read off a live session's snapshot
+/// on 2026-09-07 (`\x1b[0m❯\u{a0}\x1b[2mcommit this`). Nothing else here has
+/// been measured, and this file's rule is that unmeasured chrome matches
+/// nothing rather than being written from the shape a matcher expects.
+fn paints_faint_suggestions(provider: AgentProvider) -> bool {
+    matches!(provider, AgentProvider::Claude)
+}
+
+/// One rendered cell of the composer row: what it draws and whether it is dim.
+struct ComposerCell {
+    text: String,
+    faint: bool,
+}
+
+/// Read a composer row's cells into the facts a caller can act on.
+///
+/// The draft starts after the prompt glyph and the single separator cell the
+/// provider draws next to it — the same two characters [`prompt_remainder`]
+/// skips — so what is captured here is what a human would see themselves
+/// having typed, and nothing the provider drew.
+fn composer_row_from_cells(
+    cells: &[ComposerCell],
+    prompt: char,
+    cursor_x: Option<u16>,
+) -> ComposerRow {
+    let prompt_index = cells
+        .iter()
+        .position(|cell| cell.text.starts_with(prompt))
+        .unwrap_or(0);
+    let separator = cells.get(prompt_index + 1).is_some_and(cell_is_blank);
+    let start = prompt_index + 1 + usize::from(separator);
+    let cell_is_content = |cell: &ComposerCell| !cell_is_blank(cell);
+
+    let end = cells
+        .iter()
+        .rposition(cell_is_content)
+        .map_or(start, |index| index + 1)
+        .max(start);
+    let text: String = cells[start.min(cells.len())..end.min(cells.len())]
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect();
+    let styled = &cells[start.min(cells.len())..end.min(cells.len())];
+    let all_faint = styled.iter().any(&cell_is_content)
+        && styled
+            .iter()
+            .filter(|cell| cell_is_content(cell))
+            .all(|cell| cell.faint);
+
+    let cursor = cursor_x.map(usize::from);
+    let before_cursor = cursor.filter(|at| *at >= start).map(|at| {
+        cells[start.min(cells.len())..at.min(cells.len())]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+    });
+    let cursor_at_start = cursor == Some(start);
+    let cursor_at_end = cursor
+        .is_some_and(|at| at >= start && !cells[at.min(cells.len())..].iter().any(cell_is_content));
+
+    ComposerRow {
+        text,
+        all_faint,
+        before_cursor,
+        cursor_at_start,
+        cursor_at_end,
     }
+}
+
+/// A cell holds nothing a human could have typed: it is empty, or it draws
+/// only whitespace. The provider's own separator next to the prompt is a
+/// no-break space, which is whitespace like any other here.
+fn cell_is_blank(cell: &ComposerCell) -> bool {
+    cell.text.is_empty() || cell.text.chars().all(char::is_whitespace)
 }
 
 /// The text rendered on the composer line, or `None` when this frame draws no
 /// readable composer.
 ///
-/// `Some("")` is the positive proof [`composer_state_from_lines`] is built on;
-/// `Some(text)` is what is *rendered* there and nothing more. Whether that text
-/// is a human's unsent line or the CLI's own tab-to-accept suggestion is not
-/// answerable from the frame — both are painted the same shape — which is why
-/// the session's typed-byte attestation, not this function, decides how it is
-/// labelled.
+/// `Some("")` is the positive proof [`ComposerState::Empty`] is built on;
+/// `Some(text)` is what is *rendered* there and nothing more. This function
+/// reads normalised text, and text alone cannot say whether a line was typed
+/// or drawn by the CLI, which is why the session's typed-byte attestation
+/// decides how it is labelled. The *cells* can say more than the text can —
+/// see [`ComposerState::SuggestionOnly`] — but that is corroboration for the
+/// ledger, not a replacement for it.
 fn composer_prompt(provider: AgentProvider) -> Option<char> {
     match provider {
         AgentProvider::Claude => Some(CLAUDE_IDLE_PROMPT),
@@ -1167,6 +1404,27 @@ fn composer_index_from_lines(lines: &[String], provider: AgentProvider) -> Optio
         line_starts_with_prompt(line, &[prompt])
             && !(provider == AgentProvider::Claude && line_is_selected_menu_option(line))
     })
+}
+
+/// The rows below a Claude composer that still have to read as chrome.
+///
+/// Claude closes its composer box with a divider and draws only its status bar
+/// beneath that border, so everything past the border is chrome by
+/// construction — the same reading [`claude_composer_is_parked`] uses, and for
+/// the same reason. 2.1.263 puts a `/rc` agent-connection row, an effort
+/// badge, an update badge and a login-expiry notice down there; unclassified,
+/// any one of them made the composer unreadable, so `composer_state` answered
+/// `Unknown` for every live Claude session on this machine and attestation
+/// could not fire at all. Other providers are read unchanged: only Claude's
+/// box has been measured.
+fn claude_composer_box_tail(below: &[String], provider: AgentProvider) -> &[String] {
+    if provider != AgentProvider::Claude {
+        return below;
+    }
+    below
+        .iter()
+        .position(|line| line_is_visual_divider(line))
+        .map_or(below, |border| &below[..border])
 }
 
 fn frame_is_busy_or_waiting(lines: &[String], provider: AgentProvider) -> bool {
@@ -2040,6 +2298,219 @@ mod tests {
         );
     }
 
+    /// The 2026-09-07 owner report, replayed from the frame that produced it.
+    ///
+    /// A live session's snapshot rendered its composer as
+    /// `ESC[0m ❯ NBSP ESC[2m commit this` with the cursor parked at column 2 —
+    /// SGR 2 is faint, and the owner could see it was grey while typed text is
+    /// not. Text alone called that a draft and held every delivery behind it
+    /// for the life of the session.
+    #[test]
+    fn claude_faint_suggestion_with_the_cursor_at_the_start_proves_nothing_typed() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(claude_composer_frame("\x1b[2mcommit this").as_bytes());
+        terminal.write(b"\x1b[3;3H");
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::SuggestionOnly
+        );
+        assert_eq!(
+            terminal
+                .composer_line(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("commit this"),
+            "what is rendered is still reported; only the verdict about it changed"
+        );
+    }
+
+    /// The line that must never be read as a suggestion: the same words, typed.
+    #[test]
+    fn claude_typed_text_at_the_composer_is_never_read_as_a_suggestion() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(claude_composer_frame("commit this").as_bytes());
+        terminal.write(b"\x1b[3;14H");
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// Faint alone is not enough. A human who dimmed their own terminal, or a
+    /// provider that ever paints a draft faint, still has the cursor after
+    /// what they typed.
+    #[test]
+    fn claude_faint_text_with_the_cursor_after_it_stays_unknown() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(claude_composer_frame("\x1b[2mcommit this").as_bytes());
+        terminal.write(b"\x1b[3;14H");
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// The cursor at the start is not enough either: a human who pressed
+    /// Ctrl-A over their own draft is at column 2 with text that is not faint.
+    #[test]
+    fn claude_unfaint_text_with_the_cursor_at_the_start_stays_unknown() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(claude_composer_frame("commit this").as_bytes());
+        terminal.write(b"\x1b[3;3H");
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// Unmeasured chrome matches nothing. Codex draws a composer this file can
+    /// read, but nobody has measured what it paints its own suggestions with.
+    #[test]
+    fn codex_suggestion_styling_is_unmeasured_and_matches_nothing() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Done.\r\n",
+                "────────────────────────────────\r\n",
+                "\x1b[0m›\u{a0}\x1b[2mcommit this\r\n",
+            )
+            .as_bytes(),
+        );
+        terminal.write(b"\x1b[3;3H");
+
+        assert_eq!(
+            terminal.composer_state(Some(AgentProvider::Codex)).unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// What a swap is allowed to lift off the composer, read from the cells:
+    /// exactly the bytes left of the cursor, interior spacing and multibyte
+    /// intact, and nothing the provider drew.
+    #[test]
+    fn a_typed_draft_is_captured_byte_exact_from_the_cells() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(claude_composer_frame("héllo  wörld ").as_bytes());
+        // 13 rendered cells of draft, so the cursor sits at column 2 + 13.
+        terminal.write(b"\x1b[3;16H");
+
+        let row = terminal
+            .plain_composer_row(Some(AgentProvider::Claude))
+            .unwrap()
+            .expect("a plain composer row");
+        assert_eq!(row.before_cursor.as_deref(), Some("héllo  wörld "));
+        assert!(row.cursor_at_end);
+        assert!(!row.all_faint);
+        assert!(!row.cursor_at_start);
+    }
+
+    /// Claude Code draws its composer on the alternate screen, so a composer
+    /// row must still be readable there.
+    #[test]
+    fn a_composer_on_the_alternate_screen_is_still_a_composer() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(b"\x1b[?1049h");
+        terminal.write(claude_composer_frame("half typed").as_bytes());
+        terminal.write(b"\x1b[3;13H");
+
+        let row = terminal
+            .plain_composer_row(Some(AgentProvider::Claude))
+            .unwrap()
+            .expect("a composer row on the alternate screen");
+        assert_eq!(row.before_cursor.as_deref(), Some("half typed"));
+    }
+
+    /// A permission prompt is not a plain composer, whatever it draws below.
+    #[test]
+    fn a_waiting_permission_prompt_has_no_plain_composer_row() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "Do you want to allow this command?\r\n",
+                "❯ 1. Yes\r\n",
+                "  2. No\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert!(terminal
+            .plain_composer_row(Some(AgentProvider::Claude))
+            .unwrap()
+            .is_none());
+    }
+
+    /// Everything past the composer box's closing divider is Claude's status
+    /// bar, whose rows this file has never enumerated. Unclassified, the `/rc`
+    /// row made every live Claude session on this machine fail the composer
+    /// read, so attestation could never fire.
+    #[test]
+    fn rows_below_the_composer_box_divider_are_status_bar_chrome() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Done.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ \r\n",
+                "────────────────────────────────\r\n",
+                "/rc\r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Empty
+        );
+    }
+
+    /// A palette below the composer is not below the box: it is drawn inside
+    /// it, above the closing divider, so it still has to read as chrome — and
+    /// it does not, because the composer above it is holding a `/`.
+    #[test]
+    fn a_palette_entry_still_leaves_the_composer_unreadable() {
+        let mut terminal = HeadlessTerminal::new(120, 14, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Ready for review.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ /\r\n",
+                "/clear Clear conversation history\r\n",
+                "/commit Commit the current changes\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Unknown
+        );
+    }
+
+    /// A Claude frame whose composer line carries `composer` verbatim, drawn
+    /// the way the CLI draws it: `❯`, a no-break space, then the line.
+    fn claude_composer_frame(composer: &str) -> String {
+        format!(
+            "⏺ Done.\r\n────────────────────────────────\r\n\x1b[0m❯\u{a0}{composer}\r\n\x1b[0m⏵⏵ bypass permissions on (shift+tab to cycle)\r\n"
+        )
+    }
+
     #[test]
     fn claude_busy_and_waiting_frames_are_not_attested() {
         let mut busy = HeadlessTerminal::new(120, 10, 10_000).unwrap();
@@ -2771,6 +3242,54 @@ mod tests {
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
+        );
+    }
+
+    /// The captured parked frame carries `/rc` under its composer, and until
+    /// that row was classified the composer read as unreadable — so every live
+    /// Claude session on this machine answered `Unknown` and composer
+    /// attestation could never fire on any of them.
+    #[test]
+    fn captured_claude_parked_composer_is_provably_empty() {
+        let mut terminal =
+            claude_fixture_terminal("parked-composer-status-bar-2.1.263-171x65.json");
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Empty
+        );
+    }
+
+    /// The 2026-09-07 owner report, on the real frame that produced it.
+    ///
+    /// Task `5d2f1c5c`'s live composer, captured unaltered from the daemon
+    /// handoff log: `❯`, a no-break space, then `commit this` painted with
+    /// SGR 2, with the CLI's own cursor left at the start of the line. The
+    /// session's ledger said `typed`; the frame says the CLI drew it.
+    #[test]
+    fn captured_claude_faint_suggestion_proves_nothing_typed() {
+        let mut terminal = HeadlessTerminal::new(260, 10, 10_000).unwrap();
+        terminal.write(
+            &std::fs::read(format!(
+                "{}/tests/fixtures/claude/faint-suggestion-composer.ansi",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap(),
+        );
+
+        assert_eq!(
+            terminal
+                .composer_line(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("commit this")
+        );
+        assert_eq!(
+            terminal
+                .composer_state(Some(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::SuggestionOnly
         );
     }
 

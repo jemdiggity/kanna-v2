@@ -277,7 +277,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `Ok` | — | Command acknowledged |
-| `Error` | message, code | Command failed. `logical_input_held_by_draft` means the message is queued behind a human's unsent line and was not submitted; `logical_input_submission_unproven` means its text reached the composer but its Enter was withheld because the terminal never settled |
+| `Error` | message, code | Command failed. `logical_input_held_by_draft` means the message is queued behind a composer the daemon could neither read nor safely swap and was not submitted; `logical_input_submission_unproven` means its text reached the composer but its Enter was withheld because the terminal never settled |
 | `Output` | session_id, data (byte array) | PTY output |
 | `Exit` | session_id, code | Process exited |
 | `SessionCreated` | session_id | New session ready |
@@ -355,12 +355,13 @@ the daemon never infers a boundary from CR/LF bytes.
 one delivery in two writes — the message, then its fenced Enter — and the
 acknowledgement fires only after that Enter reaches the PTY. It travels with
 the message rather than with the call, so a message dispatched immediately, one
-released by a producer's boundary, and one released by composer attestation all
-acknowledge through the same channel. A message
-the daemon parks behind a declared raw draft has not been submitted, and is
-answered `logical_input_held_by_draft` rather than `Ok`: the message stays
-queued for the boundary, but no caller is told a delivery happened that did
-not. Once
+released by a producer's boundary, one released by composer attestation and one
+delivered over a lifted draft all acknowledge through the same channel. A
+message the daemon parks behind a declared raw draft has not been submitted,
+and is answered `logical_input_held_by_draft` rather than `Ok`: the message
+stays queued for the boundary, but no caller is told a delivery happened that
+did not. That answer is now the exception rather than the rule — see
+"Delivering over a typed draft" below. Once
 released, the writer pauses after each synthesized Enter before beginning the
 next message and emits `LogicalInputReleased` only after that Enter is written;
 this preserves both provider-composer and durable-record boundaries. `List`
@@ -464,13 +465,35 @@ message could be appended to. It is one-way (towards "no draft is here", never
 the reverse and never "a draft is present"), it writes nothing to the PTY, and
 it discards nothing on screen. It matches only Claude's `❯` and Codex's `›`
 composers; only when that prompt is the last one in the status window with
-nothing but provider chrome below it; only when the frame is neither busy nor
-waiting; and only when the remainder of the prompt line is empty. A suggestion
-the CLI drew and a half-typed line are indistinguishable in a rendered frame, so
-any text at all leaves the state unknown. Providers whose empty composer has not
-been captured, and sessions with no provider, are never attested. There is
-deliberately no clear-and-submit control: the daemon never discards or submits
-text a human may have typed.
+nothing but provider chrome below it; and only when the frame is neither busy
+nor waiting. Providers whose empty composer has not been captured, and sessions
+with no provider, are never attested. There is deliberately no clear-and-submit
+control: the daemon never discards or submits text a human may have typed.
+
+**A composer that renders the provider's own suggestion is attested too, from
+its cells rather than its text.** Normalised text cannot tell a half-typed line
+from a ghost the CLI drew, but the *cells* can, and the difference had a cost:
+Claude Code paints the last submitted line back as a faint tab-to-accept
+suggestion, so a session whose ledger armed once never saw a textually empty
+composer again and held every delivery for the rest of its life. That is the
+owner report of 2026-09-07 — a composer attested `typed` whose text the owner
+could see was grey while typed text is not. The daemon therefore reads the
+composer row's styling and cursor, and calls it a suggestion only when **both**
+are true at once: every rendered cell after the prompt is painted faint
+(SGR 2), and the cursor is at the start of the composer rather than after the
+text. Either one alone leaves the state unknown — a human who pressed Ctrl-A
+over their own draft has the cursor at the start, and being wrong here appends
+a delivered message to a real unsent line. Only Claude's styling has been
+measured (`crates/daemon/tests/fixtures/claude/faint-suggestion-composer.ansi`,
+captured off the reported session); no other provider matches, on this file's
+standing rule that unmeasured chrome matches nothing.
+
+The `❯` line also has to be *findable*, and it was not. Claude right-aligns a
+lone `/rc` release-channel token under its composer rule; unclassified, it made
+every live Claude session fail the "nothing but provider chrome below the
+composer" test, so `composer_state` answered `Unknown` for all of them and
+attestation could not fire at all. A lone slash token below the composer is now
+classified as the chrome it is.
 
 The daemon runs attestation on each session's own status tick — an inherited
 session nobody types into produces no output at all, so nothing else would ever
@@ -513,10 +536,24 @@ the write interlock and the count untouched.
   empty, so attestation clears that case on the next frame.
 - **Inert**, not counted: every other well-formed CSI (`ESC [ … final`) and SS3
   (`ESC O x`) sequence — left/right, Home/End, PageUp/PageDown, Delete, F-keys,
-  SGR mouse reports, focus in/out — a bare `ESC`, an `ESC`+byte Alt chord, and
-  the C0 controls that only move, delete, redraw or abandon (`NUL`,
-  `Ctrl-A/B/C/D/E/F`, `BEL`, `BS`, `Ctrl-K`, `Ctrl-L`, `Ctrl-U`, `Ctrl-W`,
-  `Ctrl-Z`, `FS`–`US`) and `DEL`.
+  SGR mouse reports, focus in/out, and every CSI-shaped terminal *reply*
+  (device attributes, cursor-position and status reports, kitty keyboard flags,
+  text-area size) — a bare `ESC`, an `ESC`+byte Alt chord, and the C0 controls
+  that only move, delete, redraw or abandon (`NUL`, `Ctrl-A/B/C/D/E/F`, `BEL`,
+  `BS`, `Ctrl-K`, `Ctrl-L`, `Ctrl-U`, `Ctrl-W`, `Ctrl-Z`, `FS`–`US`) and `DEL`.
+- **Inert**, not counted: a terminated *string* escape and its whole payload —
+  DCS (`ESC P`), OSC (`ESC ]`), SOS (`ESC X`), PM (`ESC ^`) and APC (`ESC _`),
+  up to `ST` (`ESC \`) or, for OSC, `BEL`. No key produces one. They are how an
+  emulator answers the application's own questions — XTVERSION, XTGETTCAP and
+  DECRQSS replies, and the OSC 10/11/4 colour reports Claude Code asks for at
+  startup and after every resize — and they arrive up the same PTY input path a
+  keystroke uses. Their payloads used to be counted as printable characters,
+  which armed the ledger on a terminal nobody had touched, because the plain
+  `Input` command and the KSP `TermInput` frame declare every byte they carry a
+  draft unless the client marks it control. The terminator is what makes this
+  safe: `ESC ]` is also Alt-`]` and the desktop coalesces consecutive keydowns
+  into one write, so an *unterminated* introducer stays a two-byte Alt chord and
+  the characters after it still count.
 - Anything unrecognized — an unassigned control, a truncated sequence — counts
   as content. The safe direction is to hold.
 
@@ -534,6 +571,78 @@ wrong writes a delivered message into a human's half-typed line — the exact ha
 this whole mechanism exists to prevent. Emptiness stays a claim about a rendered
 frame, and after a genuine clear the frame does read empty, so attestation
 releases the hold on the next status tick.
+
+### Delivering over a typed draft: stash and restore
+
+Holding is the right answer for a composer this daemon cannot read. It is a
+poor one for a composer it *can*: a message queued behind a human's unsent line
+waits as long as the human does, which in practice is hours. So when a delivery
+meets a genuinely typed draft, the daemon lifts the draft off the composer,
+submits the message on its own, and puts the draft back.
+
+The swap is single-flight per session and runs from two places: the withholding
+path of a `SubmitInput` that would otherwise be refused, and the session's own
+status tick, so a message queued earlier is not stranded. It never runs inline
+in the writer loop — it waits on writes that loop performs.
+
+It starts only when every one of these holds:
+
+- the ledger says `Some(n>0)` — a draft this daemon *watched* being typed.
+  `None` (inherited, uncounted) never swaps: nothing here knows what is on that
+  screen;
+- every declared-draft write has landed and a frame has been mirrored since, the
+  same interlock attestation uses;
+- the frame is a plain, idle, readable composer for a provider whose
+  one-keystroke clear has been measured — Claude only, `Ctrl-U`;
+- the composer's line is not faint (a faint one is the provider's own
+  suggestion, which attestation resolves without writing anything);
+- the cursor is after everything rendered on that line. This is what makes the
+  captured bytes the *whole* draft and makes `Ctrl-U` — "delete to the start of
+  the line" — clear all of it. A draft ending in whitespace fails this, because
+  trailing blanks are indistinguishable from the blank remainder of the row;
+  everything that *is* captured is byte-exact.
+
+Then, in order: the draft is captured from the composer's cells, byte for byte
+including multibyte and interior spacing; `Ctrl-U` is written as **control**
+input, so it touches neither the draft flag nor the ledger; the daemon waits
+for one repaint and reads the composer back, which must render empty or as the
+provider's own suggestion; the queued messages are dispatched
+through the ordinary logical path, with its existing paste framing and Enter
+fence; and the draft is written back as an ordinary **declared draft**, so the
+ledger counts it exactly as it counted the original and the composer attests
+`typed` again on the other side. The caller's acknowledgement fires after the
+restore, not before: the delivery is not finished until the composer is the
+human's again.
+
+Every step is verified, and an unverifiable one abandons rather than guesses:
+
+- **The clear did nothing** (the composer still renders the captured draft):
+  abandon, write nothing. Writing the draft back on top of itself would double
+  it, which is the corruption this exists to avoid. The message stays queued
+  and the draft is untouched.
+- **The composer reads as something else**, or never repaints inside the bound:
+  abandon, write nothing, and log the captured draft verbatim.
+- **The submission could not be proven** (`SubmissionUnproven`): the message
+  text is parked at the composer, so the draft is **not** written back on top
+  of it — that would submit the human's line concatenated onto a sentence
+  nobody wrote. The captured draft is logged verbatim and the caller hears
+  `logical_input_submission_unproven`.
+- **The restore write never reached the PTY**: the message *was* submitted, so
+  the caller hears success — telling them their text is parked at that composer
+  would be false. The draft is gone from the composer and is logged verbatim.
+  The daemon log is the record of every draft it could not put back.
+
+While a swap is in flight the composer is not the human's, so every raw write
+that arrives is **buffered** and replayed onto the restored draft in the order
+it was typed; the producer's acknowledgement fires when its bytes actually
+reach the PTY, after the replay, rather than at a convenient earlier moment. A
+buffered write keeps its declared meaning, so an Enter typed mid-swap submits
+the restored draft plus whatever followed it, exactly as it would have.
+
+`logical_input_held_by_draft` therefore becomes rare rather than routine: it
+now means a composer the daemon could not read or could not verify — an
+unmeasured provider, an inherited uncounted draft, a dialog, a busy frame, a
+wrapped multi-line draft, a cursor mid-line, or a clear that did not clear.
 
 The ledger is also what labels the composer for everything outside the daemon.
 The verdict is `typed` (content bytes counted since the last boundary),

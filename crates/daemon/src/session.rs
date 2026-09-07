@@ -7,7 +7,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::draft_bytes::draft_content_byte_count;
-use crate::headless_terminal::{ComposerState, HeadlessTerminal};
+#[cfg(test)]
+use crate::headless_terminal::ComposerState;
+use crate::headless_terminal::HeadlessTerminal;
 use crate::protocol::{
     AgentProvider, ComposerAttestation, SessionInfo, SessionState, SessionStatus,
 };
@@ -29,6 +31,27 @@ pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
 /// burst rather than as a submission, and the owner's message sat unsent at the
 /// composer for six minutes.
 pub const LOGICAL_INPUT_SUBMIT_DELAY_MS: u64 = 150;
+/// How long a draft swap waits for one provider repaint, and for one of its
+/// own writes to reach the PTY.
+///
+/// Short on purpose. Everything it bounds is a keystroke's worth of work on an
+/// idle composer, and a provider that has not answered in this long is one
+/// whose composer nothing here can describe — which is the case the swap has
+/// to abandon rather than write into.
+const COMPOSER_SWAP_STEP_TIMEOUT_MS: u64 = 2_000;
+
+fn composer_swap_step_timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = std::env::var("KANNA_DAEMON_TEST_COMPOSER_SWAP_STEP_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Duration::from_millis(milliseconds);
+    }
+    Duration::from_millis(COMPOSER_SWAP_STEP_TIMEOUT_MS)
+}
+
 /// The bound on waiting for that quiet window.
 ///
 /// A terminal that never settles cannot be proven to have consumed anything, so
@@ -443,9 +466,81 @@ struct InputCoordinationState {
     /// this struct, so one poller comparing against this field reports all of
     /// them and none of the writers needs a broadcast handle.
     published_input_blocked: bool,
+    /// Ids handed out to queued logical messages so far.
+    next_logical_input_id: u64,
+    /// Set while this daemon has a human's draft lifted off the composer.
+    ///
+    /// Its presence is the whole interlock: exactly one swap runs at a time,
+    /// and every raw write that arrives meanwhile is buffered here rather than
+    /// landing on a composer that is mid-operation. A human who keeps typing
+    /// through a swap loses nothing and sees nothing reordered — their
+    /// keystrokes are replayed onto the restored draft, in order.
+    draft_swap: Option<DraftSwap>,
+}
+
+/// One in-flight draft swap.
+struct DraftSwap {
+    buffered: Vec<BufferedRawInput>,
+}
+
+/// A raw write held back while a swap is in flight, with the acknowledgement
+/// its producer is still waiting on. The ack fires when the bytes actually
+/// reach the PTY, which is after the replay — the producer is told the truth
+/// about when its keystroke landed, not a convenient earlier answer.
+struct BufferedRawInput {
+    data: Vec<u8>,
+    kind: RawInputKind,
+    written: Option<oneshot::Sender<WriteOutcome>>,
+}
+
+/// What a delivery attempted over a typed draft actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftSwapOutcome {
+    /// No swap was tried. Either nothing was held, the composer is not one
+    /// this daemon can lift text off, or another swap is already running. The
+    /// message stays queued exactly as it was.
+    NotAttempted,
+    /// The draft was lifted, the queued messages were submitted, and the draft
+    /// is back at the composer with any keystrokes typed mid-swap replayed
+    /// after it.
+    Restored,
+    /// The messages were written but their submission could not be proven, so
+    /// the message text is parked at the composer and the draft was **not**
+    /// written back on top of it. The captured draft is logged verbatim.
+    DeliveredUnproven,
+    /// The messages were submitted, but the draft could not be written back.
+    /// The delivery succeeded and is reported as such; the draft is logged
+    /// verbatim, because it is gone from the composer.
+    DeliveredWithoutRestore,
+    /// A step could not be verified. Nothing was submitted and nothing was
+    /// written back; the message stays queued behind the draft.
+    Aborted,
+}
+
+/// What clears a provider's composer in one keystroke, given a cursor already
+/// at the end of the draft.
+///
+/// Claude Code binds `Ctrl-U` to "delete from the cursor to the start of the
+/// line", so it clears the whole draft only because a swap refuses to start
+/// unless the cursor is after everything rendered — the same precondition that
+/// makes the captured draft the whole line. Nothing else is measured, and this
+/// file's rule is that unmeasured chrome matches nothing: another provider
+/// falls back to queueing rather than to a guessed keybinding.
+fn composer_clear_sequence(provider: Option<AgentProvider>) -> Option<&'static [u8]> {
+    match provider {
+        Some(AgentProvider::Claude) => Some(b"\x15"),
+        _ => None,
+    }
 }
 
 struct QueuedLogicalInput {
+    /// Identifies this entry for the length of its stay in the queue.
+    ///
+    /// A draft swap hands one entry's acknowledgement to itself and must give
+    /// it back if it abandons. "The last undispatched entry" is not that
+    /// entry: a message queued while the swap ran is also undispatched, and
+    /// handing it somebody else's acknowledgement answers the wrong caller.
+    id: u64,
     data: Vec<u8>,
     dispatched: bool,
     released_from_draft: bool,
@@ -465,12 +560,16 @@ impl InputCoordinationState {
             declared_draft_writes_enqueued: 0,
             declared_draft_writes_completed: 0,
             mirrored_chunks_at_last_draft_write: 0,
+            next_logical_input_id: record.pending_logical_inputs.len() as u64,
+            draft_swap: None,
             published_input_blocked: !record.raw_input_draft_state_known,
             logical_inputs: record
                 .pending_logical_inputs
                 .iter()
                 .cloned()
-                .map(|data| QueuedLogicalInput {
+                .enumerate()
+                .map(|(index, data)| QueuedLogicalInput {
+                    id: index as u64,
                     data,
                     dispatched: false,
                     released_from_draft: true,
@@ -572,6 +671,12 @@ pub struct SessionHandle {
     /// Logical multiline framing must follow the live mode instead of sending
     /// control markers to a program that would treat them as literal text.
     bracketed_paste_mode: AtomicBool,
+    /// Fires every time a chunk is mirrored into the headless terminal.
+    ///
+    /// A draft swap has to know that the provider has *repainted* before it
+    /// reads the composer back, and waiting for that by re-reading on a timer
+    /// would be a poll over evidence the mirror already has.
+    mirrored: Arc<Notify>,
     /// Permanently fences an outgoing incarnation from publishing output or
     /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
@@ -638,6 +743,7 @@ impl SessionHandle {
             input_coordination: std::sync::Mutex::new(input_coordination),
             mirrored_chunks: AtomicU64::new(0),
             bracketed_paste_mode: AtomicBool::new(bracketed_paste_mode),
+            mirrored: Arc::new(Notify::new()),
             retired: AtomicBool::new(false),
         }
     }
@@ -684,6 +790,31 @@ impl SessionHandle {
             .input_coordination
             .lock()
             .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        // A swap owns the composer for the length of the swap. Writing a
+        // keystroke into the middle of one would land it on a cleared line, or
+        // between the delivered message and its Enter, so it waits here and is
+        // replayed onto the restored draft in the order it was typed.
+        if let Some(swap) = state.draft_swap.as_mut() {
+            swap.buffered.push(BufferedRawInput {
+                data,
+                kind,
+                written,
+            });
+            return Ok(());
+        }
+        self.route_raw_input(&mut state, data, kind, written)
+    }
+
+    /// Put one raw write on the wire with its declared meaning applied to the
+    /// ledger. The swap machinery calls this directly, which is what lets it
+    /// write while every other producer is buffered.
+    fn route_raw_input(
+        &self,
+        state: &mut InputCoordinationState,
+        data: Vec<u8>,
+        kind: RawInputKind,
+        written: Option<oneshot::Sender<WriteOutcome>>,
+    ) -> Result<(), InputQueueError> {
         let mut routed = Vec::new();
         match kind {
             RawInputKind::Submission => {
@@ -766,7 +897,10 @@ impl SessionHandle {
         }
         let (written_tx, written) = oneshot::channel();
         let released_from_draft = state.draft_holds_input();
+        let id = state.next_logical_input_id;
+        state.next_logical_input_id += 1;
         state.logical_inputs.push_back(QueuedLogicalInput {
+            id,
             data: data.clone(),
             dispatched: false,
             released_from_draft,
@@ -867,6 +1001,17 @@ impl SessionHandle {
     /// there declare no draft in the first place — see
     /// [`crate::draft_bytes`].)
     ///
+    /// A frame that renders only the provider's own dim suggestion proves the
+    /// same thing and is accepted the same way. It has to be: Claude Code
+    /// paints the last submitted line back as a faint tab-to-accept ghost, so
+    /// a session that ever armed its ledger would otherwise never see a
+    /// textually empty composer again and would hold every later delivery for
+    /// the life of the session. That is the 2026-09-07 owner report — a
+    /// composer attested `typed` whose text the owner could see was grey — and
+    /// the ledger stays primary: the frame only ever clears it, never arms
+    /// it. See [`ComposerState::SuggestionOnly`] for what has to be true at
+    /// once before a frame is allowed to say that.
+    ///
     /// **The frame must be newer than the draft.** A rendered frame is
     /// evidence about the moment it was rendered, and a declared byte that is
     /// still queued in the writer — or written but not yet echoed by the
@@ -900,7 +1045,7 @@ impl SessionHandle {
             let provider = state.agent_provider;
             state.headless_terminal.composer_state(provider)?
         };
-        if composer != ComposerState::Empty {
+        if !composer.proves_nothing_typed() {
             return Ok(false);
         }
         let mut state = self
@@ -929,6 +1074,350 @@ impl SessionHandle {
         dispatch_accepted_logical_inputs(&self.input_tx, &mut state, self.bracketed_paste_mode())
             .map_err(|error| format!("{error:?}"))?;
         Ok(true)
+    }
+
+    /// Whether a draft swap is worth attempting for this session right now.
+    ///
+    /// A cheap synchronous screen so the idle tick can skip the whole
+    /// machinery — and the terminal read it needs — on every session that has
+    /// nothing queued.
+    pub fn draft_swap_may_help(&self) -> bool {
+        self.input_coordination
+            .lock()
+            .map(|state| {
+                state.draft_swap.is_none()
+                    && state.raw_input_draft_state_known
+                    && state.draft_holds_input()
+                    && matches!(state.typed_draft_bytes, Some(count) if count > 0)
+                    && state.logical_inputs.iter().any(|input| !input.dispatched)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Deliver a held logical message over a genuinely typed draft by lifting
+    /// the draft off the composer and putting it back.
+    ///
+    /// Holding was the only safe answer while the daemon could not tell a
+    /// human's unsent line from the CLI's own suggestion, and it is still the
+    /// right answer for a composer this daemon cannot read. But when the frame
+    /// *does* read as a plain composer with a typed line on it, "queued behind
+    /// a human" is a message that may sit for hours for no reason: the draft
+    /// can be captured, taken off, and put back.
+    ///
+    /// Every step is verified against the terminal, and the operation aborts
+    /// rather than guess:
+    ///
+    /// - The composer must be a plain, idle, measured one, with the line's
+    ///   cursor after everything rendered — so the captured bytes really are
+    ///   the whole draft, and the provider's one-keystroke clear really clears
+    ///   all of it.
+    /// - The draft must not be the provider's own faint suggestion; that case
+    ///   is not a draft at all and [`Self::attest_empty_composer`] resolves it
+    ///   without writing anything.
+    /// - After the clear, the composer must render empty (or as the provider's
+    ///   own suggestion). A composer still holding the captured draft means
+    ///   the clear did nothing, and the swap abandons without writing the
+    ///   draft again — writing it twice is the corruption this exists to
+    ///   avoid. Anything else is unrecognised, and is abandoned the same way.
+    /// - The draft is written back only once the delivery is proven submitted.
+    ///   An unproven submission leaves the message text parked at the composer;
+    ///   restoring on top of that would concatenate the human's line onto a
+    ///   sentence nobody wrote, so the draft is logged verbatim instead.
+    ///
+    /// The restored draft goes back through the ordinary declared-draft path,
+    /// so the ledger counts it exactly as it counted the original and the
+    /// composer attests `typed` again on the other side. Human keystrokes that
+    /// arrive mid-swap are buffered and replayed onto the restored draft in
+    /// order.
+    pub async fn swap_draft_and_deliver(
+        &self,
+    ) -> Result<DraftSwapOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        if !self.draft_swap_may_help() {
+            return Ok(DraftSwapOutcome::NotAttempted);
+        }
+        let Some(clear_sequence) = composer_clear_sequence(self.agent_provider().await) else {
+            return Ok(DraftSwapOutcome::NotAttempted);
+        };
+        // Sampled before the frame is read, exactly as attestation samples it:
+        // a declared byte still in flight leaves a frame that says nothing
+        // about the draft it has not landed on yet.
+        let mirrored_before_read = self.mirrored_chunks();
+        let Some(draft) = self.capture_swappable_draft().await? else {
+            return Ok(DraftSwapOutcome::NotAttempted);
+        };
+
+        // Claim the swap and take over the last queued message's
+        // acknowledgement, so this call learns what became of the delivery
+        // without the caller hearing "written" before the draft is back.
+        let (settled_tx, settled) = oneshot::channel();
+        let (intercepted_id, caller_ack) = {
+            let mut state = self
+                .input_coordination
+                .lock()
+                .map_err(|_| "terminal input coordination lock was poisoned")?;
+            if state.draft_swap.is_some()
+                || !state.raw_input_draft_state_known
+                || !state.draft_holds_input()
+                || state.declared_draft_writes_completed != state.declared_draft_writes_enqueued
+                || mirrored_before_read <= state.mirrored_chunks_at_last_draft_write
+            {
+                return Ok(DraftSwapOutcome::NotAttempted);
+            }
+            let Some(last) = state
+                .logical_inputs
+                .iter_mut()
+                .rev()
+                .find(|input| !input.dispatched)
+            else {
+                return Ok(DraftSwapOutcome::NotAttempted);
+            };
+            let intercepted_id = last.id;
+            let caller_ack = last.written.replace(settled_tx);
+            state.draft_swap = Some(DraftSwap {
+                buffered: Vec::new(),
+            });
+            (intercepted_id, caller_ack)
+        };
+
+        let outcome = self
+            .run_draft_swap(clear_sequence, &draft, settled)
+            .await
+            .unwrap_or_else(|error| {
+                log::error!(
+                    "[input] draft swap failed mid-operation; the composer draft was \
+                     {draft:?} and nothing was written back: {error}"
+                );
+                DraftSwapOutcome::Aborted
+            });
+
+        if outcome == DraftSwapOutcome::Aborted {
+            // Nothing was submitted, so the message keeps its own
+            // acknowledgement and stays queued behind the draft.
+            if let Ok(mut state) = self.input_coordination.lock() {
+                if let Some(input) = state
+                    .logical_inputs
+                    .iter_mut()
+                    .find(|input| input.id == intercepted_id)
+                {
+                    input.written = caller_ack;
+                }
+            }
+        } else if let Some(caller_ack) = caller_ack {
+            // The delivery's own verdict, not the swap's: a draft that could
+            // not be put back is a lost draft, not an unsubmitted message, and
+            // telling the caller its text is parked at that composer would be
+            // false.
+            let _ = caller_ack.send(match outcome {
+                DraftSwapOutcome::DeliveredUnproven => WriteOutcome::SubmissionUnproven,
+                _ => WriteOutcome::Written,
+            });
+        }
+        self.finish_draft_swap()
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(outcome)
+    }
+
+    /// Clear, deliver, restore. Split out so that every exit — including an
+    /// error — runs the buffer replay in [`Self::swap_draft_and_deliver`].
+    async fn run_draft_swap(
+        &self,
+        clear_sequence: &'static [u8],
+        draft: &str,
+        settled: oneshot::Receiver<WriteOutcome>,
+    ) -> Result<DraftSwapOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        let mirrored_before_clear = self.mirrored_chunks();
+        if self
+            .swap_write(clear_sequence.to_vec(), RawInputKind::Control)
+            .await?
+            != WriteOutcome::Written
+        {
+            return Ok(DraftSwapOutcome::Aborted);
+        }
+        if !self
+            .cleared_composer_confirmed(mirrored_before_clear, draft)
+            .await?
+        {
+            return Ok(DraftSwapOutcome::Aborted);
+        }
+
+        {
+            let mut state = self
+                .input_coordination
+                .lock()
+                .map_err(|_| "terminal input coordination lock was poisoned")?;
+            // The composer was proven clear by the frame above, so the ledger
+            // restarts from proven-empty for the length of the delivery.
+            state.raw_input_draft_active = false;
+            state.typed_draft_bytes = Some(0);
+            dispatch_accepted_logical_inputs(
+                &self.input_tx,
+                &mut state,
+                self.bracketed_paste_mode(),
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        }
+
+        match settled.await {
+            Ok(WriteOutcome::Written) => {}
+            Ok(outcome) => {
+                log::error!(
+                    "[input] a delivery over a lifted draft ended {outcome:?}, so the \
+                     composer holds text this daemon did not put there and the draft was \
+                     not written back on top of it. The captured draft was {draft:?}"
+                );
+                return Ok(DraftSwapOutcome::DeliveredUnproven);
+            }
+            Err(_) => {
+                log::error!(
+                    "[input] the writer ended during a delivery over a lifted draft; the \
+                     captured draft was {draft:?} and was not written back"
+                );
+                return Ok(DraftSwapOutcome::DeliveredUnproven);
+            }
+        }
+
+        // Back through the ordinary declared-draft path: the ledger counts
+        // these bytes exactly as it counted them when they were typed, so the
+        // composer attests `typed` again and the next delivery meets the same
+        // draft it would have met had nothing happened.
+        if self
+            .swap_write(draft.as_bytes().to_vec(), RawInputKind::Draft)
+            .await?
+            != WriteOutcome::Written
+        {
+            log::error!(
+                "[input] the restore write of a lifted draft did not reach the PTY; the \
+                 message was submitted and the captured draft was {draft:?}"
+            );
+            return Ok(DraftSwapOutcome::DeliveredWithoutRestore);
+        }
+        Ok(DraftSwapOutcome::Restored)
+    }
+
+    /// The draft a swap may lift off this frame's composer, or `None` when the
+    /// frame is not one a swap may touch.
+    async fn capture_swappable_draft(
+        &self,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut state = self.state.lock().await;
+        let provider = state.agent_provider;
+        let Some(row) = state.headless_terminal.plain_composer_row(provider)? else {
+            return Ok(None);
+        };
+        // A faint line is the provider's own suggestion, not a draft; nothing
+        // may be lifted off it and nothing needs to be.
+        if row.all_faint || !row.cursor_at_end {
+            return Ok(None);
+        }
+        let Some(draft) = row.before_cursor else {
+            return Ok(None);
+        };
+        // Trailing blanks are indistinguishable from the blank remainder of the
+        // row, so a draft that ends in whitespace cannot be captured whole and
+        // is left alone. Everything that *is* captured is byte-exact.
+        if draft.is_empty() || draft != row.text {
+            return Ok(None);
+        }
+        Ok(Some(draft))
+    }
+
+    /// Whether the frame after the clear proves the composer is no longer
+    /// holding the captured draft.
+    async fn cleared_composer_confirmed(
+        &self,
+        mirrored_before_clear: u64,
+        draft: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        if !self
+            .wait_for_repaint(mirrored_before_clear, composer_swap_step_timeout())
+            .await
+        {
+            log::warn!(
+                "[input] a composer did not repaint after a draft-swap clear, so nothing \
+                 can say what is on it; the message stays queued"
+            );
+            return Ok(false);
+        }
+        let composer = {
+            let mut state = self.state.lock().await;
+            let provider = state.agent_provider;
+            state.headless_terminal.composer_state(provider)?
+        };
+        if composer.proves_nothing_typed() {
+            return Ok(true);
+        }
+        let still_drafted = {
+            let mut state = self.state.lock().await;
+            let provider = state.agent_provider;
+            state
+                .headless_terminal
+                .plain_composer_row(provider)?
+                .is_some_and(|row| row.text == draft)
+        };
+        if still_drafted {
+            log::warn!(
+                "[input] a draft-swap clear left the composer unchanged, so this provider \
+                 does not clear the way it was measured to; the message stays queued and \
+                 the draft is untouched"
+            );
+        } else {
+            log::error!(
+                "[input] a draft-swap clear left a composer this daemon cannot read, so \
+                 the draft was not written back. The captured draft was {draft:?}"
+            );
+        }
+        Ok(false)
+    }
+
+    /// One swap-owned write, bypassing the buffer the swap installed.
+    async fn swap_write(
+        &self,
+        data: Vec<u8>,
+        kind: RawInputKind,
+    ) -> Result<WriteOutcome, Box<dyn std::error::Error + Send + Sync>> {
+        let (written_tx, written) = oneshot::channel();
+        {
+            let mut state = self
+                .input_coordination
+                .lock()
+                .map_err(|_| "terminal input coordination lock was poisoned")?;
+            self.route_raw_input(&mut state, data, kind, Some(written_tx))
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        match tokio::time::timeout(composer_swap_step_timeout(), written).await {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(_)) => Ok(WriteOutcome::NotWritten),
+            Err(_) => Ok(WriteOutcome::NotWritten),
+        }
+    }
+
+    /// Wait until the provider has drawn at least one chunk since `since`.
+    async fn wait_for_repaint(&self, since: u64, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.mirrored.notified();
+            if self.mirrored_chunks() > since {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.mirrored_chunks() > since;
+            }
+        }
+    }
+
+    /// End the swap and replay everything a human typed while it ran.
+    fn finish_draft_swap(&self) -> Result<(), InputQueueError> {
+        let mut state = self
+            .input_coordination
+            .lock()
+            .map_err(|_| InputQueueError::CoordinationUnavailable)?;
+        let Some(swap) = state.draft_swap.take() else {
+            return Ok(());
+        };
+        for buffered in swap.buffered {
+            self.route_raw_input(&mut state, buffered.data, buffered.kind, buffered.written)?;
+        }
+        Ok(())
     }
 
     /// The blocked-state change this session has not published yet, if any.
@@ -1077,6 +1566,7 @@ impl SessionHandle {
         // first and then reads the terminal knows its frame includes at least
         // that many chunks.
         self.mirrored_chunks.fetch_add(1, Ordering::SeqCst);
+        self.mirrored.notify_waiters();
         let replies = if allow_terminal_replies {
             state.headless_terminal.drain_pty_writes()
         } else {
@@ -1956,9 +2446,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        replay_headless_terminal_for_benchmark, BenchmarkStatusState, ComposerAttestation,
-        PtyMasterAttribution, PtyOccupancySnapshot, RawInputKind, SessionHandle, SessionManager,
-        SessionRecord, StreamControl,
+        mpsc, replay_headless_terminal_for_benchmark, BenchmarkStatusState, ComposerAttestation,
+        DraftSwapOutcome, LogicalInputAccepted, PendingInput, PtyMasterAttribution,
+        PtyOccupancySnapshot, RawInputKind, SessionHandle, SessionManager, SessionRecord,
+        StreamControl, WriteOutcome,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::headless_terminal::{initial_session_status, ComposerState, HeadlessTerminal};
@@ -2814,6 +3305,324 @@ mod tests {
             input_rx.try_recv().is_err(),
             "the message must stay out of a real unsent line"
         );
+        handle.kill().await.unwrap();
+    }
+
+    /// A Claude frame whose composer holds `draft`, with the cursor after it.
+    fn claude_draft_frame(draft: &str) -> Vec<u8> {
+        format!(
+            "\x1b[2J\x1b[H* Done.\r\n\u{276f}\u{a0}{draft}\r\n\x1b[2;{}H",
+            3 + draft.chars().count()
+        )
+        .into_bytes()
+    }
+
+    /// The same frame with the line painted faint and the cursor left at the
+    /// start of the composer: the CLI's own tab-to-accept suggestion.
+    fn claude_suggestion_frame(suggestion: &str) -> Vec<u8> {
+        format!(
+            "\x1b[2J\x1b[H* Done.\r\n\x1b[0m\u{276f}\u{a0}\x1b[2m{suggestion}\r\n\x1b[0m\x1b[2;3H"
+        )
+        .into_bytes()
+    }
+
+    /// Put a session in the state a swap is for: a human's typed line at the
+    /// composer, counted and landed, and a message queued behind it.
+    async fn session_holding_a_typed_draft(
+        draft: &str,
+    ) -> (
+        Arc<SessionHandle>,
+        mpsc::UnboundedReceiver<PendingInput>,
+        LogicalInputAccepted,
+    ) {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .enqueue_raw_input(draft.as_bytes().to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        let typed = input_rx.recv().await.expect("draft");
+        assert!(typed.is_declared_draft());
+        handle
+            .complete_declared_draft_write()
+            .expect("the draft reaches the PTY");
+        handle
+            .mirror_output(&claude_draft_frame(draft), false)
+            .await
+            .expect("render the composer holding the draft");
+        let accepted = handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("accept logical input");
+        assert!(accepted.held_by_raw_draft);
+        assert!(input_rx.try_recv().is_err());
+        (handle, input_rx, accepted)
+    }
+
+    /// The owner's ask: instead of parking a message behind a human's unsent
+    /// line for as long as it takes them to come back, copy the line, take it
+    /// off, send the message, and put the line back.
+    #[tokio::test]
+    async fn a_typed_draft_is_lifted_off_delivered_over_and_put_back() {
+        let (handle, mut input_rx, accepted) = session_holding_a_typed_draft("half typed").await;
+
+        let swapping = Arc::clone(&handle);
+        let swap = tokio::spawn(async move { swapping.swap_draft_and_deliver().await });
+
+        // The provider's own one-keystroke clear, as control input: it is not
+        // a human's draft and must not touch the ledger.
+        let clear = input_rx.recv().await.expect("composer clear");
+        assert_eq!(clear.data, b"\x15");
+        assert!(!clear.is_declared_draft());
+        clear.acknowledge_written();
+        handle
+            .mirror_output(&claude_draft_frame(""), false)
+            .await
+            .expect("render the cleared composer");
+
+        let mut message = input_rx.recv().await.expect("the released message");
+        assert_eq!(message.data, b"manager message");
+        assert!(message.advance_logical_message_to_enter());
+        message.acknowledge_written();
+
+        let restored = input_rx.recv().await.expect("the restored draft");
+        assert_eq!(
+            restored.data, b"half typed",
+            "the draft must go back byte for byte"
+        );
+        assert!(
+            restored.is_declared_draft(),
+            "the restored draft is a draft again, so the ledger counts it again"
+        );
+        restored.acknowledge_written();
+
+        assert_eq!(
+            swap.await.expect("swap task").expect("swap"),
+            DraftSwapOutcome::Restored
+        );
+        assert_eq!(
+            accepted.written.await.expect("acknowledgement"),
+            WriteOutcome::Written,
+            "the caller hears nothing until the draft is back"
+        );
+        assert_eq!(
+            handle.typed_draft_bytes_for_test(),
+            Some("half typed".len() as u64),
+            "the restored draft is attested typed, exactly as it was"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// Multibyte and interior spacing survive the round trip, because the
+    /// draft is captured from the cells and written back verbatim.
+    #[tokio::test]
+    async fn a_multibyte_draft_survives_the_swap_byte_for_byte() {
+        let draft = "héllo  wörld";
+        let (handle, mut input_rx, _accepted) = session_holding_a_typed_draft(draft).await;
+
+        let swapping = Arc::clone(&handle);
+        let swap = tokio::spawn(async move { swapping.swap_draft_and_deliver().await });
+
+        input_rx
+            .recv()
+            .await
+            .expect("composer clear")
+            .acknowledge_written();
+        handle
+            .mirror_output(&claude_draft_frame(""), false)
+            .await
+            .expect("render the cleared composer");
+        let mut message = input_rx.recv().await.expect("the released message");
+        assert!(message.advance_logical_message_to_enter());
+        message.acknowledge_written();
+
+        let restored = input_rx.recv().await.expect("the restored draft");
+        assert_eq!(restored.data, draft.as_bytes());
+        restored.acknowledge_written();
+        assert_eq!(
+            swap.await.expect("swap task").expect("swap"),
+            DraftSwapOutcome::Restored
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// A human who keeps typing through a swap loses nothing: their keystrokes
+    /// are held while the composer is not theirs, and replayed onto the
+    /// restored draft in the order they were typed.
+    #[tokio::test]
+    async fn keystrokes_typed_during_a_swap_are_replayed_after_the_restore() {
+        let (handle, mut input_rx, _accepted) = session_holding_a_typed_draft("half").await;
+
+        let swapping = Arc::clone(&handle);
+        let swap = tokio::spawn(async move { swapping.swap_draft_and_deliver().await });
+
+        input_rx
+            .recv()
+            .await
+            .expect("composer clear")
+            .acknowledge_written();
+        // Mid-swap typing, while the composer belongs to the delivery.
+        handle
+            .enqueue_raw_input(b" typ".to_vec(), RawInputKind::Draft)
+            .expect("a keystroke mid-swap");
+        handle
+            .enqueue_raw_input(b"ed".to_vec(), RawInputKind::Draft)
+            .expect("another keystroke mid-swap");
+        assert!(
+            input_rx.try_recv().is_err(),
+            "nothing a human types may land on a composer mid-swap"
+        );
+
+        handle
+            .mirror_output(&claude_draft_frame(""), false)
+            .await
+            .expect("render the cleared composer");
+        let mut message = input_rx.recv().await.expect("the released message");
+        assert!(message.advance_logical_message_to_enter());
+        message.acknowledge_written();
+
+        let restored = input_rx.recv().await.expect("the restored draft");
+        assert_eq!(restored.data, b"half");
+        restored.acknowledge_written();
+
+        assert_eq!(
+            input_rx
+                .recv()
+                .await
+                .expect("first replayed keystroke")
+                .data,
+            b" typ"
+        );
+        assert_eq!(
+            input_rx
+                .recv()
+                .await
+                .expect("second replayed keystroke")
+                .data,
+            b"ed"
+        );
+        assert_eq!(
+            swap.await.expect("swap task").expect("swap"),
+            DraftSwapOutcome::Restored
+        );
+        assert_eq!(
+            handle.typed_draft_bytes_for_test(),
+            Some("half typed".len() as u64)
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// If the clear does not clear, the draft is still on the composer.
+    /// Writing it back would double it, so the swap abandons: nothing is
+    /// submitted, nothing is written, and the message stays queued.
+    #[tokio::test]
+    async fn a_clear_that_does_nothing_abandons_the_swap_and_writes_nothing_back() {
+        let (handle, mut input_rx, accepted) = session_holding_a_typed_draft("half typed").await;
+
+        let swapping = Arc::clone(&handle);
+        let swap = tokio::spawn(async move { swapping.swap_draft_and_deliver().await });
+
+        input_rx
+            .recv()
+            .await
+            .expect("composer clear")
+            .acknowledge_written();
+        // The provider ignored it: the same draft is still rendered.
+        handle
+            .mirror_output(&claude_draft_frame("half typed"), false)
+            .await
+            .expect("render the unchanged composer");
+
+        assert_eq!(
+            swap.await.expect("swap task").expect("swap"),
+            DraftSwapOutcome::Aborted
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "an abandoned swap writes nothing at all"
+        );
+        assert_eq!(
+            handle.pending_logical_input_count(),
+            1,
+            "the message stays queued behind the draft"
+        );
+        assert_eq!(
+            handle.typed_draft_bytes_for_test(),
+            Some("half typed".len() as u64),
+            "the ledger is exactly where it was"
+        );
+        drop(accepted);
+        handle.kill().await.unwrap();
+    }
+
+    /// The provider's own faint suggestion is not a draft, so there is nothing
+    /// to lift: attestation resolves that case without writing a byte, and a
+    /// swap must never take a suggestion off the screen and type it back.
+    #[tokio::test]
+    async fn the_providers_own_faint_suggestion_is_never_swapped() {
+        let handle = spawn_test_handle(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .enqueue_raw_input(b"commit this".to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        input_rx.recv().await.expect("draft");
+        handle
+            .complete_declared_draft_write()
+            .expect("the draft reaches the PTY");
+        handle
+            .mirror_output(&claude_suggestion_frame("commit this"), false)
+            .await
+            .expect("render the CLI's own suggestion");
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("accept logical input");
+
+        assert_eq!(
+            handle.swap_draft_and_deliver().await.expect("swap"),
+            DraftSwapOutcome::NotAttempted
+        );
+        assert!(input_rx.try_recv().is_err());
+
+        // The frame proves nothing is typed, so the ordinary attestation path
+        // releases the message with nothing written to the terminal.
+        assert!(handle
+            .attest_empty_composer()
+            .await
+            .expect("attest the rendered composer"));
+        assert_eq!(
+            input_rx.recv().await.expect("released message").data,
+            b"manager message"
+        );
+        handle.kill().await.unwrap();
+    }
+
+    /// A composer this daemon cannot read is still a composer it will not
+    /// touch. Codex draws one, but nothing here has measured what clears it.
+    #[tokio::test]
+    async fn an_unmeasured_provider_is_never_swapped() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .enqueue_raw_input(b"half typed".to_vec(), RawInputKind::Draft)
+            .expect("declare a raw draft");
+        input_rx.recv().await.expect("draft");
+        handle
+            .complete_declared_draft_write()
+            .expect("the draft reaches the PTY");
+        handle
+            .mirror_output(
+                b"\x1b[2J\x1b[H* Done.\r\n\xe2\x80\xba half typed\r\n\x1b[2;13H",
+                false,
+            )
+            .await
+            .expect("render a Codex composer holding a draft");
+        handle
+            .enqueue_logical_input(b"manager message".to_vec())
+            .expect("accept logical input");
+
+        assert_eq!(
+            handle.swap_draft_and_deliver().await.expect("swap"),
+            DraftSwapOutcome::NotAttempted
+        );
+        assert!(input_rx.try_recv().is_err());
         handle.kill().await.unwrap();
     }
 
