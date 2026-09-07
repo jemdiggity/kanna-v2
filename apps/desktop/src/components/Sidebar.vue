@@ -787,14 +787,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     v-else
                     class="item-title"
                     :style="{
-                      fontWeight: showsUnreadMark(row.item) ? 'bold' : 'normal',
+                      fontWeight: 'normal',
                       fontStyle: isTaskWorking(row.item) ? 'italic' : 'normal',
                       textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
                       opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span><span v-if="showsUnreadMark(row.item)" class="unread-task-dot" aria-hidden="true"></span>
                   <button
                     v-if="canDetachSubtask(row)"
                     type="button"
@@ -896,14 +896,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       v-else
                       class="item-title"
                       :style="{
-                        fontWeight: showsUnreadMark(row.item) ? 'bold' : 'normal',
+                        fontWeight: 'normal',
                         fontStyle: isTaskWorking(row.item) ? 'italic' : 'normal',
                         textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
                         opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
                       }"
                       :title="itemTooltip(row.item)"
                     >
-                      <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                      <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span><span v-if="showsUnreadMark(row.item)" class="unread-task-dot" aria-hidden="true"></span>
                     <button
                       v-if="canDetachSubtask(row)"
                       type="button"
@@ -966,7 +966,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span><span v-if="showsUnreadMark(row.item)" class="unread-task-dot" aria-hidden="true"></span>
                   <span
                     v-if="row.item.task_id && blockerNames?.[row.item.task_id]"
                     class="blocked-by-text"
@@ -1020,14 +1020,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   v-else
                   class="item-title"
                   :style="{
-                    fontWeight: showsUnreadMark(item) ? 'bold' : 'normal',
+                    fontWeight: 'normal',
                     fontStyle: isTaskWorking(item) ? 'italic' : 'normal',
                     textDecoration: isTaskTearingDown(item) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(item) ? 0.5 : 1,
                   }"
                   :title="itemTooltip(item)"
                 >
-                  <span v-if="transferMarker(item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(item)?.state}`" :aria-label="transferMarker(item)?.label">{{ transferMarker(item)?.glyph }} </span><span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span>
+                  <span v-if="transferMarker(item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(item)?.state}`" :aria-label="transferMarker(item)?.label">{{ transferMarker(item)?.glyph }} </span><span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span><span v-if="showsUnreadMark(item)" class="unread-task-dot" aria-hidden="true"></span>
               </div>
             </div>
           </template>
@@ -1345,6 +1345,15 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+  pointer-events: none;
+}
+
+.unread-task-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--kn-accent);
   pointer-events: none;
 }
 

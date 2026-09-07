@@ -133,6 +133,22 @@ describe("subscribeDesktopCloudTasks", () => {
 });
 
 describe("mapDesktopCloudTasks", () => {
+  it("keeps remote runtime and read state as independent dimensions", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({
+        activity: "unread",
+        runtimeState: "busy",
+        readState: "unread",
+      }),
+    ]);
+
+    expect(snapshot.items[0]).toMatchObject({
+      activity: "unread",
+      runtime_state: "busy",
+      read_state: "unread",
+    });
+  });
+
   it("selects one destination authority during overlapping transfer publications", () => {
     const snapshot = mapDesktopCloudTasks([
       remoteTaskSnapshot({

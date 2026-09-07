@@ -27,6 +27,8 @@ export interface DesktopCloudTaskSnapshot {
   stage: string;
   activity?: string;
   activityRevision?: number;
+  runtimeState?: string | null;
+  readState?: string;
   blockerRevision?: number;
   transitionRevision?: string | null;
   status: string;
@@ -403,6 +405,8 @@ export function mapDesktopCloudTasks(
       pr_url: snapshot.prUrl,
       branch: snapshot.branch,
       activity: normalizeActivity(snapshot.activity),
+      runtime_state: normalizeRuntimeState(snapshot.runtimeState),
+      read_state: normalizeReadState(snapshot.readState),
       activity_revision: typeof snapshot.activityRevision === "number"
         && Number.isSafeInteger(snapshot.activityRevision)
         && snapshot.activityRevision >= 0
@@ -566,6 +570,19 @@ function ownerTaskKey(snapshot: DesktopCloudTaskSnapshot, ownerLocalTaskId: stri
 
 function normalizeActivity(activity: string | undefined): PipelineItem["activity"] {
   return activity === "working" || activity === "unread" ? activity : "idle";
+}
+
+function normalizeRuntimeState(runtimeState: string | null | undefined): string | null {
+  return runtimeState === "busy"
+    || runtimeState === "waiting"
+    || runtimeState === "idle"
+    || runtimeState === "exited"
+    ? runtimeState
+    : null;
+}
+
+function normalizeReadState(readState: string | undefined): PipelineItem["read_state"] | undefined {
+  return readState === "read" || readState === "unread" ? readState : undefined;
 }
 
 function normalizeAgentProvider(provider: string | null | undefined): PipelineItem["agent_provider"] {
