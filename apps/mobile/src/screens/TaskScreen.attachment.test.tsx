@@ -313,6 +313,20 @@ describe("TaskScreen photo attachments", () => {
     ).toBe("");
   });
 
+  it("announces the desktop-accepted outcome through the native status element", async () => {
+    const harness = createHarness();
+    harness.onSendInput.mockResolvedValue({ status: "delivered" });
+    const tree = await renderScreen(harness);
+
+    await typeDraft(tree, "continue");
+    await sendComposer(tree);
+
+    expect(
+      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInputStatus }).props
+        .accessibilityLabel
+    ).toContain("accepted by the desktop");
+  });
+
   it("does not clear a newer native draft when an earlier send completes", async () => {
     const harness = createHarness();
     let resolveSend: ((outcome: { status: "delivered" }) => void) | null = null;

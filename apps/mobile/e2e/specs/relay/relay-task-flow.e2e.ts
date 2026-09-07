@@ -584,15 +584,25 @@ export async function verifyRelayComposerResetJourney(
 
   const deliveryStatus = await ui.getTaskInputStatus();
   await deliveryStatus.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await ui.waitUntil(
-    async () =>
-      (await deliveryStatus.getText()).includes("accepted by the desktop"),
-    {
-      interval: POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: "Expected the desktop-accepted task input outcome",
-    },
-  );
+  let lastDeliveryStatus: string | null = null;
+  try {
+    await ui.waitUntil(
+      async () => {
+        lastDeliveryStatus = await deliveryStatus.getAttribute("label");
+        return lastDeliveryStatus?.includes("accepted by the desktop") === true;
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected the desktop-accepted task input outcome",
+      },
+    );
+  } catch {
+    throw new Error(
+      "Expected the desktop-accepted task input outcome; " +
+        `last native accessibility label was ${JSON.stringify(lastDeliveryStatus)}`,
+    );
+  }
 
   let lastValue: string | null = null;
   let lastLabel: string | null = null;
