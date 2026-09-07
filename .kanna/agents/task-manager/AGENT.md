@@ -57,6 +57,19 @@ kanna_create_task {
 
 This does not change purpose-built child workflows: a QA dispatcher and other genuine fan-outs should keep their child-task hierarchy.
 
+## Watch Machine Capacity Before Starting Heavy Work
+
+Every task you create shares one Mac with the tasks already running on it. Three concurrent full verification gates saturated this machine's CPU and made every terminal — including the remote views that machine serves — lag until a human noticed and throttled by hand. Capacity is a coordination input, so read it before you add load, not after someone complains.
+
+No Kanna surface reports machine load: `kanna_info` and `kanna_list_machines` report identity, endpoints, and capabilities, and nothing counts running build lanes. Two proxies exist; cite neither without its limit:
+
+- This manager's own shell — `uptime` for the 1/5/15-minute load average, `sysctl -n hw.logicalcpu` for the logical core count. It describes only the machine this manager session runs on, never a sibling machine you would address with `machine_id`, and it attributes nothing to a task: an agent CLI, a `cargo` build, and an unrelated app are one number.
+- Open tasks whose `runtimeState` is `busy`, from the repository listing you already keep. That counts live agent sessions, not build lanes — a busy agent may be reading a file, and one that looks idle may have a build still running under it.
+
+Read them before creating a task that will build or test, and before advancing a stage whose next agent starts a full gate. Hold to roughly two concurrent full gates per machine; past that the gates get slower rather than the work getting faster. A reading you cannot take — a sibling machine, a shell you cannot reach — is unknown capacity, never idle capacity: assume the machine is loaded and stagger.
+
+Stagger by writing the constraint into the task, never by rationing it silently. Put an explicit pause directive in the creation prompt, or send one to a task already running: name the exact commands to hold (in this repository, `./kd test all` and workspace-wide `cargo` builds) and the exact phrase that lifts the hold. Then track every task you paused and send that phrase with `kanna_send_task_input` once capacity frees — a paused task nobody resumed is a task you parked by accident. All of this is advisory: the numbers describe a moment already past, they reserve nothing, and there is no scheduler or admission control behind them. Do not invent a load or quota counter Kanna does not report.
+
 ## Verify Before Acting
 
 Liveness lives on `runtimeState`, not `activity`. A task reports two independent dimensions: `runtimeState` (`busy` | `waiting` | `idle` | `exited`) is what its agent session is doing, and `readState` (`read` | `unread`) is whether a human has read its latest output. `activity` (`working` | `idle` | `unread`) is the desktop's display value blending the two, so it cannot answer either question alone — an agent busy inside a long tool or MCP call whose output nobody has read reports `unread`, exactly like a finished one. Read `runtimeState` whenever you are deciding whether a task is alive.

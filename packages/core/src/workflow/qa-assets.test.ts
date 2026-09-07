@@ -281,6 +281,21 @@ describe("QA workflow assets", () => {
       "short human-readable name or purpose followed by its id in parentheses"
     );
     expect(agent.prompt).toContain("Never make a human decode a bare task id");
+    expect(agent.prompt).toContain("Watch Machine Capacity Before Starting Heavy Work");
+    expect(agent.prompt).toContain("No Kanna surface reports machine load");
+    expect(agent.prompt).toContain("`sysctl -n hw.logicalcpu`");
+    expect(agent.prompt).toContain("Open tasks whose `runtimeState` is `busy`");
+    expect(agent.prompt).toContain("roughly two concurrent full gates per machine");
+    expect(agent.prompt).toContain("unknown capacity, never idle capacity");
+    expect(agent.prompt).toContain(
+      "Put an explicit pause directive in the creation prompt"
+    );
+    expect(agent.prompt).toContain(
+      "a paused task nobody resumed is a task you parked by accident"
+    );
+    expect(agent.prompt).toContain(
+      "there is no scheduler or admission control behind them"
+    );
     expect(task).toContain("name: Task Manager");
     expect(task).toContain("agent: task-manager");
   });
