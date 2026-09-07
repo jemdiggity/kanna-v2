@@ -1927,6 +1927,10 @@ struct TerminalControlHandle {
 struct QueuedTerminalControl {
     sequence: u64,
     command: TerminalControlCommand,
+    /// The latest geometry command that was queued before this ordered
+    /// command. Keeping it on the barrier prevents a later geometry update
+    /// from overtaking input while the daemon is stalled or reconnecting.
+    preceding_geometry: Option<Box<Self>>,
 }
 
 /// Terminal input remains ordered and bounded, while geometry is a latest
@@ -1981,11 +1985,13 @@ impl TerminalControlQueue {
     }
 
     fn try_send(&self, command: TerminalControlCommand) -> Result<(), TerminalControlSendError> {
-        let queued = QueuedTerminalControl {
-            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
-            command,
-        };
-        if queued.command.is_geometry() {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        if command.is_geometry() {
+            let queued = QueuedTerminalControl {
+                sequence,
+                command,
+                preceding_geometry: None,
+            };
             let mut geometry = self
                 .geometry
                 .lock()
@@ -1995,10 +2001,29 @@ impl TerminalControlQueue {
             self.geometry_ready.notify_one();
             Ok(())
         } else {
-            self.tx.try_send(queued).map_err(|error| match error {
-                TrySendError::Full(_) => TerminalControlSendError::Full,
-                TrySendError::Closed(_) => TerminalControlSendError::Closed,
-            })
+            // Serialize taking the latest geometry with queueing the barrier.
+            // If the bounded input queue is full, put the geometry back so a
+            // rejected barrier does not lose the proposal that preceded it.
+            let mut geometry = self
+                .geometry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let preceding_geometry = geometry.take().map(Box::new);
+            let queued = QueuedTerminalControl {
+                sequence,
+                command,
+                preceding_geometry,
+            };
+            match self.tx.try_send(queued) {
+                Ok(()) => Ok(()),
+                Err(TrySendError::Full(mut queued)) => {
+                    if let Some(preceding_geometry) = queued.preceding_geometry.take() {
+                        *geometry = Some(*preceding_geometry);
+                    }
+                    Err(TerminalControlSendError::Full)
+                }
+                Err(TrySendError::Closed(_)) => Err(TerminalControlSendError::Closed),
+            }
         }
     }
 }
@@ -2010,6 +2035,11 @@ impl TerminalControlReceiver {
                 Ok(command) => self.pending = Some(command),
                 Err(mpsc::error::TryRecvError::Empty) => {}
                 Err(mpsc::error::TryRecvError::Disconnected) => self.closed = true,
+            }
+        }
+        if let Some(pending) = self.pending.as_mut() {
+            if let Some(preceding_geometry) = pending.preceding_geometry.take() {
+                return Some(preceding_geometry.command);
             }
         }
         let geometry_sequence = self
@@ -9985,31 +10015,148 @@ mod tests {
         queue
             .try_send(TerminalControlCommand::Input {
                 data: b"input".to_vec(),
-                kind: TerminalInputKind::Draft,
+                kind: TerminalInputKind::Control,
             })
             .unwrap();
         queue
-            .try_send(TerminalControlCommand::Register {
-                viewer_id: "viewer".into(),
-                role: TerminalViewerRole::Remote,
-                generation: 1,
+            .try_send(TerminalControlCommand::Resize {
                 cols: 120,
                 rows: 40,
-                visible: true,
             })
             .unwrap();
         assert!(matches!(
             receiver.recv().await,
-            Some(TerminalControlCommand::Input { data, .. }) if data == b"input"
+            Some(TerminalControlCommand::Register { cols: 80, .. })
         ));
         assert!(matches!(
             receiver.recv().await,
-            Some(TerminalControlCommand::Register {
+            Some(TerminalControlCommand::Input { data, kind: TerminalInputKind::Control })
+                if data == b"input"
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TerminalControlCommand::Resize {
                 cols: 120,
                 rows: 40,
-                ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn terminal_geometry_barriers_preserve_order_while_daemon_reconnects() {
+        let unique = format!(
+            "ksp-terminal-geometry-barrier-reconnect-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(&unique, "KSP Geometry Barrier Reconnect");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let state = Arc::new(AppState::new(config.clone()));
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
+        let mut conn = StreamConn {
+            state,
+            frame_tx,
+            companion_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            companion_events: None,
+            authed: true,
+            supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            supports_terminal_geometry: true,
+            supports_agent_history_window: false,
+            terminal_taps: HashMap::new(),
+            agent_histories: HashMap::new(),
+            legacy_companion_tasks_on_connection: HashSet::new(),
+            auth_mode: AuthMode::AllowEmpty,
+            companion_access: true,
+        };
+
+        // Queue the complete sequence while the daemon is unavailable. The
+        // worker reconnects once the fake daemon appears below, so this also
+        // covers the stalled-daemon path rather than only the in-memory queue.
+        conn.enqueue_terminal_control(
+            "shell-terminal-geometry-barrier".into(),
+            TerminalControlCommand::Register {
+                viewer_id: "viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 1,
+                cols: 80,
+                rows: 40,
+                visible: true,
+            },
+        );
+        conn.enqueue_terminal_control(
+            "shell-terminal-geometry-barrier".into(),
+            TerminalControlCommand::Input {
+                data: b"input".to_vec(),
+                kind: TerminalInputKind::Submission,
+            },
+        );
+        conn.enqueue_terminal_control(
+            "shell-terminal-geometry-barrier".into(),
+            TerminalControlCommand::Register {
+                viewer_id: "viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 2,
+                cols: 120,
+                rows: 40,
+                visible: true,
+            },
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 3).await;
+
+        assert_command(
+            tokio::time::timeout(Duration::from_secs(2), commands.recv())
+                .await
+                .expect("geometry barrier worker did not reconnect"),
+            DaemonCommand::RegisterViewer {
+                session_id: "shell-terminal-geometry-barrier".into(),
+                viewer_id: "viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 1,
+                cols: 80,
+                rows: 40,
+                visible: true,
+            },
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputBoundaryNoReply {
+                session_id: "shell-terminal-geometry-barrier".into(),
+                data: b"input".to_vec(),
+            },
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::RegisterViewer {
+                session_id: "shell-terminal-geometry-barrier".into(),
+                viewer_id: "viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 2,
+                cols: 120,
+                rows: 40,
+                visible: true,
+            },
+        );
+        assert_eq!(daemon.await.expect("geometry barrier daemon failed"), 1);
+
+        conn.shutdown().await;
+        let _ = std::fs::remove_dir_all(&daemon_dir);
     }
 
     #[tokio::test]
