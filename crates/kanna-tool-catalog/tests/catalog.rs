@@ -425,12 +425,23 @@ fn removed_approval_override_is_not_an_agent_tool() {
         .iter()
         .find(|tool| tool.name == "kanna_advance_stage")
         .expect("advance tool");
-    assert_eq!(advance.params.len(), 3);
+    assert_eq!(advance.params.len(), 7);
     assert_eq!(advance.params[0].name, "machine_id");
     assert_eq!(advance.params[0].location, ParamLoc::Routing);
     assert_eq!(advance.params[1].name, "task_id");
     assert_eq!(advance.params[2].name, "source");
     assert_eq!(advance.params[2].location, ParamLoc::Body);
+    // The per-advance provider override for the stage the advance enters.
+    // These decide how the *next* stage spawns; none of them approves
+    // anything, which is what this test is guarding the tool against.
+    assert_eq!(advance.params[3].name, "next_stage_agent_provider");
+    assert_eq!(advance.params[3].location, ParamLoc::Body);
+    assert_eq!(advance.params[4].name, "next_stage_model");
+    assert_eq!(advance.params[4].location, ParamLoc::Body);
+    assert_eq!(advance.params[5].name, "next_stage_effort");
+    assert_eq!(advance.params[5].location, ParamLoc::Body);
+    assert_eq!(advance.params[6].name, "next_stage_provider_source");
+    assert_eq!(advance.params[6].location, ParamLoc::Body);
 }
 
 #[test]

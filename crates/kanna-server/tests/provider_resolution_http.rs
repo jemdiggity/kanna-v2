@@ -901,6 +901,216 @@ async fn a_workflow_selector_fallback_spawns_with_its_own_model_and_effort() {
     cleanup.stop_daemon().await;
 }
 
+/// A stage advance may carry an explicit provider/model/effort for the stage
+/// it enters. It fills the explicit-override slot of the precedence chain, so
+/// it outranks the target stage's own compact selectors — and the pair travels
+/// with the provider it names, never composed onto the stage's choice.
+///
+/// The same run keeps that stamp: a rerun reproduces what the run actually
+/// spawned with, not what the stage would resolve to today.
+#[tokio::test(flavor = "current_thread")]
+async fn an_advance_provider_override_outranks_the_next_stages_selectors() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let root = unique_test_root("advance-provider-override");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    let mut cleanup = DurableTestCleanup::new(root.clone());
+    let repo = init_provider_repo(&root);
+    // This test's own fixture stubs codex as well, so the override can move
+    // the next stage onto a provider the stage's selectors never name.
+    write_executable(&repo.join(".kanna/provider-bin/codex"));
+    let workflow_dir = repo.join(".kanna/workflows");
+    std::fs::create_dir_all(&workflow_dir).expect("workflow directory should be created");
+    std::fs::write(
+        workflow_dir.join("override.json"),
+        json!({
+            "name": "override",
+            "stages": [
+                {
+                    "name": "plan",
+                    "agent": "review",
+                    "agent_provider": ["claude"],
+                    "policy": { "transition": "manual" }
+                },
+                {
+                    "name": "in progress",
+                    "agent": "review",
+                    // What the builder stage would pick on its own.
+                    "agent_provider": ["claude-fable-hi"],
+                    "policy": { "transition": "manual" }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("override workflow should be written");
+    publish_origin_main(&repo, "publish override workflow");
+
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, _db_path) =
+        write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    cleanup.track_daemon(tokio::spawn(fake_daemon_persistent(daemon_dir, command_tx)));
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
+    let client = Client::new();
+    let repo_id = register_repo(&client, port, &repo).await;
+
+    let created = client
+        .post(format!("http://127.0.0.1:{port}/v1/tasks"))
+        .json(&json!({
+            "repoId": repo_id,
+            "prompt": "Exercise the per-advance provider override",
+            "workflowName": "override",
+            "agentType": "agent"
+        }))
+        .send()
+        .await
+        .expect("task creation should reach kanna-server")
+        .error_for_status()
+        .expect("task creation should succeed")
+        .json::<Value>()
+        .await
+        .expect("task response should be JSON");
+    let task_id = created["taskId"]
+        .as_str()
+        .expect("task response should include an id")
+        .to_string();
+    assert_claude_agent_spawn(next_daemon_spawn(&mut commands).await, &task_id);
+
+    // An incoherent pair is refused before anything is scheduled.
+    let rejected = client
+        .post(format!(
+            "http://127.0.0.1:{port}/v1/tasks/{task_id}/actions/advance-stage"
+        ))
+        .json(&json!({
+            "source": "operator",
+            "nextStageAgentProvider": "antigravity",
+            "nextStageModel": "gemini"
+        }))
+        .send()
+        .await
+        .expect("stage advance should reach kanna-server");
+    assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        rejected
+            .text()
+            .await
+            .expect("rejection should carry a body")
+            .contains("model overrides are not supported"),
+        "the rejection must name the rule that failed",
+    );
+
+    // A model with no provider beside it is refused for the same reason a
+    // tuning layer never composes across providers.
+    let orphaned = client
+        .post(format!(
+            "http://127.0.0.1:{port}/v1/tasks/{task_id}/actions/advance-stage"
+        ))
+        .json(&json!({ "source": "operator", "nextStageModel": "gpt-6-astra" }))
+        .send()
+        .await
+        .expect("stage advance should reach kanna-server");
+    assert_eq!(orphaned.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    client
+        .post(format!(
+            "http://127.0.0.1:{port}/v1/tasks/{task_id}/actions/advance-stage"
+        ))
+        .json(&json!({
+            "source": "operator",
+            "nextStageAgentProvider": "codex",
+            "nextStageModel": "gpt-6-astra",
+            "nextStageEffort": "low",
+            // The operator advanced, but the plan agent picked the tier.
+            "nextStageProviderSource": "agent"
+        }))
+        .send()
+        .await
+        .expect("stage advance should reach kanna-server")
+        .error_for_status()
+        .expect("an accepted override should not fail the advance");
+
+    match next_daemon_spawn(&mut commands).await {
+        DaemonCommand::SpawnAgent {
+            session_id, params, ..
+        } => {
+            assert_eq!(session_id, task_id);
+            assert_eq!(
+                params.agent_provider,
+                DaemonAgentProvider::Codex,
+                "the override must outrank the stage's own `claude-fable-hi` selector",
+            );
+            assert_eq!(params.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(params.effort.as_deref(), Some("low"));
+        }
+        other => panic!("expected an overridden codex spawn, got {other:?}"),
+    }
+    wait_for_task_stage(&client, port, &task_id, "in progress").await;
+
+    // The provenance is durable and separate from the trigger: the advance was
+    // the operator's, the model was the agent's.
+    let task = client
+        .get(format!("http://127.0.0.1:{port}/v1/tasks/{task_id}"))
+        .send()
+        .await
+        .expect("task detail should reach kanna-server")
+        .error_for_status()
+        .expect("task detail should succeed")
+        .json::<Value>()
+        .await
+        .expect("task detail should be JSON");
+    assert_eq!(task["latestRun"]["trigger"], "operator");
+    assert_eq!(
+        task["latestRun"]["providerOverride"],
+        json!({
+            "source": "agent",
+            "provider": "codex",
+            "model": "gpt-6-astra",
+            "effort": "low"
+        })
+    );
+
+    // A rerun reproduces the run's own stamp, not the stage's selectors.
+    client
+        .post(format!(
+            "http://127.0.0.1:{port}/v1/tasks/{task_id}/actions/rerun-stage"
+        ))
+        .send()
+        .await
+        .expect("stage rerun should reach kanna-server")
+        .error_for_status()
+        .expect("stage rerun should be accepted");
+    match next_daemon_spawn(&mut commands).await {
+        DaemonCommand::SpawnAgent {
+            session_id, params, ..
+        } => {
+            assert_eq!(session_id, task_id);
+            assert_eq!(params.agent_provider, DaemonAgentProvider::Codex);
+            assert_eq!(params.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(params.effort.as_deref(), Some("low"));
+        }
+        other => panic!("expected the rerun to reproduce the stamped codex spawn, got {other:?}"),
+    }
+    let task = client
+        .get(format!("http://127.0.0.1:{port}/v1/tasks/{task_id}"))
+        .send()
+        .await
+        .expect("task detail should reach kanna-server")
+        .error_for_status()
+        .expect("task detail should succeed")
+        .json::<Value>()
+        .await
+        .expect("task detail should be JSON");
+    assert_eq!(
+        task["latestRun"]["providerOverride"]["source"], "agent",
+        "a reproduced run keeps naming whoever picked its model",
+    );
+
+    stop_server(&mut server).await;
+    cleanup.stop_daemon().await;
+}
+
 /// The incident this layer exists for: one machine's provider CLI is wedged
 /// and the only lever used to be a commit to `origin/main`, because definitions
 /// are resolved from there. A `.kanna/config.local.json` that never reaches git

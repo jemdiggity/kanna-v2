@@ -169,10 +169,23 @@ pub async fn handle_invoke(
                 Some(source) => StageTrigger::from_caller_declared(source)?,
                 None => StageTrigger::Unspecified,
             };
+            let string_arg = |key: &str| args.get(key).and_then(|value| value.as_str());
+            let provider_override = task_creator::parse_stage_provider_override(
+                string_arg("next_stage_agent_provider"),
+                string_arg("next_stage_model"),
+                string_arg("next_stage_effort"),
+                string_arg("next_stage_provider_source"),
+            )?;
             let transition = {
                 let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
-                task_creator::prepare_advance_stage_for_api_with_trigger(
-                    &db, config, task_id, trigger,
+                task_creator::prepare_advance_stage_for_api_with_intent(
+                    &db,
+                    config,
+                    task_id,
+                    task_creator::StageAdvanceIntent {
+                        trigger,
+                        provider_override,
+                    },
                 )?
             };
             match transition {

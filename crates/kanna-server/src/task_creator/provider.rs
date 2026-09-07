@@ -87,38 +87,99 @@ pub(super) fn validate_effort_shape(effort: Option<&str>) -> Result<(), String> 
     Ok(())
 }
 
+/// Shape checks plus the provider-coherence rule, which
+/// `kanna_agent_protocol` owns for every layer that may name a model —
+/// compact selectors included — so the rule is stated once.
 pub(super) fn validate_provider_model(
     provider: AgentProvider,
     model: Option<&str>,
 ) -> Result<(), String> {
     validate_model_shape(model)?;
-    if model.is_some() && provider.model_override_flag().is_none() {
-        return Err(format!(
-            "model overrides are not supported for agent provider '{provider}'"
-        ));
-    }
-    Ok(())
+    kanna_agent_protocol::validate_provider_model(provider, model)
 }
 
+/// Shape checks plus the provider's published effort vocabulary; see
+/// [`validate_provider_model`] for why the rule itself lives in the protocol
+/// crate.
 pub(super) fn validate_provider_effort(
     provider: AgentProvider,
     effort: Option<&str>,
 ) -> Result<(), String> {
     validate_effort_shape(effort)?;
-    let Some(effort) = effort else {
-        return Ok(());
+    kanna_agent_protocol::validate_provider_effort(provider, effort)
+}
+
+/// Validate one advance-carried provider override and turn it into the
+/// durable record the spawned stage run keeps.
+///
+/// The pair is checked here, at request time, rather than at spawn: an
+/// incoherent one (`codex -m opus`, an effort outside the provider's
+/// vocabulary) is a bad request, and failing it later would leave a task
+/// parked behind a stage that never started. The coherence rules themselves
+/// come from `kanna_agent_protocol`, the same statement compact provider
+/// selectors are parsed against.
+///
+/// A model or effort without a provider is refused rather than defaulted:
+/// model and effort ids are provider-specific, so a value with no provider
+/// beside it is exactly the cross-layer composition provider resolution
+/// exists to prevent.
+pub(crate) fn parse_stage_provider_override(
+    provider: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    source: Option<&str>,
+) -> Result<Option<crate::db::StageProviderOverride>, String> {
+    let provider = provider.map(str::trim).filter(|value| !value.is_empty());
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+    let effort = effort.map(str::trim).filter(|value| !value.is_empty());
+    let source = source.map(str::trim).filter(|value| !value.is_empty());
+    let Some(provider_id) = provider else {
+        if model.is_some() || effort.is_some() {
+            return Err(
+                "a next-stage model or effort override needs a provider: model and effort ids are \
+                 provider-specific and are never applied to a provider chosen by another layer"
+                    .to_string(),
+            );
+        }
+        if source.is_some() {
+            return Err(
+                "a next-stage provider override source was declared without an override"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
     };
-    let Some(values) = provider.effort_values() else {
-        return Ok(());
-    };
-    if values.contains(&effort) {
-        Ok(())
-    } else {
-        Err(format!(
-            "effort '{effort}' is not supported for agent provider '{provider}' (supported: {})",
-            values.join(", ")
-        ))
+    // Deliberately one provider, not an ordered list: a list carries no way to
+    // say which candidate a single model was written for, which is the whole
+    // reason workflow stages need compact selectors. An override names the
+    // provider it means.
+    if provider_id.contains(',') {
+        return Err(format!(
+            "a next-stage provider override names one provider, not a list ('{provider_id}'):              a model and effort belong to a single provider"
+        ));
     }
+    let parsed = AgentProvider::from_str(provider_id).map_err(|_| {
+        format!(
+            "unsupported agent provider '{provider_id}' (supported: {})",
+            AgentProvider::ALL
+                .iter()
+                .map(|provider| provider.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    validate_provider_model(parsed, model)?;
+    validate_provider_effort(parsed, effort)?;
+    let source = match source {
+        Some(source) => crate::db::ProviderOverrideSource::from_caller_declared(source)?,
+        None => crate::db::ProviderOverrideSource::Unspecified,
+    };
+    Ok(Some(crate::db::StageProviderOverride {
+        source: source.as_str().to_string(),
+        provider: parsed.as_str().to_string(),
+        model: model.map(str::to_string),
+        effort: effort.map(str::to_string),
+    }))
 }
 
 pub(super) fn resolve_agent_provider(

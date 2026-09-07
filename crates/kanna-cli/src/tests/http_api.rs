@@ -377,9 +377,14 @@ async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
     let response = http_json_response("200 OK", "{\"taskId\":\"next-task-1\"}");
     let (base_url, handle) = serve_single_http_response(response).await;
 
-    let action = advance_stage_via_api(&base_url, "task-123", None)
-        .await
-        .unwrap();
+    let action = advance_stage_via_api(
+        &base_url,
+        "task-123",
+        None,
+        NextStageProviderOverride::default(),
+    )
+    .await
+    .unwrap();
     let request = handle.await.unwrap();
 
     assert_eq!(action.task_id, "next-task-1");
@@ -389,13 +394,47 @@ async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
 }
 
 #[tokio::test]
+async fn advance_stage_posts_the_next_stage_provider_override() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    advance_stage_via_api(
+        &base_url,
+        "task-123",
+        Some("operator"),
+        NextStageProviderOverride {
+            provider: Some("codex"),
+            model: Some("gpt-6-astra"),
+            effort: Some("low"),
+            source: Some("agent"),
+        },
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    // The advance is the operator's; the model is the agent's.
+    assert!(
+        request.ends_with(
+            r#"{"nextStageAgentProvider":"codex","nextStageEffort":"low","nextStageModel":"gpt-6-astra","nextStageProviderSource":"agent","source":"operator"}"#
+        ),
+        "unexpected request: {request}"
+    );
+}
+
+#[tokio::test]
 async fn advance_stage_posts_declared_manager_source() {
     let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
     let (base_url, handle) = serve_single_http_response(response).await;
 
-    advance_stage_via_api(&base_url, "task-123", Some("manager"))
-        .await
-        .unwrap();
+    advance_stage_via_api(
+        &base_url,
+        "task-123",
+        Some("manager"),
+        NextStageProviderOverride::default(),
+    )
+    .await
+    .unwrap();
     let request = handle.await.unwrap();
 
     assert!(request.ends_with(r#"{"source":"manager"}"#));
@@ -855,9 +894,14 @@ async fn advance_stage_surfaces_http_errors() {
     let response = http_json_response("409 Conflict", "{\"error\":\"task not accepted yet\"}");
     let (base_url, handle) = serve_single_http_response(response).await;
 
-    let error = advance_stage_via_api(&base_url, "task-123", None)
-        .await
-        .unwrap_err();
+    let error = advance_stage_via_api(
+        &base_url,
+        "task-123",
+        None,
+        NextStageProviderOverride::default(),
+    )
+    .await
+    .unwrap_err();
     let request = handle.await.unwrap();
 
     assert!(request.starts_with("POST /v1/tasks/task-123/actions/advance-stage HTTP/1.1"));

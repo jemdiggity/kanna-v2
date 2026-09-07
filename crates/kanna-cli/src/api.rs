@@ -717,17 +717,42 @@ pub(crate) async fn set_task_workflow_via_api(
     .await
 }
 
+/// The optional per-advance provider override for the stage an advance
+/// enters. The pair is validated by the server against the provider named
+/// here, so the CLI passes it through rather than restating the rules.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct NextStageProviderOverride<'a> {
+    pub(crate) provider: Option<&'a str>,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) effort: Option<&'a str>,
+    pub(crate) source: Option<&'a str>,
+}
+
 pub(crate) async fn advance_stage_via_api(
     base_url: &str,
     task_id: &str,
     source: Option<&str>,
+    next_stage: NextStageProviderOverride<'_>,
 ) -> Result<TaskActionResponse, String> {
+    let mut body = serde_json::Map::new();
+    for (key, value) in [
+        ("source", source),
+        ("nextStageAgentProvider", next_stage.provider),
+        ("nextStageModel", next_stage.model),
+        ("nextStageEffort", next_stage.effort),
+        ("nextStageProviderSource", next_stage.source),
+    ] {
+        if let Some(value) = value {
+            body.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+    }
     post_json(
         base_url,
         &format!("/v1/tasks/{task_id}/actions/advance-stage"),
-        &source
-            .map(|source| serde_json::json!({ "source": source }))
-            .unwrap_or_else(|| serde_json::json!({})),
+        &serde_json::Value::Object(body),
     )
     .await
 }

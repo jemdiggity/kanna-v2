@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::db::{Db, StageTrigger, TaskStageSource};
+use crate::db::{Db, StageProviderOverride, StageTrigger, TaskStageSource};
 
 use super::definitions::{
     parse_stored_workflow_definition, post_as_stage, resolve_stage_position, RepoDefinitions,
@@ -106,26 +106,51 @@ fn load_stage_transition_source(
     })
 }
 
+/// The caller-declared context of one explicit stage advance.
+///
+/// `trigger` says who asked for the advance; `provider_override` is the
+/// optional provider/model/effort the next stage must spawn with, carrying its
+/// own declared source because the agent that recommends a builder tier is
+/// often not the operator who accepts it.
+#[derive(Debug, Clone)]
+pub(crate) struct StageAdvanceIntent {
+    pub(crate) trigger: StageTrigger,
+    pub(crate) provider_override: Option<StageProviderOverride>,
+}
+
+impl Default for StageAdvanceIntent {
+    fn default() -> Self {
+        Self {
+            trigger: StageTrigger::Unspecified,
+            provider_override: None,
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn prepare_advance_stage_for_api(
     db: &Db,
     config: &Config,
     source_task_id: &str,
 ) -> Result<PreparedStageTransition, String> {
-    prepare_advance_stage_for_api_with_trigger(
+    prepare_advance_stage_for_api_with_intent(
         db,
         config,
         source_task_id,
-        StageTrigger::Unspecified,
+        StageAdvanceIntent::default(),
     )
 }
 
-pub(crate) fn prepare_advance_stage_for_api_with_trigger(
+pub(crate) fn prepare_advance_stage_for_api_with_intent(
     db: &Db,
     config: &Config,
     source_task_id: &str,
-    trigger: StageTrigger,
+    intent: StageAdvanceIntent,
 ) -> Result<PreparedStageTransition, String> {
+    let StageAdvanceIntent {
+        trigger,
+        provider_override,
+    } = intent;
     let identity = load_stage_identity(db, source_task_id)?;
     if identity.source_task.closed_at.is_some() {
         return Err(format!("task is closed: {}", source_task_id));
@@ -152,7 +177,7 @@ pub(crate) fn prepare_advance_stage_for_api_with_trigger(
         // Legacy in-flight task parked at a folded post name (e.g. `commit`):
         // the post is the current context, so advancing swaps past its owner.
         StagePosition::Post { owner } => {
-            prepare_swap_to_index(db, config, &context, owner + 1, trigger)
+            prepare_swap_to_index(db, config, &context, owner + 1, trigger, provider_override)
         }
         StagePosition::Stage(index) => {
             let stage = &loaded.workflow.stages[index];
@@ -177,10 +202,31 @@ pub(crate) fn prepare_advance_stage_for_api_with_trigger(
                     _ => true,
                 };
                 if post_pending {
+                    // The stage's post owns the transition from here: this
+                    // advance only dispatches it, and the swap happens when
+                    // the post reports success. An override handed to a
+                    // dispatch would be silently dropped at that boundary, so
+                    // say so instead of losing it.
+                    if let Some(provider_override) = provider_override {
+                        return Err(format!(
+                            "cannot apply a provider override for the next stage of \
+                             {source_task_id}: advancing dispatches this stage's post \
+                             ({}), and the transition to {} runs when that post completes. \
+                             Requested provider: {}.",
+                            post.name,
+                            loaded
+                                .workflow
+                                .stages
+                                .get(index + 1)
+                                .map(|stage| stage.name.as_str())
+                                .unwrap_or("task close"),
+                            provider_override.provider,
+                        ));
+                    }
                     return prepare_post_dispatch(db, config, &context, index, trigger);
                 }
             }
-            prepare_swap_to_index(db, config, &context, index + 1, trigger)
+            prepare_swap_to_index(db, config, &context, index + 1, trigger, provider_override)
         }
     }
 }
@@ -243,6 +289,7 @@ pub(crate) fn prepare_stage_completion_for_api_with_trigger(
             &context,
             owner + 1,
             stage_trigger_from_stored(finished_run_trigger),
+            None,
         )
         .map(Some),
         StagePosition::Stage(index) => {
@@ -254,6 +301,7 @@ pub(crate) fn prepare_stage_completion_for_api_with_trigger(
                     &context,
                     index + 1,
                     stage_trigger_from_stored(finished_run_trigger),
+                    None,
                 )
                 .map(Some);
             }
@@ -278,7 +326,8 @@ pub(crate) fn prepare_stage_completion_for_api_with_trigger(
                 // final stage.
                 return Ok(None);
             }
-            prepare_swap_to_index(db, config, &context, index + 1, StageTrigger::Auto).map(Some)
+            prepare_swap_to_index(db, config, &context, index + 1, StageTrigger::Auto, None)
+                .map(Some)
         }
     }
 }
@@ -289,8 +338,18 @@ fn prepare_swap_to_index(
     context: &StageTransitionContext<'_>,
     next_index: usize,
     trigger: StageTrigger,
+    provider_override: Option<StageProviderOverride>,
 ) -> Result<PreparedStageTransition, String> {
     let Some(next_stage) = context.workflow.stages.get(next_index) else {
+        // Past the final stage there is no stage to give a provider to, and
+        // advancing here closes the task. Refuse rather than accept a value
+        // that would decide nothing.
+        if let Some(provider_override) = provider_override {
+            return Err(format!(
+                "cannot apply a provider override for the next stage of {}: this advance                  closes the task, so there is no stage to spawn. Requested provider: {}.",
+                context.source_task_id, provider_override.provider,
+            ));
+        }
         let workspace_teardown = context
             .source_task
             .branch
@@ -340,6 +399,7 @@ fn prepare_swap_to_index(
         None,
         prompt_suffix,
         trigger,
+        provider_override,
     )?;
     run.terminal_prelude = Some(super::terminal_marker::format_stage_transition_marker(
         from_stage,
@@ -382,6 +442,7 @@ fn prepare_post_dispatch(
         Some(&completion_instruction),
         None,
         trigger,
+        None,
     )?;
 
     Ok(PreparedStageTransition::Post(Box::new(
@@ -407,7 +468,15 @@ fn prepare_stage_run_for_target(
     feedback: Option<String>,
     prompt_suffix: Option<&str>,
     trigger: StageTrigger,
+    provider_override: Option<StageProviderOverride>,
 ) -> Result<PreparedStageRunSpawn, String> {
+    // A stage transition otherwise lets the target stage and its agent
+    // definition own the provider; an advance-carried override is the one
+    // explicit layer above them.
+    let agent_overrides = provider_override
+        .as_ref()
+        .map(SpawnAgentOverrides::from_provider_override)
+        .unwrap_or_default();
     prepare_stage_run_for_target_with_provider(
         db,
         config,
@@ -418,9 +487,10 @@ fn prepare_stage_run_for_target(
         target_stage.policy.transition,
         prompt_override,
         feedback,
-        SpawnAgentOverrides::default(),
+        agent_overrides,
         prompt_suffix,
         trigger,
+        provider_override,
     )
 }
 
@@ -438,6 +508,7 @@ fn prepare_stage_run_for_target_with_provider(
     agent_overrides: SpawnAgentOverrides,
     prompt_suffix: Option<&str>,
     trigger: StageTrigger,
+    provider_override: Option<StageProviderOverride>,
 ) -> Result<PreparedStageRunSpawn, String> {
     prepare_stage_run_for_target_returning_prompt(
         db,
@@ -453,6 +524,7 @@ fn prepare_stage_run_for_target_with_provider(
         None,
         prompt_suffix,
         trigger,
+        provider_override,
     )
     .map(|(run, _)| run)
 }
@@ -472,6 +544,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     additional_agent_instructions: Option<&str>,
     prompt_suffix: Option<&str>,
     trigger: StageTrigger,
+    provider_override: Option<StageProviderOverride>,
 ) -> Result<(PreparedStageRunSpawn, String), String> {
     let source_task = context.source_task;
     let source_branch =
@@ -558,6 +631,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         agent_overrides,
         source_task.agent_provider.as_deref(),
         trigger,
+        provider_override,
     )?;
     if matches!(run.workspace, PreparedRunWorkspace::Forked(_)) {
         let departed_stage = source_task
@@ -765,6 +839,11 @@ pub(crate) fn prepare_revision_task_for_api(
         agent_overrides,
         None,
         trigger,
+        // A fresh revision fork re-resolves its provider from the task's stamp
+        // rather than reproducing the previous run's, so carrying that run's
+        // override record forward could attribute a provider nobody chose.
+        // Silence beats a misattribution; the run row still carries the model.
+        None,
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
@@ -998,6 +1077,9 @@ fn prepare_stage_restart(
         SpawnAgentOverrides::from_stage_run(&run),
         source_task.agent_provider.as_deref(),
         stage_trigger_from_stored(Some(&run.trigger)),
+        // Reproducing a run reproduces where its provider came from, so the
+        // record keeps naming whoever picked this stage's model.
+        run.provider_override.clone(),
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
@@ -1087,6 +1169,7 @@ fn prepare_revision_resume(
         agent_overrides,
         source_task.agent_provider.as_deref(),
         stage_trigger_from_stored(Some(&run.trigger)),
+        run.provider_override.clone(),
     )?;
     // A definition that changed provider or session type since the source run
     // cannot continue that conversation.

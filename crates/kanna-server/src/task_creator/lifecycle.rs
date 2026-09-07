@@ -590,7 +590,7 @@ fn record_stage_transition_run(
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {e}"))?;
     db.with_immediate_transaction(|db| -> rusqlite::Result<()> {
-        db.insert_stage_run_with_completion_binding_and_trigger(
+        db.insert_stage_run_with_provenance(
             NewStageRun {
                 id: run_id,
                 task_id: &prepared.task_id,
@@ -611,6 +611,7 @@ fn record_stage_transition_run(
             Some(prepared.completion_transition.as_str()),
             true,
             Some(prepared.trigger),
+            prepared.provider_override.as_ref(),
         )?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
             db.set_stage_run_resume_fallback_reason(run_id, reason)?;
@@ -650,7 +651,7 @@ fn record_stage_transition_failure(
             .map_err(|db_error| format!("db error: {db_error}"))?;
         let run_id = generate_stage_run_id(&prepared.task_id);
         let result = format!("failed to start stage {}: {error}", prepared.run_stage);
-        db.insert_stage_run_with_completion_binding_and_trigger(
+        db.insert_stage_run_with_provenance(
             NewStageRun {
                 id: &run_id,
                 task_id: &prepared.task_id,
@@ -671,6 +672,7 @@ fn record_stage_transition_failure(
             Some(prepared.completion_transition.as_str()),
             false,
             Some(prepared.trigger),
+            prepared.provider_override.as_ref(),
         )
         .map_err(|db_error| format!("db error: {db_error}"))?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
@@ -1779,6 +1781,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     let agent_provider = prepared.agent_provider.clone();
     let model = prepared.model.clone();
     let effort = prepared.effort.clone();
+    let provider_override = prepared.provider_override.clone();
     let completion_transition = prepared.completion_transition;
     let provider_session_id = prepared.provider_session_id.clone();
     let cwd = prepared.cwd.clone();
@@ -1797,6 +1800,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         &session_id,
         provider_session_id.as_deref(),
         &cwd,
+        provider_override.as_ref(),
         &error,
     ) {
         Ok(()) => error,
@@ -1837,6 +1841,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         &session_id,
         provider_session_id.as_deref(),
         &cwd,
+        provider_override.as_ref(),
         &run_id,
     )?;
 
@@ -2140,6 +2145,7 @@ fn record_rerun_stage_run(
     session_id: &str,
     provider_session_id: Option<&str>,
     cwd: &str,
+    provider_override: Option<&crate::db::StageProviderOverride>,
     run_id: &str,
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
@@ -2147,7 +2153,7 @@ fn record_rerun_stage_run(
         db.cancel_running_stage_runs(task_id)?;
         db.update_pipeline_item_activity(task_id, "working")?;
         db.update_pipeline_item_agent_session_id(task_id, provider_session_id)?;
-        db.insert_stage_run_with_completion_binding(
+        db.insert_stage_run_with_provenance(
             NewStageRun {
                 id: run_id,
                 task_id,
@@ -2167,6 +2173,8 @@ fn record_rerun_stage_run(
             },
             Some(completion_transition),
             true,
+            None,
+            provider_override,
         )?;
         db.delete_create_task_intent(task_id)
     })
@@ -2186,6 +2194,7 @@ fn record_rerun_stage_failure(
     session_id: &str,
     provider_session_id: Option<&str>,
     cwd: &str,
+    provider_override: Option<&crate::db::StageProviderOverride>,
     error: &str,
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
@@ -2197,23 +2206,29 @@ fn record_rerun_stage_failure(
         .map_err(|e| format!("db error: {}", e))?;
     let result = format!("failed to rerun stage {stage}: {error}");
     let run_id = generate_stage_run_id(task_id);
-    db.insert_stage_run(NewStageRun {
-        id: &run_id,
-        task_id,
-        stage,
-        kind: run_kind,
-        agent: stage_agent,
-        agent_provider: Some(agent_provider),
-        model,
-        effort,
-        status: "failed",
-        result: Some(&result),
-        feedback: Some("stage rerun failed"),
-        session_id: Some(session_id),
-        provider_session_id,
-        cwd: Some(cwd),
-        resumed_from_run_id: None,
-    })
+    db.insert_stage_run_with_provenance(
+        NewStageRun {
+            id: &run_id,
+            task_id,
+            stage,
+            kind: run_kind,
+            agent: stage_agent,
+            agent_provider: Some(agent_provider),
+            model,
+            effort,
+            status: "failed",
+            result: Some(&result),
+            feedback: Some("stage rerun failed"),
+            session_id: Some(session_id),
+            provider_session_id,
+            cwd: Some(cwd),
+            resumed_from_run_id: None,
+        },
+        None,
+        false,
+        None,
+        provider_override,
+    )
     .map_err(|e| format!("db error: {}", e))
 }
 

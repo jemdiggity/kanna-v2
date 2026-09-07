@@ -48,7 +48,9 @@ pub use operator_events::NewOperatorEvent;
 pub use pipeline_items::MergeSignalSource;
 pub(crate) use repos::RepoOrderInput;
 #[allow(unused_imports)]
-pub use stage_runs::{FinishedStageRun, StageTrigger};
+pub use stage_runs::{
+    FinishedStageRun, ProviderOverrideSource, StageProviderOverride, StageTrigger,
+};
 #[allow(unused_imports)]
 pub use task_events::{
     appended as task_event_appended, TaskEvent, TaskEventFilters, TaskEventKind, TaskEventScope,
@@ -132,6 +134,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "062_contextless_completion_attempt",
     "063_lifecycle_operation_intent",
     "064_blocked_state_events",
+    "065_stage_run_provider_override",
 ];
 
 #[derive(Debug, Serialize)]
@@ -467,6 +470,11 @@ pub struct StageRun {
     /// How this run's stage was entered. Legacy NULL rows surface as
     /// `unspecified` rather than pretending provenance can be reconstructed.
     pub trigger: String,
+    /// The per-advance provider override that started this run, when the
+    /// caller passed one. `None` means the run resolved its provider through
+    /// the ordinary precedence chain — which is also what a legacy row and an
+    /// unreadable value report, because neither can be reconstructed.
+    pub provider_override: Option<StageProviderOverride>,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -1985,6 +1993,10 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
         Ok(())
+    })?;
+
+    run_migration(conn, "065_stage_run_provider_override", |conn| {
+        add_column(conn, "stage_run", "provider_override", "TEXT")
     })?;
 
     Ok(())

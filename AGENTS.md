@@ -247,6 +247,24 @@ acknowledging transferred descriptors.
   candidate its own coherent model/effort; anything under-specified inherits
   the provider CLI's own defaults, and the model text is passed to the CLI
   verbatim.
+  One stage advance may fill the explicit-override slot for the stage it
+  *enters*: `kanna_advance_stage` (and `kanna-cli task advance-stage`) accept
+  `next_stage_agent_provider` with `next_stage_model` and `next_stage_effort`,
+  which outrank that stage's own selectors, the repo config, frontmatter, and
+  the default. It is a per-advance override — it changes no workflow
+  definition, no pin, and no default, and the stage after it resolves normally.
+  Model and effort here belong to the provider named beside them and are
+  refused without it, and an incoherent pair fails the request rather than the
+  spawn. It is refused when the advance dispatches the current stage's post,
+  because the transition then belongs to that post's completion, and when the
+  advance closes the task past its final stage.
+  `next_stage_provider_source` (`operator` | `manager` | `agent`) declares who
+  *picked the model*, separately from `source`, which says who advanced the
+  stage: a human accepting a plan agent's builder tier advances as `operator`
+  with the override sourced to `agent`. Both are unauthenticated caller
+  declarations, recorded on the spawned `stage_run` and reported as
+  `kanna_get_task`'s `latestRun.providerOverride`, and a run that reproduces a
+  recorded run carries the record forward with the stamp.
 - `config.json` has a machine-local companion, `.kanna/config.local.json`:
   gitignored, read from the **open repo's working tree** rather than the origin
   snapshot, and deep-merged over the committed config with local winning — so a

@@ -112,6 +112,62 @@ fn advance_stage_accepts_only_declared_operator_or_manager_sources() {
     assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
 }
 
+/// The per-advance provider override: a model or effort is only meaningful
+/// beside the provider it was written for, so clap refuses one without it
+/// rather than sending a value the server has to reject.
+#[test]
+fn advance_stage_next_stage_model_and_effort_require_their_provider() {
+    let paired = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "advance-stage",
+        "--task-id",
+        "task-1",
+        "--next-stage-agent-provider",
+        "codex",
+        "--next-stage-model",
+        "gpt-6-astra",
+        "--next-stage-effort",
+        "low",
+        "--next-stage-provider-source",
+        "agent",
+    ]);
+    assert!(paired.is_ok(), "{:?}", paired.err().map(|e| e.to_string()));
+
+    for orphan in [
+        vec!["--next-stage-model", "gpt-6-astra"],
+        vec!["--next-stage-effort", "low"],
+        vec!["--next-stage-provider-source", "agent"],
+    ] {
+        let mut argv = vec!["kanna-cli", "task", "advance-stage", "--task-id", "task-1"];
+        argv.extend(orphan.iter().copied());
+        match crate::Cli::try_parse_from(argv) {
+            Ok(_) => panic!("{orphan:?} must not be accepted without a provider"),
+            Err(error) => assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            ),
+        }
+    }
+
+    // The declared source is a closed vocabulary, like --source.
+    let invalid = match crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "advance-stage",
+        "--task-id",
+        "task-1",
+        "--next-stage-agent-provider",
+        "codex",
+        "--next-stage-provider-source",
+        "auto",
+    ]) {
+        Ok(_) => panic!("auto is not a provider override source"),
+        Err(error) => error,
+    };
+    assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
+}
+
 /// The transfer surface an agent reaches for when a task has to change
 /// machines. The manager who needed it on 2026-09-06 found no such command and
 /// posted a scraped peer id at the raw HTTP route instead, so these spellings —

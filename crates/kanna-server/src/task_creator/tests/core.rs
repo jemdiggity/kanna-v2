@@ -6,6 +6,7 @@ use super::super::provider::{
     resolve_agent_provider_with, validate_effort_shape, validate_model_shape,
     validate_provider_effort, validate_provider_model,
 };
+use super::super::SpawnAgentOverrides;
 use super::*;
 
 fn default_base_task_request() -> CreateTaskRequest {
@@ -7475,4 +7476,181 @@ fn default_agent_provider_setting_falls_back_to_claude_when_invalid() {
     let provider = read_default_agent_provider_setting(&db).unwrap();
 
     assert_eq!(provider.as_deref(), Some("claude"));
+}
+
+/// A per-advance provider override fills the explicit-override slot, so it
+/// outranks the target stage's own compact selectors — and it carries its own
+/// model and effort, which is what keeps the pair coherent when the override
+/// moves the spawn to a different provider than the stage would have chosen.
+#[test]
+fn an_advance_provider_override_outranks_the_target_stage_selectors() {
+    let stage_providers = vec!["claude-fable-hi".to_string(), "codex-astra-lo".to_string()];
+
+    // Without an override the stage's own selectors decide.
+    let stage_only =
+        super::super::agent_tuning_plan(None, None, None, Some(&stage_providers), None, None);
+    assert_eq!(
+        stage_only.model_for(AgentProvider::Claude).as_deref(),
+        Some("fable")
+    );
+
+    let advance_override = crate::db::StageProviderOverride {
+        source: "agent".to_string(),
+        provider: "codex".to_string(),
+        model: Some("gpt-6-astra".to_string()),
+        effort: Some("low".to_string()),
+    };
+    let overrides = SpawnAgentOverrides::from_provider_override(&advance_override);
+    assert_eq!(overrides.provider.as_deref(), Some("codex"));
+
+    // The override is the only candidate: the stage's leading selector no
+    // longer decides which provider the next stage spawns with.
+    assert_eq!(
+        resolve_agent_provider_with(
+            overrides.provider.as_deref(),
+            Some(&stage_providers),
+            None,
+            None,
+            None,
+            |_| true,
+        )
+        .unwrap(),
+        AgentProvider::Codex,
+    );
+
+    let tuning = super::super::agent_tuning_plan(
+        overrides.provider.as_deref(),
+        overrides.model.clone(),
+        overrides.effort.clone(),
+        Some(&stage_providers),
+        None,
+        None,
+    );
+    assert_eq!(
+        tuning.model_for(AgentProvider::Codex).as_deref(),
+        Some("gpt-6-astra"),
+        "the override's own model must win over the stage selector's `astra`",
+    );
+    assert_eq!(
+        tuning.effort_for(AgentProvider::Codex).as_deref(),
+        Some("low")
+    );
+    // And nothing of the override leaks onto a provider it did not name.
+    assert_eq!(
+        tuning.model_for(AgentProvider::Claude).as_deref(),
+        Some("fable"),
+    );
+}
+
+/// An override that names only a provider still draws its model from a lower
+/// layer written for *that same* provider. That is the documented chain, not
+/// composition: the value was authored beside the provider it lands on.
+#[test]
+fn a_provider_only_advance_override_keeps_that_providers_own_lower_layers() {
+    let stage_providers = vec!["claude-fable-hi".to_string(), "codex-astra-lo".to_string()];
+    let advance_override = crate::db::StageProviderOverride {
+        source: "operator".to_string(),
+        provider: "codex".to_string(),
+        model: None,
+        effort: None,
+    };
+    let overrides = SpawnAgentOverrides::from_provider_override(&advance_override);
+    let tuning = super::super::agent_tuning_plan(
+        overrides.provider.as_deref(),
+        overrides.model.clone(),
+        overrides.effort.clone(),
+        Some(&stage_providers),
+        None,
+        None,
+    );
+    assert_eq!(
+        tuning.model_for(AgentProvider::Codex).as_deref(),
+        Some("astra")
+    );
+    assert_eq!(
+        tuning.effort_for(AgentProvider::Codex).as_deref(),
+        Some("low")
+    );
+}
+
+/// The advance override is validated at request time, against the same
+/// provider-coherence rules compact selectors are parsed with.
+#[test]
+fn an_advance_provider_override_is_validated_against_its_provider() {
+    use super::super::parse_stage_provider_override;
+
+    let accepted = parse_stage_provider_override(
+        Some("codex"),
+        Some("gpt-6-astra"),
+        Some("low"),
+        Some("agent"),
+    )
+    .expect("a coherent pair should be accepted")
+    .expect("a named provider should produce an override");
+    assert_eq!(accepted.provider, "codex");
+    assert_eq!(accepted.model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(accepted.effort.as_deref(), Some("low"));
+    assert_eq!(accepted.source, "agent");
+
+    // An undeclared source is recorded as unspecified rather than guessed at.
+    assert_eq!(
+        parse_stage_provider_override(Some("claude"), None, None, None)
+            .unwrap()
+            .unwrap()
+            .source,
+        "unspecified"
+    );
+
+    // Nothing named is no override at all.
+    assert_eq!(
+        parse_stage_provider_override(None, None, None, None).unwrap(),
+        None
+    );
+    // Blank strings are the same as omission, not an empty provider.
+    assert_eq!(
+        parse_stage_provider_override(Some("  "), None, None, None).unwrap(),
+        None
+    );
+
+    // A model or effort with no provider beside it is exactly the cross-layer
+    // composition provider resolution exists to prevent.
+    let error = parse_stage_provider_override(None, Some("gpt-6-astra"), None, None).unwrap_err();
+    assert!(error.contains("needs a provider"), "unexpected: {error}");
+    let error = parse_stage_provider_override(None, None, Some("low"), None).unwrap_err();
+    assert!(error.contains("needs a provider"), "unexpected: {error}");
+
+    // The provider must exist …
+    let error = parse_stage_provider_override(Some("clod"), None, None, None).unwrap_err();
+    assert!(
+        error.contains("unsupported agent provider 'clod'"),
+        "unexpected: {error}"
+    );
+    // … must accept a model at all …
+    let error =
+        parse_stage_provider_override(Some("antigravity"), Some("gemini"), None, None).unwrap_err();
+    assert!(
+        error.contains("model overrides are not supported"),
+        "unexpected: {error}"
+    );
+    // … and must publish the effort asked for.
+    let error =
+        parse_stage_provider_override(Some("antigravity"), None, Some("max"), None).unwrap_err();
+    assert!(
+        error.contains("effort 'max' is not supported"),
+        "unexpected: {error}"
+    );
+    // One provider, never an ordered list: a list has no way to say which
+    // candidate the model belongs to.
+    let error = parse_stage_provider_override(Some("codex,claude"), None, None, None).unwrap_err();
+    assert!(
+        error.contains("names one provider, not a list"),
+        "unexpected: {error}"
+    );
+    // The declared source is a closed vocabulary.
+    let error =
+        parse_stage_provider_override(Some("claude"), None, None, Some("robot")).unwrap_err();
+    assert!(
+        error.contains("unknown provider override source"),
+        "unexpected: {error}"
+    );
 }

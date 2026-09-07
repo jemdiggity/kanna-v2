@@ -7,7 +7,7 @@ use crate::api::{
     set_task_workflow_via_api, signal_agent_path, signal_agent_via_api,
     signal_merge_handoff_via_api, task_children_path, task_get_path, task_list_path,
     task_logs_path, task_matches_wait_until, task_search_path, unblock_task_via_api,
-    wait_task_via_api, WaitTaskOutcome,
+    wait_task_via_api, NextStageProviderOverride, WaitTaskOutcome,
 };
 use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command,
@@ -352,7 +352,14 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_advance_stage",
             TypedToolSurface {
                 command_path: &["task", "advance-stage"],
-                param_args: &[("task_id", "task_id"), ("source", "source")],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("source", "source"),
+                    ("next_stage_agent_provider", "next_stage_agent_provider"),
+                    ("next_stage_model", "next_stage_model"),
+                    ("next_stage_effort", "next_stage_effort"),
+                    ("next_stage_provider_source", "next_stage_provider_source"),
+                ],
             },
         ),
         (
