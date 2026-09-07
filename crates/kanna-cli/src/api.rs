@@ -128,6 +128,9 @@ pub(crate) struct TaskEventsParams<'a> {
     /// Already-resolved exclusions: the caller's own task on a repo-scoped
     /// watch from a task session, plus anything named explicitly.
     pub(crate) exclude_task_ids: &'a [String],
+    /// Event type names dropped from the chosen scope, so the wait does not
+    /// return for something the caller would only discard.
+    pub(crate) exclude_event_types: &'a [String],
     pub(crate) local_only: bool,
     pub(crate) include_current_activity: bool,
     pub(crate) short_cursor: bool,
@@ -167,6 +170,12 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
         query.push(format!(
             "excludeTaskIds={}",
             encode_path_segment(&params.exclude_task_ids.join(","))
+        ));
+    }
+    if !params.exclude_event_types.is_empty() {
+        query.push(format!(
+            "excludeEventTypes={}",
+            encode_path_segment(&params.exclude_event_types.join(","))
         ));
     }
     if params.local_only {

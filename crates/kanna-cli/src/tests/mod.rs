@@ -189,6 +189,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("repo_id", "repo_id"),
                     ("repo_remote_url_hash", "repo_remote_url_hash"),
                     ("exclude_task_ids", "exclude_task_id"),
+                    ("exclude_event_types", "exclude_event_type"),
                     ("include_self", "include_self"),
                     ("local_only", "local_only"),
                     ("include_current_activity", "include_current_activity"),

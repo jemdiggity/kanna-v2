@@ -146,6 +146,187 @@ describe("remote task terminal flow E2E", () => {
     );
   }
 
+  interface ManagerFeedResult {
+    cursor: string;
+    events: TaskEvent[];
+    waitOutcome?: string;
+  }
+
+  async function readFeed(
+    query: string,
+    cursor: string | null,
+    timeoutSecs: number,
+  ): Promise<ManagerFeedResult> {
+    const suffix = cursor === null ? "" : `&cursor=${encodeURIComponent(cursor)}`;
+    const feed = await harness.client.invokeDesktop({
+      desktopId: harness.desktopId,
+      method: "GET",
+      path: `/v1/task-events?${query}&timeoutSecs=${timeoutSecs}${suffix}`,
+      body: null,
+    }) as TaskEventFeed & { waitOutcome?: string };
+    return {
+      cursor: feed.cursor ?? cursor ?? "",
+      events: feed.events ?? [],
+      waitOutcome: feed.waitOutcome,
+    };
+  }
+
+  async function waitForFeedEvent(
+    query: string,
+    initialCursor: string,
+    predicate: (event: TaskEvent) => boolean,
+    timeoutMs: number,
+  ): Promise<ManagerFeedResult> {
+    const deadline = Date.now() + timeoutMs;
+    let cursor = initialCursor;
+    const observed: TaskEvent[] = [];
+    while (Date.now() < deadline) {
+      const feed = await readFeed(query, cursor, 2);
+      observed.push(...feed.events);
+      cursor = feed.cursor;
+      if (feed.events.some(predicate)) {
+        return { ...feed, cursor };
+      }
+    }
+    throw new Error(
+      `no matching event on ${query}; observed: ${JSON.stringify(observed)}`,
+    );
+  }
+
+  async function invoke(
+    method: "GET" | "POST",
+    path: string,
+    body: unknown = null,
+  ): Promise<Record<string, unknown>> {
+    return await harness.client.invokeDesktop({
+      desktopId: harness.desktopId,
+      method,
+      path,
+      body,
+    }) as Record<string, unknown>;
+  }
+
+  /**
+   * The owner's rule, end to end: a task manager watches the daemon's runtime
+   * dimension and the derived blocked state, and a human reading a task's
+   * output — which moves only the display dimension — must not wake it.
+   *
+   * This deliberately drives the runtime verdicts through a real PTY and the
+   * real daemon rather than writing `runtime_status` directly: the whole point
+   * of the signal is that it is daemon truth.
+   */
+  it("wakes a runtime manager on every daemon runtime edge and on blocker changes, never on a read-state flip", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Runtime manager watch task",
+      agentProvider: "claude",
+    });
+    await waitForRuntimeState(task.taskId, "idle");
+
+    // What a manager asks for: the runtime dimension, without the human
+    // read/unread dimension and without the deprecated settled alias.
+    const managerWatch =
+      `taskIds=${task.taskId}&localOnly=true&excludeEventTypes=` +
+      encodeURIComponent("task.activity_changed,task.runtime_settled");
+    const displayWatch = `taskIds=${task.taskId}&localOnly=true`;
+    const runtimeEdge = (previous: string | null, next: string) =>
+      (event: TaskEvent) =>
+        event.type === "task.runtime_changed"
+        && event.payload?.previousRuntimeState === previous
+        && event.payload?.runtimeState === next;
+
+    const armed = await readFeed(`${managerWatch}&from=now`, null, 0);
+    let cursor = armed.cursor;
+    expect(cursor).toEqual(expect.any(String));
+
+    // busy — published immediately, because a turn shorter than the debounce
+    // must not vanish. Its predecessor is whatever managers were last told,
+    // which for a freshly spawned session is nothing: the task's first idle
+    // never survived the debounce before work started.
+    await invoke("POST", `/v1/tasks/${task.taskId}/input`, { input: "start-a-turn" });
+    cursor = (await waitForFeedEvent(
+      managerWatch,
+      cursor,
+      (event) =>
+        event.type === "task.runtime_changed"
+        && event.payload?.runtimeState === "busy",
+      30_000,
+    )).cursor;
+
+    // idle — damped, so it arrives only after the fixed 10-second window.
+    cursor = (await waitForFeedEvent(
+      managerWatch,
+      cursor,
+      runtimeEdge("busy", "idle"),
+      60_000,
+    )).cursor;
+
+    // A human opens the task. Only the display dimension moves.
+    expect((await invoke("GET", `/v1/tasks/${task.taskId}`)).activity).toBe("unread");
+    await invoke("POST", `/v1/tasks/${task.taskId}/actions/mark-read`, {});
+    const quiet = await readFeed(managerWatch, cursor, 25);
+    expect(quiet.waitOutcome).toBe("timeout");
+    expect(quiet.events).toEqual([]);
+    // Same cursor, no exclusions: exclusions are a filter, not a scope, so the
+    // display edge was there the whole time — the manager simply never woke.
+    const display = await readFeed(displayWatch, cursor, 5);
+    expect(display.events.map((event) => event.type)).toContain("task.activity_changed");
+
+    // waiting — a non-busy to non-busy edge, which the old busy-to-non-busy
+    // signal could not express at all.
+    await invoke("POST", `/v1/tasks/${task.taskId}/input`, { input: "ask-permission" });
+    cursor = (await waitForFeedEvent(
+      managerWatch,
+      cursor,
+      runtimeEdge("idle", "waiting"),
+      60_000,
+    )).cursor;
+
+    // blocked / unblocked — derived state, published both when the task's own
+    // blocker rows are rewritten and when the blocker resolves underneath it.
+    const blocker = await invoke("POST", "/v1/tasks", {
+      repoId: task.repoId,
+      prompt: "Blocking prerequisite",
+      displayName: "Runtime manager blocker",
+      agentProvider: "claude",
+      agentType: "pty",
+    });
+    const blockerTaskId = blocker.taskId as string;
+    await invoke("POST", `/v1/tasks/${task.taskId}/actions/block`, {
+      blockerTaskIds: [blockerTaskId],
+    });
+    const blocked = await waitForFeedEvent(
+      managerWatch,
+      cursor,
+      (event) => event.type === "task.blocked",
+      30_000,
+    );
+    expect(
+      blocked.events.find((event) => event.type === "task.blocked")?.payload,
+    ).toMatchObject({ blocked: true, blockerTaskIds: [blockerTaskId] });
+    cursor = blocked.cursor;
+
+    await invoke("POST", `/v1/tasks/${blockerTaskId}/actions/close`, {});
+    const unblocked = await waitForFeedEvent(
+      managerWatch,
+      cursor,
+      (event) => event.type === "task.unblocked",
+      30_000,
+    );
+    expect(
+      unblocked.events.find((event) => event.type === "task.unblocked")?.payload,
+    ).toMatchObject({ blocked: false, blockerTaskIds: [] });
+    cursor = unblocked.cursor;
+
+    // exited — the session ends without being replaced.
+    await invoke("POST", `/v1/tasks/${task.taskId}/input`, { input: "quit-now" });
+    await waitForFeedEvent(
+      managerWatch,
+      cursor,
+      runtimeEdge("waiting", "exited"),
+      60_000,
+    );
+  }, 300_000);
+
   it("reports a Claude composer idle before and after daemon handoff", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Claude runtime handoff task",

@@ -62,9 +62,25 @@ pub enum TaskEventKind {
     /// Exit lifecycle event rather than a display-state heuristic.
     AwaitingAdvance,
     /// The daemon's provider-neutral runtime classification settled from
-    /// `busy` to a non-busy state. This is the manager activity dimension,
-    /// never the human read/unread inbox dimension exposed as `activity`.
+    /// `busy` to a non-busy state.
+    ///
+    /// Superseded by [`Self::RuntimeChanged`], which covers the same edge plus
+    /// every other one, and kept as a deprecated alias appended in the same
+    /// transaction so deployed watchers that key on it keep working.
     RuntimeSettled,
+    /// The daemon's provider-neutral runtime classification moved between
+    /// `busy`, `waiting`, `idle`, and `exited` and the new value held. This is
+    /// the manager dimension — what the agent session is doing — and it never
+    /// encodes the human read/unread inbox dimension exposed as `activity`, so
+    /// a person merely reading a task's output does not appear here at all.
+    ///
+    /// Entering `busy` is published immediately: it is a positive daemon
+    /// verdict that an agent turn started, and damping it would silently drop
+    /// every turn shorter than the debounce window. Leaving `busy` is the
+    /// ambiguous direction — agents fall idle between tool calls — so every
+    /// non-busy value must hold for the fixed 10-second window before it is
+    /// published, which also collapses busy/idle flicker into nothing.
+    RuntimeChanged,
     /// A provider-neutral display transition that held past the server's
     /// debounce. Every direction and provider uses this same event; unlike
     /// `AwaitingInput`, it does not identify a question.
@@ -123,6 +139,15 @@ pub enum TaskEventKind {
     /// legitimately take minutes, and this is what makes that latency legible
     /// as a transfer rather than as a hung task.
     TransferFinalizing,
+    /// The task acquired at least one unresolved blocker, having had none.
+    /// Blocked is a *derived* predicate — `task_blocker` rows whose blocker is
+    /// neither closed nor parked at `pr` with a PR — so it flips both when the
+    /// task's own blocker set is rewritten and when a blocker task resolves
+    /// underneath it. `payload.blockerTaskIds` lists the unresolved blockers.
+    TaskBlocked,
+    /// The task's last unresolved blocker went away. Same derived predicate as
+    /// [`Self::TaskBlocked`]; `payload.blockerTaskIds` is empty.
+    TaskUnblocked,
 }
 
 impl TaskEventKind {
@@ -139,6 +164,7 @@ impl TaskEventKind {
             Self::AwaitingInput => "task.awaiting_input",
             Self::AwaitingAdvance => "task.awaiting_advance",
             Self::RuntimeSettled => "task.runtime_settled",
+            Self::RuntimeChanged => "task.runtime_changed",
             Self::ActivityChanged => "task.activity_changed",
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
@@ -148,6 +174,8 @@ impl TaskEventKind {
             Self::TeardownFailed => "task.teardown_failed",
             Self::LifecycleOperationRetired => "task.lifecycle_operation_retired",
             Self::TransferFinalizing => "task.transfer_finalizing",
+            Self::TaskBlocked => "task.blocked",
+            Self::TaskUnblocked => "task.unblocked",
         }
     }
 
@@ -164,6 +192,7 @@ impl TaskEventKind {
         Self::AwaitingInput,
         Self::AwaitingAdvance,
         Self::RuntimeSettled,
+        Self::RuntimeChanged,
         Self::ActivityChanged,
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
@@ -173,6 +202,8 @@ impl TaskEventKind {
         Self::TeardownFailed,
         Self::LifecycleOperationRetired,
         Self::TransferFinalizing,
+        Self::TaskBlocked,
+        Self::TaskUnblocked,
     ];
 }
 
@@ -320,11 +351,49 @@ fn exclusion_params(exclude_task_ids: &[String]) -> impl Iterator<Item = SqlValu
         .map(|task_id| SqlValue::Text(task_id.clone()))
 }
 
+/// What a reader wants dropped from whichever scope it chose.
+///
+/// Both lists are filters, never scopes: neither participates in cursor
+/// identity, so a watcher may change either between two calls and keep its
+/// checkpoint. Filtering happens in SQL rather than after the read because the
+/// point of an exclusion is that the wait does *not* return — a manager that
+/// dropped `task.activity_changed` must sleep through a human reading a task,
+/// not wake up and discard the row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskEventFilters {
+    /// Tasks whose events are dropped, already resolved to task ids.
+    pub exclude_task_ids: Vec<String>,
+    /// Event type names (`task.activity_changed`, …) that are dropped.
+    pub exclude_event_types: Vec<String>,
+}
+
+impl TaskEventFilters {
+    pub fn excludes_event_type(&self, event_type: &str) -> bool {
+        self.exclude_event_types
+            .iter()
+            .any(|excluded| excluded == event_type)
+    }
+
+    /// `AND …` clauses for both lists, in the order [`Self::params`] binds
+    /// them.
+    fn clauses(&self, task_id_column: &str) -> String {
+        format!(
+            "{}{}",
+            exclusion_clause(task_id_column, &self.exclude_task_ids),
+            exclusion_clause("type", &self.exclude_event_types)
+        )
+    }
+
+    fn params(&self) -> impl Iterator<Item = SqlValue> + '_ {
+        exclusion_params(&self.exclude_task_ids).chain(exclusion_params(&self.exclude_event_types))
+    }
+}
+
 impl Db {
     pub fn list_non_busy_task_runtime_states(
         &self,
         scope: &TaskEventScope,
-        exclude_task_ids: &[String],
+        filters: &TaskEventFilters,
         after_task_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<(String, String)>, rusqlite::Error> {
@@ -338,7 +407,7 @@ impl Db {
              ORDER BY id ASC
              LIMIT ?",
             scope.pipeline_item_where_clause(),
-            exclusion_clause("id", exclude_task_ids)
+            exclusion_clause("id", &filters.exclude_task_ids)
         );
         let mut params = vec![
             after_task_id
@@ -349,7 +418,7 @@ impl Db {
                 .unwrap_or(SqlValue::Null),
         ];
         params.extend(scope.params());
-        params.extend(exclusion_params(exclude_task_ids));
+        params.extend(exclusion_params(&filters.exclude_task_ids));
         params.push(SqlValue::Integer(limit));
         let mut statement = self.conn.prepare(&sql)?;
         let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
@@ -405,17 +474,23 @@ impl Db {
         head_seq: i64,
         limit: i64,
     ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
-        self.list_task_events_excluding(scope, &[], after_seq, head_seq, limit)
+        self.list_task_events_excluding(
+            scope,
+            &TaskEventFilters::default(),
+            after_seq,
+            head_seq,
+            limit,
+        )
     }
 
     /// Events in `scope` with `after_seq < seq <= head_seq`, oldest first,
-    /// minus every event whose task is in `exclude_task_ids` — how a
-    /// repo-scoped watcher running inside a task session keeps its own runtime
-    /// edges out of its wake-up feed.
+    /// minus everything `filters` drops — how a repo-scoped watcher running
+    /// inside a task session keeps its own runtime edges out of its wake-up
+    /// feed, and how a manager keeps human read/unread churn out of it.
     pub fn list_task_events_excluding(
         &self,
         scope: &TaskEventScope,
-        exclude_task_ids: &[String],
+        filters: &TaskEventFilters,
         after_seq: i64,
         head_seq: i64,
         limit: i64,
@@ -436,12 +511,12 @@ impl Db {
              ORDER BY seq ASC
              LIMIT ?",
             scope.where_clause(),
-            exclusion_clause("task_id", exclude_task_ids)
+            filters.clauses("task_id")
         );
         let mut params: Vec<SqlValue> =
             vec![SqlValue::Integer(after_seq), SqlValue::Integer(head_seq)];
         params.extend(scope.params());
-        params.extend(exclusion_params(exclude_task_ids));
+        params.extend(filters.params());
         params.push(SqlValue::Integer(limit));
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -505,6 +580,7 @@ impl Db {
     pub fn list_task_event_candidates_bounded(
         &self,
         task_ids: &[String],
+        filters: &TaskEventFilters,
         after_seq: i64,
         head_seq: i64,
         limit: i64,
@@ -512,15 +588,23 @@ impl Db {
         if task_ids.is_empty() || limit <= 0 {
             return Ok(Vec::new());
         }
-        let mut stmt = self.conn.prepare(
+        let sql = format!(
             "SELECT seq, task_id, type, payload, created_at
              FROM task_event INDEXED BY idx_task_event_task_seq
-             WHERE task_id = ?1 AND seq > ?2 AND seq <= ?3
+             WHERE task_id = ? AND seq > ? AND seq <= ?{}
              ORDER BY seq ASC
              LIMIT 1",
-        )?;
+            exclusion_clause("type", &filters.exclude_event_types)
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let read_next = |stmt: &mut rusqlite::Statement<'_>, task_id: &str, after_seq: i64| {
-            stmt.query_row(rusqlite::params![task_id, after_seq, head_seq], |row| {
+            let mut params = vec![
+                SqlValue::Text(task_id.to_string()),
+                SqlValue::Integer(after_seq),
+                SqlValue::Integer(head_seq),
+            ];
+            params.extend(exclusion_params(&filters.exclude_event_types));
+            stmt.query_row(rusqlite::params_from_iter(params), |row| {
                 let payload: Option<String> = row.get(3)?;
                 Ok(TaskEvent {
                     seq: row.get(0)?,
@@ -571,27 +655,27 @@ impl Db {
     ///
     /// Returns whether the stored status changed. Crossing into `waiting`
     /// appends the `task.awaiting_input` event exactly once per block.
+    ///
+    /// The published manager signal is `task.runtime_changed` (plus the
+    /// deprecated `task.runtime_settled` alias on the busy→non-busy subset).
+    /// `runtime_event_baseline` is the last runtime state managers were told
+    /// about: entering `busy` publishes immediately, because an agent turn
+    /// starting is unambiguous and shorter turns must not vanish, while every
+    /// non-busy value arms `runtime_event_pending_at` and is published by
+    /// `flush_debounced_activity_events` only once it has held.
     pub fn update_pipeline_item_runtime_status(
         &self,
         task_id: &str,
         runtime_status: &str,
         waiting_prompt: Option<&str>,
     ) -> Result<bool, rusqlite::Error> {
-        if self.conn.is_autocommit() {
-            self.with_immediate_transaction(|db| {
-                db.update_pipeline_item_runtime_status_in_transaction(
-                    task_id,
-                    runtime_status,
-                    waiting_prompt,
-                )
-            })
-        } else {
-            self.update_pipeline_item_runtime_status_in_transaction(
+        self.in_immediate_transaction_if_needed(|db| {
+            db.update_pipeline_item_runtime_status_in_transaction(
                 task_id,
                 runtime_status,
                 waiting_prompt,
             )
-        }
+        })
     }
 
     fn update_pipeline_item_runtime_status_in_transaction(
@@ -600,16 +684,16 @@ impl Db {
         runtime_status: &str,
         waiting_prompt: Option<&str>,
     ) -> Result<bool, rusqlite::Error> {
-        let previous: Option<(Option<String>, Option<String>)> = self
+        let current: Option<(Option<String>, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT runtime_status, runtime_event_pending_at
+                "SELECT runtime_status, runtime_event_baseline
                  FROM pipeline_item WHERE id = ? AND closed_at IS NULL",
                 [task_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some((previous, pending_at)) = previous else {
+        let Some((previous, baseline)) = current else {
             return Ok(false);
         };
         if previous.as_deref() == Some(runtime_status) {
@@ -617,7 +701,9 @@ impl Db {
         }
         if runtime_status == "busy" {
             // Busy is asserted immediately. Only the following non-busy side
-            // needs damping, so it has an unambiguous busy baseline.
+            // needs damping, so it has an unambiguous busy baseline. A pending
+            // non-busy candidate is discarded rather than published: the
+            // session never stopped for long enough to be worth a wake-up.
             self.conn.execute(
                 "UPDATE pipeline_item
                  SET runtime_status = ?, runtime_event_baseline = 'busy',
@@ -625,10 +711,25 @@ impl Db {
                  WHERE id = ?",
                 (runtime_status, task_id),
             )?;
-        } else if previous.as_deref() == Some("busy") || previous.is_none() || pending_at.is_some()
-        {
-            // A non-busy verdict must hold for the fixed window. A change
-            // between candidate non-busy states restarts that same window.
+            if baseline.as_deref() != Some("busy") {
+                self.append_task_event(
+                    task_id,
+                    TaskEventKind::RuntimeChanged,
+                    json!({
+                        "previousRuntimeState": baseline,
+                        "runtimeState": "busy",
+                        // A busy session is by definition still running its
+                        // turn, so this can only be false here.
+                        "latestRunFinishedWithoutCompletion": false,
+                    }),
+                )?;
+            }
+        } else {
+            // A non-busy verdict must hold for the fixed window before it is
+            // published, whatever it replaced. A change between candidate
+            // non-busy states restarts that same window, and the baseline is
+            // preserved so the eventual edge is measured from the value
+            // managers were actually told.
             self.conn.execute(
                 "UPDATE pipeline_item
                  SET runtime_status = ?,
@@ -637,14 +738,6 @@ impl Db {
                      updated_at = datetime('now')
                  WHERE id = ?",
                 (runtime_status, previous.as_deref(), task_id),
-            )?;
-        } else {
-            self.conn.execute(
-                "UPDATE pipeline_item
-                 SET runtime_status = ?, runtime_event_baseline = ?,
-                     runtime_event_pending_at = NULL, updated_at = datetime('now')
-                 WHERE id = ?",
-                (runtime_status, runtime_status, task_id),
             )?;
         }
         if runtime_status == "waiting" {
@@ -671,10 +764,16 @@ impl Db {
     pub fn clear_exited_runtime_status(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item
-             SET runtime_status = NULL, updated_at = datetime('now')
+             SET runtime_status = NULL, runtime_event_pending_at = NULL,
+                 updated_at = datetime('now')
              WHERE id = ? AND runtime_status = 'exited'",
             [task_id],
         )?;
+        // The pending window goes with it: an `exited` verdict that was still
+        // waiting to be published describes a session this write just proved
+        // live, so there is no edge left to announce. The published baseline
+        // is deliberately left alone — if managers were already told `exited`,
+        // the next daemon verdict is what corrects them.
         Ok(rows_affected > 0)
     }
 

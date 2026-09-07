@@ -39,6 +39,7 @@ async fn typed_cli_round_trips_the_server_ks1_aggregate_cursor() {
         repo_id: None,
         repo_remote_url_hash: None,
         exclude_task_ids: &[],
+        exclude_event_types: &[],
         local_only: false,
         include_current_activity: true,
         short_cursor: false,
@@ -1086,7 +1087,7 @@ async fn task_watch_sends_its_exclusions_on_every_poll() {
             &serde_json::json!({
                 "waitOutcome": "events",
                 "cursor": "cursor-2",
-                "events": [{ "seq": 9, "taskId": "child-a", "type": "task.runtime_settled", "payload": {} }],
+                "events": [{ "seq": 9, "taskId": "child-a", "type": "task.runtime_changed", "payload": {} }],
                 "hasMore": false
             })
             .to_string(),

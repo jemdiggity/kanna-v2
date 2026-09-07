@@ -2385,10 +2385,16 @@ mod tests {
                 10,
             )
             .unwrap();
-        assert!(
-            events.is_empty(),
-            "the server debounce must suppress a stopped edge that returned to working"
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["task.runtime_changed"],
+            "the server debounce must suppress both the stopped display edge and the \
+             stopped runtime edge that returned to working, leaving only the busy assertion"
         );
+        assert_eq!(events[0].payload["runtimeState"], "busy");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

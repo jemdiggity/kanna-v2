@@ -314,13 +314,24 @@ appending it where the state already changes, not by diffing snapshots. The
 `task.awaiting_input` event is the daemon's `Waiting` status — a positive match
 on prompt chrome, never inferred from a quiet session, because mislabelling a
 long build as blocked is worse than not reporting it at all.
-`task.activity_changed` is provider-neutral and server-debounced. Every
-activity direction emits after the configured value has held, for every
-provider, without depending on a waiting-prompt placeholder. Its payload
-carries `previousActivity`, `activity`, `runtimeState`, and
-`latestRunFinishedWithoutCompletion`, so managers use the shared server verdict
-instead of polling or inventing their own timing. A transition that flickers
-back within the debounce window emits nothing. `task.awaiting_input` remains
+`task.runtime_changed` is the manager-facing runtime edge — `busy`, `waiting`,
+`idle`, `exited` — carrying `previousRuntimeState`, `runtimeState`, and
+`latestRunFinishedWithoutCompletion`. Entering `busy` publishes immediately
+because an agent turn starting is unambiguous; every non-busy value must hold
+for a fixed 10-second debounce, so flicker emits nothing. It never encodes
+read/unread state, so a person reading a task cannot wake a manager through it;
+`task.runtime_settled` is its deprecated busy→non-busy alias, appended in the
+same transaction. `task.blocked` / `task.unblocked` publish the derived blocked
+state, including when a blocker task resolves underneath a dependent.
+`task.activity_changed` is the human read/unread display dimension, unchanged
+for desktop and mobile: provider-neutral and server-debounced, every activity
+direction emits after the configured value has held, for every provider,
+without depending on a waiting-prompt placeholder, and its payload carries
+`previousActivity`, `activity`, `runtimeState`, and
+`latestRunFinishedWithoutCompletion`. A transition that flickers back within
+the debounce window emits nothing. A manager drops it with
+`exclude_event_types` — a filter over the chosen scope, never part of the
+cursor — rather than waking to discard it. `task.awaiting_input` remains
 the separate positive question-detection signal. See
 `docs/kanna-server-boundary.md` and
 `docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
@@ -419,7 +430,9 @@ verdict on the agent session, with `exited` written by the server when a
 session ends unreplaced) and `readState` (`read` | `unread`). Anything asking
 "is this agent alive?" — supervisors, quiet-task alarms, `kanna_wait_task` —
 reads `runtimeState`; the desktop sidebar and mobile keep reading `activity`,
-whose meaning is unchanged. `WaitUntil::Finished` resolves only on a recorded
+whose meaning is unchanged. The same split holds in the event feed:
+`task.runtime_changed` is the runtime dimension and `task.activity_changed` the
+read/blended one. `WaitUntil::Finished` resolves only on a recorded
 termination (closed, terminal `stage_run`, or `runtimeState: "exited"`), never
 on `unread`. A PTY agent that parks without recording a verdict records none of
 the three — its session survives — so a caller waiting on an agent that may

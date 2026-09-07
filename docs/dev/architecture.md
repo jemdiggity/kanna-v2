@@ -290,26 +290,33 @@ The contracts below are specified in
   rather than by call sites remembering to publish (not every task-state
   write emits an event; pinning, for example, does not).
   `GET /v1/task-events` is a cursor-based long poll over `task_event.seq`;
-  16 event kinds exist today, covering task lifecycle, runs and stage
-  changes, input delivery/blocking, awaiting-input and activity edges, merge
-  signaling, teardown failures, and transfer finalization
-  (`crates/kanna-server/src/db/task_events.rs`). Two of those kinds carry
+  event kinds cover task lifecycle, runs and stage changes, input
+  delivery/blocking, awaiting-input, runtime and activity edges, blocked
+  state, merge signaling, teardown failures, and transfer finalization
+  (`crates/kanna-server/src/db/task_events.rs`). Three of those kinds carry
   the agent-supervision contract and must not be conflated:
   - `task.awaiting_input` is a **positive** signal — the daemon matched
     prompt chrome the agent CLI actually rendered (`Waiting`). It is never
     inferred from a session merely going quiet.
-  - `task.activity_changed` is the provider-neutral **settled** display
-    transition, debounced server-side (`activity_event_debounce_seconds`,
-    default 20 s): every activity direction emits once after the new value
-    has held, for every provider, with no waiting-prompt placeholder
-    required; a flicker inside the window emits nothing. The payload carries
-    `previousActivity`, `activity`, the authoritative `runtimeState`, and
+  - `task.runtime_changed` is the **manager** signal: the daemon's runtime
+    verdict moving between `busy`, `waiting`, `idle`, and `exited`, with
+    `previousRuntimeState`, `runtimeState`, and
     `latestRunFinishedWithoutCompletion` — the parked-awaiting-advance
-    signature — so a manager acts on the shared server verdict instead of
-    running its own polling or debounce loop. It does not prove a question
-    was asked; `task.awaiting_input` remains the question signal. (This
-    server-side debounce is task `6b9fb72a` / PR #1164, which replaced the
-    earlier `task.idle_sustained` design — no such event exists.)
+    signature. Entering `busy` publishes immediately; every non-busy value
+    must hold for a fixed 10 s server debounce, so flicker emits nothing.
+    It never encodes read/unread state. `task.runtime_settled` is its
+    deprecated busy→non-busy alias, appended in the same transaction.
+  - `task.activity_changed` is the provider-neutral **settled display**
+    transition — the human read/unread dimension, debounced server-side
+    (`activity_event_debounce_seconds`, default 20 s): every activity
+    direction emits once after the new value has held, for every provider,
+    with no waiting-prompt placeholder required; a flicker inside the window
+    emits nothing. A person reading a task moves it, so it is a display
+    signal, not a supervision one — managers exclude it with
+    `excludeEventTypes` and watch `task.runtime_changed`. It does not prove a
+    question was asked; `task.awaiting_input` remains the question signal.
+    (This server-side debounce is task `6b9fb72a` / PR #1164, which replaced
+    the earlier `task.idle_sustained` design — no such event exists.)
 
   Cross-machine consumption is
   the **`ks1.` aggregated cursor**: when the caller is account-authorized and

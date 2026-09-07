@@ -896,13 +896,9 @@ impl Db {
         id: &str,
         activity: &str,
     ) -> Result<(), rusqlite::Error> {
-        if self.conn.is_autocommit() {
-            self.with_immediate_transaction(|db| {
-                db.update_pipeline_item_activity_in_transaction(id, activity)
-            })
-        } else {
-            self.update_pipeline_item_activity_in_transaction(id, activity)
-        }
+        self.in_immediate_transaction_if_needed(|db| {
+            db.update_pipeline_item_activity_in_transaction(id, activity)
+        })
     }
 
     fn update_pipeline_item_activity_in_transaction(
@@ -977,13 +973,22 @@ impl Db {
             // runtime dimension. This deliberately shares the server loop and
             // transaction with ActivityChanged, while retaining a fixed
             // 10-second window independent of the legacy display-event knob.
+            //
+            // Only the non-busy side arrives here: entering `busy` is
+            // published the moment the daemon says so, by
+            // `update_pipeline_item_runtime_status`. A row whose held value
+            // equals the published baseline is a flicker that cleared itself
+            // and emits nothing.
             let runtime_modifier = format!("-{MANAGER_ACTIVITY_DEBOUNCE_SECONDS} seconds");
             let mut runtime_stmt = db.conn.prepare(
-                "SELECT id, runtime_event_baseline, runtime_status
-                 FROM pipeline_item
-                 WHERE closed_at IS NULL
-                   AND runtime_event_pending_at IS NOT NULL
-                   AND runtime_event_pending_at <= datetime('now', ?)",
+                "SELECT pi.id, pi.runtime_event_baseline, pi.runtime_status,
+                        (SELECT sr.status FROM stage_run sr WHERE sr.task_id = pi.id
+                         ORDER BY sr.rowid DESC LIMIT 1)
+                 FROM pipeline_item pi
+                 WHERE pi.closed_at IS NULL
+                   AND pi.runtime_status IS NOT NULL
+                   AND pi.runtime_event_pending_at IS NOT NULL
+                   AND pi.runtime_event_pending_at <= datetime('now', ?)",
             )?;
             let runtime_rows = runtime_stmt
                 .query_map([runtime_modifier], |row| {
@@ -991,30 +996,54 @@ impl Db {
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             drop(runtime_stmt);
-            for (id, baseline, runtime_state) in runtime_rows {
+            for (id, baseline, runtime_state, latest_run_status) in runtime_rows {
                 db.conn.execute(
                     "UPDATE pipeline_item
                      SET runtime_event_baseline = ?, runtime_event_pending_at = NULL
                      WHERE id = ?",
                     (&runtime_state, &id),
                 )?;
-                if baseline.as_deref() != Some("busy")
-                    || !matches!(runtime_state.as_deref(), Some("idle" | "waiting" | "exited"))
-                {
+                if baseline == runtime_state {
                     continue;
                 }
+                // The runtime-dimension reading of the same fact
+                // `ActivityChanged` reports: the session stopped or parked
+                // while its latest run never recorded a stage verdict, so a
+                // manager can advance it without inventing a polling loop.
+                let latest_run_finished_without_completion = matches!(
+                    (runtime_state.as_deref(), latest_run_status.as_deref()),
+                    (Some("idle" | "exited"), Some("running"))
+                );
                 db.append_task_event(
                     &id,
-                    TaskEventKind::RuntimeSettled,
+                    TaskEventKind::RuntimeChanged,
                     json!({
                         "previousRuntimeState": baseline,
                         "runtimeState": runtime_state,
+                        "latestRunFinishedWithoutCompletion":
+                            latest_run_finished_without_completion,
                     }),
                 )?;
+                // Deprecated alias for deployed watchers keyed on the
+                // busy-to-non-busy subset. Appended in the same transaction as
+                // the event that supersedes it, so the two can never disagree.
+                if baseline.as_deref() == Some("busy")
+                    && matches!(runtime_state.as_deref(), Some("idle" | "waiting" | "exited"))
+                {
+                    db.append_task_event(
+                        &id,
+                        TaskEventKind::RuntimeSettled,
+                        json!({
+                            "previousRuntimeState": baseline,
+                            "runtimeState": runtime_state,
+                        }),
+                    )?;
+                }
             }
             // Preserve the established return contract: callers and tests use
             // this count for ActivityChanged rows, not all kinds sharing the
@@ -1160,6 +1189,9 @@ impl Db {
                 TaskEventKind::TaskClosed,
                 json!({ "stage": db.pipeline_item_stage(&pipeline_item_id)? }),
             )?;
+            // Closing resolves this task as a blocker, which is how most
+            // dependents become unblocked.
+            db.sync_blocked_events_for_dependents(&pipeline_item_id)?;
             Ok(())
         })
     }
@@ -1191,6 +1223,9 @@ impl Db {
                 rusqlite::Error::QueryReturnedNoRows,
             ));
         }
+        // Reopening un-resolves this task as a blocker; dependents that were
+        // released by the close go back to blocked.
+        self.sync_blocked_events_for_dependents(&pipeline_item_id)?;
         Ok(())
     }
 
@@ -1296,15 +1331,20 @@ impl Db {
         stage: &str,
         trigger: super::StageTrigger,
     ) -> Result<(), rusqlite::Error> {
-        let from_stage = self.pipeline_item_stage(id)?;
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
-            (stage, id),
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        self.append_stage_changed_event(id, from_stage.as_deref(), stage, None, trigger)
+        self.in_immediate_transaction_if_needed(|db| {
+            let from_stage = db.pipeline_item_stage(id)?;
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+                (stage, id),
+            )?;
+            if rows_affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            db.append_stage_changed_event(id, from_stage.as_deref(), stage, None, trigger)?;
+            // Reaching (or leaving) `pr` with a PR recorded flips whether this
+            // task still blocks its dependents.
+            db.sync_blocked_events_for_dependents(id)
+        })
     }
 
     /// One `stage.changed` event per real transition. A rewrite to the stage a
@@ -1342,28 +1382,32 @@ impl Db {
         pr_number: Option<i64>,
         pr_url: &str,
     ) -> Result<(), rusqlite::Error> {
-        let previous_pr_url: Option<Option<String>> = self
-            .conn
-            .query_row(
-                "SELECT pr_url FROM pipeline_item WHERE id = ?",
-                [id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item SET pr_number = ?, pr_url = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
-            (pr_number, pr_url, id),
-        )?;
-        // Re-reporting the same PR URL (a rerun of the pr stage, a replayed
-        // verdict) is not a new pull request.
-        if rows_affected > 0 && previous_pr_url.flatten().as_deref() != Some(pr_url) {
-            self.append_task_event(
-                id,
-                TaskEventKind::PrCreated,
-                json!({ "prNumber": pr_number, "prUrl": pr_url }),
+        self.in_immediate_transaction_if_needed(|db| {
+            let previous_pr_url: Option<Option<String>> = db
+                .conn
+                .query_row(
+                    "SELECT pr_url FROM pipeline_item WHERE id = ?",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item SET pr_number = ?, pr_url = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+                (pr_number, pr_url, id),
             )?;
-        }
-        Ok(())
+            // Re-reporting the same PR URL (a rerun of the pr stage, a replayed
+            // verdict) is not a new pull request.
+            if rows_affected > 0 && previous_pr_url.flatten().as_deref() != Some(pr_url) {
+                db.append_task_event(
+                    id,
+                    TaskEventKind::PrCreated,
+                    json!({ "prNumber": pr_number, "prUrl": pr_url }),
+                )?;
+            }
+            // A task parked at `pr` with a PR recorded counts as resolved, so
+            // this write can release its dependents.
+            db.sync_blocked_events_for_dependents(id)
+        })
     }
 
     /// Keep the task's current agent-CLI session id (the desktop's session
@@ -1458,15 +1502,18 @@ impl Db {
         branch: &str,
         trigger: super::StageTrigger,
     ) -> Result<(), rusqlite::Error> {
-        let from_stage = self.pipeline_item_stage(id)?;
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item SET stage = ?, branch = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
-            (stage, branch, id),
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        self.append_stage_changed_event(id, from_stage.as_deref(), stage, Some(branch), trigger)
+        self.in_immediate_transaction_if_needed(|db| {
+            let from_stage = db.pipeline_item_stage(id)?;
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item SET stage = ?, branch = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+                (stage, branch, id),
+            )?;
+            if rows_affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            db.append_stage_changed_event(id, from_stage.as_deref(), stage, Some(branch), trigger)?;
+            db.sync_blocked_events_for_dependents(id)
+        })
     }
 
     /// Point the task's workspace identity at the branch that actually holds

@@ -32,6 +32,11 @@ export async function writeScriptedClaudeStatusAgentBinary(path: string): Promis
  * shapes. Every submitted line produces a stable busy frame followed by the
  * idle composer with its divider and mode bar, so daemon handoff tests can
  * exercise classification without spending an Anthropic turn.
+ *
+ * Two sentinel inputs reach the remaining daemon runtime verdicts without a
+ * turn: `ask-permission` paints the permission prompt the classifier matches
+ * on (`do you want to allow`) and parks there, and `quit-now` ends the
+ * session so the server records `exited`.
  */
 export function scriptedClaudeStatusAgentSource(): string {
   return `#!/bin/sh
@@ -64,8 +69,25 @@ paint_idle() {
   printf '⏵⏵ bypass permissions on (shift+tab to cycle)\\r\\n'
 }
 
+paint_waiting() {
+  printf '\\033[2J\\033[HClaude Code\\r\\n'
+  printf 'SCRIPT_CLAUDE_WAITING\\r\\n'
+  printf 'Do you want to allow this command?\\r\\n'
+  printf '  1. Yes\\r\\n'
+  printf '  2. No, tell Claude what to do differently\\r\\n'
+}
+
 paint_idle
 while IFS= read -r line; do
+  case "$line" in
+    *ask-permission*)
+      paint_waiting
+      continue
+      ;;
+    *quit-now*)
+      exit 0
+      ;;
+  esac
   paint_busy
   # Long enough for the server watcher to reconnect and observe Busy after a
   # daemon handoff before the composer is repainted.

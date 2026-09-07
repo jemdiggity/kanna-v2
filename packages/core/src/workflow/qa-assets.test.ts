@@ -227,6 +227,8 @@ describe("QA workflow assets", () => {
     );
     expect(agent.prompt).toContain("A wake means “drain the feed,”");
     expect(agent.prompt).toContain("immediately re-arm the command with `--cursor");
+    expect(agent.prompt).toContain("task.runtime_changed");
+    expect(agent.prompt).toContain("`task.blocked` / `task.unblocked`");
     expect(agent.prompt).toContain("task.runtime_settled");
     expect(agent.prompt).toContain("task.awaiting_advance");
     expect(agent.prompt).toContain("Notify Human Blockers");

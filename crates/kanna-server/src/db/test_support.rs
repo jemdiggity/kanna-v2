@@ -139,6 +139,7 @@ impl Db {
                 runtime_status TEXT,
                 runtime_event_baseline TEXT,
                 runtime_event_pending_at TEXT,
+                blocked_event_baseline INTEGER NOT NULL DEFAULT 0,
                 input_blocked TEXT,
                 composer_text TEXT,
                 composer_attestation TEXT

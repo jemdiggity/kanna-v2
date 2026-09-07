@@ -127,6 +127,15 @@ fn run_finished_has_running_successor(event: &Value) -> bool {
 pub(crate) fn is_actionable_task_event(event: &Value) -> bool {
     match event.get("type").and_then(Value::as_str) {
         Some("run.started" | "stage.changed" | "task.created" | "task.input_delivered") => false,
+        // The read/unread display dimension. A person opening a task in the
+        // desktop moves it, which is information for that person and never a
+        // reason to wake the watcher; `task.runtime_changed` carries the
+        // runtime edge underneath it.
+        Some("task.activity_changed") => false,
+        // Deprecated alias of the busy-to-non-busy subset of
+        // `task.runtime_changed`, appended in the same transaction — so it is
+        // always redundant with an event already in this batch.
+        Some("task.runtime_settled") => false,
         Some("run.finished") => !run_finished_has_running_successor(event),
         _ => true,
     }
@@ -193,6 +202,10 @@ pub(crate) async fn watch_task_events<W: Write>(
             repo_id: options.repo_id.as_deref(),
             repo_remote_url_hash: None,
             exclude_task_ids: &options.exclude_task_ids,
+            // The watch owns its own actionable filter, which suppresses the
+            // display dimension client-side while still advancing the cursor
+            // past it — `--all` must still be able to show it.
+            exclude_event_types: &[],
             local_only: false,
             include_current_activity: false,
             short_cursor: true,
@@ -1022,6 +1035,7 @@ pub(crate) async fn run(command: TaskCommands) {
             repo_id,
             repo_remote_url_hash,
             exclude_task_id,
+            exclude_event_type,
             include_self,
             local_only,
             include_current_activity,
@@ -1045,6 +1059,7 @@ pub(crate) async fn run(command: TaskCommands) {
                 repo_id: repo_id.as_deref(),
                 repo_remote_url_hash: repo_remote_url_hash.as_deref(),
                 exclude_task_ids: &exclude_task_ids,
+                exclude_event_types: &exclude_event_type,
                 local_only,
                 include_current_activity,
                 short_cursor,
