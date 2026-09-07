@@ -778,6 +778,7 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         json!([
             "broken",
             "no-review",
+            "plan-build-review",
             "pr-review",
             "qa",
             "release.v2",
@@ -952,6 +953,7 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
         manifest["workflows"],
         json!([
             "no-review",
+            "plan-build-review",
             "pr-review",
             "single-reviewer",
             "specialized-reviewers"

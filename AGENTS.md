@@ -77,7 +77,13 @@ branches** — close never deletes a branch.
 
 Built-in product-work workflows, by review depth: `no-review` (no review stage — the
 fallback when a repo names none), `single-reviewer` (one `review` agent), and
-`specialized-reviewers` (a dispatched specialty panel). `specialty-review` is
+`specialized-reviewers` (a dispatched specialty panel). `plan-build-review` is
+the same shape as `single-reviewer` with a manual `plan` stage in front: a
+read-only `plan` agent records the whole plan as its run summary, the human
+approves it at that manual gate, and the build stage receives it as
+`$PREV_MAIN_RESULT`. Its review stage picks the revision target by the nature
+of the findings — implementation defects go back to `in progress`, a
+structurally wrong approach goes back to `plan`. `specialty-review` is
 not a choice: it is the single-stage workflow the dispatcher gives its child
 tasks, and its definition declares `"visibility": "internal"`, so it resolves
 by name but never reaches the repo manifest, the new-task picker, or the tool

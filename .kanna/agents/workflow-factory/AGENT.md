@@ -67,7 +67,7 @@ When `.kanna/workflows/schema.json` exists in this repo, read it before writing.
 
 ## Built-in Agents
 
-`implement` (implements the task) · `commit` (commits the relevant work) · `review` (QA review that verifies coverage and requests revisions) · `qa-dispatcher` (fans specialty reviews out as child tasks) · `review-ui`, `review-security`, `review-perf`, `review-concurrency`, `review-migration`, `review-compat` (specialty reviewers) · `pr` (creates a pull request) · `approve` (signals the merge master for an approved PR) · `merge` (safely merges branches and PRs) · `task-manager` (orchestrates tasks, dependencies, and merge-master handoffs) · `ship` (inspects and executes the repository's declared release procedure) · `setup`, `agent-factory`, `workflow-factory`, `config-factory` (configuration helpers).
+`plan` (records the implementation plan a build stage follows) · `implement` (implements the task) · `commit` (commits the relevant work) · `review` (QA review that verifies coverage and requests revisions) · `qa-dispatcher` (fans specialty reviews out as child tasks) · `review-ui`, `review-security`, `review-perf`, `review-concurrency`, `review-migration`, `review-compat` (specialty reviewers) · `pr` (creates a pull request) · `approve` (signals the merge master for an approved PR) · `merge` (safely merges branches and PRs) · `task-manager` (orchestrates tasks, dependencies, and merge-master handoffs) · `ship` (inspects and executes the repository's declared release procedure) · `setup`, `agent-factory`, `workflow-factory`, `config-factory` (configuration helpers).
 
 ## Completion
 

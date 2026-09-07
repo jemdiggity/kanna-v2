@@ -1,0 +1,52 @@
+{
+  "$schema": "./schema.json",
+  "name": "plan-build-review",
+  "description": "Plan first: plan (manual gate) -> build (commit as post) -> review -> PR, with per-stage provider selectors",
+  "revision_limit": 5,
+  "stages": [
+    {
+      "name": "plan",
+      "description": "Planning agent studies the task and records the implementation plan as its run result; the human reviews the plan before advancing to build",
+      "agent": "plan",
+      "prompt": "$TASK_PROMPT",
+      "agent_provider": ["claude-fable", "codex-astra"],
+      "policy": { "transition": "manual" }
+    },
+    {
+      "name": "in progress",
+      "description": "Agent implements the approved plan, then commits as the stage's tail work",
+      "agent": "implement",
+      "prompt": "Implement the task following the approved plan below. Original task: $TASK_PROMPT\n\nApproved plan (previous stage result): $PREV_MAIN_RESULT",
+      "agent_provider": ["claude-opus-med", "codex-astra-lo"],
+      "policy": { "transition": "manual", "revision_transition": "auto" },
+      "post": {
+        "name": "commit",
+        "agent": "commit",
+        "prompt": "Commit the relevant work for this task before review. Original task: $TASK_PROMPT. Previous implementation result: $PREV_MAIN_RESULT",
+        "agent_provider": ["claude-haiku", "codex-luna"]
+      }
+    },
+    {
+      "name": "review",
+      "description": "Review agent checks quality and coverage, choosing the revision target by the nature of the findings",
+      "agent": "review",
+      "prompt": "Review branch $BRANCH for task quality and test coverage against base $BASE_REF. Original task: $TASK_PROMPT. Previous implementation result: $PREV_MAIN_RESULT\n\nThis workflow has a separate plan stage before implementation, so choose the revision target stage by the nature of the blocking findings: implementation defects go back to \"in progress\" as usual, while findings that show the approach itself is structurally wrong — the plan cannot produce a correct result however well it is executed — go back to \"plan\", framed as what the revised plan must address.",
+      "agent_provider": ["claude-fable", "codex-astra"],
+      "policy": { "transition": "auto" }
+    },
+    {
+      "name": "pr",
+      "description": "Agent creates a GitHub PR after review passes",
+      "agent": "pr",
+      "prompt": "Create a PR for the reviewed work on branch $BRANCH.",
+      "agent_provider": ["claude-sonnet", "codex"],
+      "policy": { "transition": "manual" },
+      "post": {
+        "name": "approve",
+        "agent": "approve",
+        "prompt": "Approve the PR for branch $BRANCH after PR creation and signal the merge master. Previous result: $PREV_RESULT",
+        "agent_provider": ["claude-haiku", "codex-luna"]
+      }
+    }
+  ]
+}

@@ -1157,6 +1157,10 @@ const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../../.kanna/agents/implement/AGENT.md"),
     ),
     (
+        ".kanna/agents/plan/AGENT.md",
+        include_str!("../../../../.kanna/agents/plan/AGENT.md"),
+    ),
+    (
         ".kanna/agents/merge/AGENT.md",
         include_str!("../../../../.kanna/agents/merge/AGENT.md"),
     ),
@@ -1293,6 +1297,10 @@ const BUILTIN_WORKFLOWS: &[(&str, &str)] = &[
     (
         "no-review",
         include_str!("../../../../.kanna/workflows/no-review.json"),
+    ),
+    (
+        "plan-build-review",
+        include_str!("../../../../.kanna/workflows/plan-build-review.json"),
     ),
     (
         "pr-review",

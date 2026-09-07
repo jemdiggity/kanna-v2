@@ -2112,6 +2112,7 @@ fn legacy_builtin_workflow_names_still_resolve_for_committed_repo_config() {
             names,
             vec![
                 "no-review",
+                "plan-build-review",
                 "pr-review",
                 "single-reviewer",
                 "specialized-reviewers"
@@ -2914,6 +2915,7 @@ fn workflow_names_are_sorted_deduped_remote_and_compiled_union() {
         vec![
             "alpha",
             "no-review",
+            "plan-build-review",
             "pr-review",
             "qa",
             "single-reviewer",
@@ -3306,6 +3308,67 @@ fn workflow_provider_selectors_reject_pairs_their_provider_cannot_take() {
         );
         let _ = std::fs::remove_dir_all(&repo_root);
     }
+}
+
+#[test]
+fn builtin_plan_build_review_workflow_and_plan_agent_resolve_from_compiled_resources() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-plan-build-review");
+    publish_origin_main(&repo_root, "publish empty plan-build-review source");
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let workflow = definitions.workflow("plan-build-review").unwrap();
+    assert_eq!(workflow.name.as_deref(), Some("plan-build-review"));
+    let stage_names = workflow
+        .stages
+        .iter()
+        .map(|stage| stage.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(stage_names, vec!["plan", "in progress", "review", "pr"]);
+
+    let plan_stage = &workflow.stages[0];
+    assert_eq!(plan_stage.agent.as_deref(), Some("plan"));
+    assert_eq!(
+        plan_stage.policy.transition,
+        WorkflowStageTransition::Manual
+    );
+    // The stage pins compact selectors so each fallback candidate carries its
+    // own coherent model.
+    assert_eq!(
+        plan_stage.agent_provider.as_deref(),
+        Some(&["claude-fable".to_string(), "codex-astra".to_string()][..]),
+    );
+
+    let build_stage = &workflow.stages[1];
+    assert_eq!(build_stage.agent.as_deref(), Some("implement"));
+    assert!(
+        build_stage
+            .prompt
+            .as_deref()
+            .unwrap_or_default()
+            .contains("$PREV_MAIN_RESULT"),
+        "the build stage receives the plan stage's recorded result",
+    );
+    assert!(build_stage.post.is_some(), "build commits as a post");
+
+    let review_stage = &workflow.stages[2];
+    assert_eq!(review_stage.agent.as_deref(), Some("review"));
+    assert!(
+        review_stage
+            .prompt
+            .as_deref()
+            .unwrap_or_default()
+            .contains("\"plan\""),
+        "the review stage names the plan stage as a revision target",
+    );
+
+    let agent = definitions.agent("plan").unwrap();
+    assert_eq!(agent.name, "plan");
+    assert_eq!(
+        agent.agent_providers.first().map(String::as_str),
+        Some("claude")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
