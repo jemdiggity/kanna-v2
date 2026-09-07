@@ -49,11 +49,9 @@ export function mobileRelayTerminalGeometryExpectation(
   fixture: PtyTerminalFixture,
 ) {
   return {
-    cols: fixture.expectedCols,
     // Serialized VT size changes when the terminal reflows. Keep this as a
     // bounded-snapshot sanity check; the sentinel proves retained content.
     minEncodedChars: MOBILE_RELAY_PTY_HISTORY_FIXTURE.minEncodedChars,
-    rows: fixture.expectedRows,
     sentinel: fixture.sentinel,
   };
 }
@@ -666,18 +664,41 @@ export async function startMobileRelayHarness(
         // Resize changes the daemon's authoritative terminal state, but it does
         // not emit a snapshot to existing attachments. Attach after the detail
         // mount and inspect that attachment's authoritative initial snapshot.
-        const observer = remote.terminal.collectTerminalEvents(
-          harness,
-          localTask.taskId
-        );
-        try {
-          await observer.waitForSnapshot(
-            mobileRelayTerminalGeometryExpectation(terminalFixture),
-            timeoutMs
+        // The workspace width is adaptive, so carry the observed dimensions
+        // into the later WebView assertion instead of assuming phone geometry.
+        const deadline = Date.now() + timeoutMs;
+        let lastDimensions = "unobserved";
+        while (Date.now() < deadline) {
+          const observer = remote.terminal.collectTerminalEvents(
+            harness,
+            localTask.taskId
           );
-        } finally {
-          observer.close();
+          const remainingMs = Math.max(1, deadline - Date.now());
+          let snapshot: Awaited<ReturnType<TerminalEventCollector["waitForSnapshot"]>>;
+          try {
+            snapshot = await observer.waitForSnapshot(
+              mobileRelayTerminalGeometryExpectation(terminalFixture),
+              remainingMs
+            );
+          } finally {
+            observer.close();
+          }
+          lastDimensions = `${snapshot.cols}x${snapshot.rows}`;
+          if (
+            snapshot.cols >= DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols &&
+            snapshot.rows >= DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows
+          ) {
+            terminalFixture.expectedCols = snapshot.cols;
+            terminalFixture.expectedRows = snapshot.rows;
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
+        throw new Error(
+          `Mobile terminal geometry ${lastDimensions} did not reach the ` +
+            `supported minimum ${DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols}x` +
+            `${DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows} within ${timeoutMs}ms`
+        );
       }
     };
   } catch (error) {

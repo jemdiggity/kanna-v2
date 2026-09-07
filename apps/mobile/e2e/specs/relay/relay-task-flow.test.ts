@@ -8,6 +8,7 @@ import {
   openRelayFixtureTask,
   performFirstQuickReplyDrag,
   relaunchRelayAppPreservingData,
+  relayTaskDetailDisplayId,
   verifyRelayCustomizedQuickReplyJourney,
   verifyRelayComposerResetJourney,
   verifyRelayQuickReplyPersistenceJourney,
@@ -22,6 +23,13 @@ import {
 import * as relayTaskFlow from "./relay-task-flow.e2e";
 
 describe("relay task flow orchestration", () => {
+  it("matches tablet detail identity against the owner-local cloud task id", () => {
+    expect(relayTaskDetailDisplayId(
+      "cloud:desktop-1:repo-1:owner-task-1",
+    )).toBe("owner-task-1");
+    expect(relayTaskDetailDisplayId("local-task-1")).toBe("local-task-1");
+  });
+
   it("marks the task read from the list before revisiting its terminal and continuing on detail", async () => {
     const calls: string[] = [];
     let screen: "detail" | "list" = "list";
@@ -583,6 +591,38 @@ describe("relay task action menu journey", () => {
       "Cancel.click",
       "more.waitForDisplayed",
     ]);
+  });
+
+  it("dismisses an iPad action sheet without requiring its hidden Cancel row", async () => {
+    const labels: string[] = [];
+    const dismissWithoutCancel = vi.fn(async () => undefined);
+    const displayedElement = () => ({
+      waitForDisplayed: vi.fn(async () => undefined),
+    });
+    const more = {
+      ...displayedElement(),
+      click: vi.fn(async () => undefined),
+    };
+    const ui = {
+      getTaskActionMenuTitle: vi.fn(async () => displayedElement()),
+      getTaskActionOption: vi.fn(async (label: string) => {
+        labels.push(label);
+        return displayedElement();
+      }),
+      getTaskMoreButton: vi.fn(async () => more),
+    };
+
+    await verifyRelayTaskActionMenuJourney(ui as never, {
+      dismissWithoutCancel,
+    });
+
+    expect(labels).toEqual([
+      "Mentioned Files (0)",
+      "View Diff",
+      "Advance Stage",
+      "Close Task",
+    ]);
+    expect(dismissWithoutCancel).toHaveBeenCalledOnce();
   });
 });
 

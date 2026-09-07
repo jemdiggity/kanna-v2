@@ -11,7 +11,6 @@ import {
   waitForTaskTerminalLive,
   type PtyTerminalFixture
 } from "../smoke/list-detail-back.e2e";
-import { openProfileSheet } from "../smoke/profile-connection.e2e";
 import type { TaskActivity } from "../../../src/lib/api/types";
 import type {
   MobileRelayCompanionFixture,
@@ -261,7 +260,7 @@ function createRelayQuickReplyPersistenceJourney(
   bundleId: string,
 ): RelayQuickReplyPersistenceJourney {
   const openEditor = async () => {
-    await openProfileSheet(ui);
+    await openRelayProfileSheet(ui);
     const quickRepliesButton = await driver.$(
       selectors.accountQuickRepliesButton,
     );
@@ -529,6 +528,9 @@ export async function verifyRelayTaskActionMenuJourney(
     | "getTaskActionOption"
     | "getTaskMoreButton"
   >,
+  options: {
+    dismissWithoutCancel?: () => Promise<void>;
+  } = {},
 ): Promise<void> {
   const taskMore = await ui.getTaskMoreButton();
   await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
@@ -536,13 +538,17 @@ export async function verifyRelayTaskActionMenuJourney(
 
   const menuTitle = await ui.getTaskActionMenuTitle();
   await menuTitle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  for (const label of TASK_ACTION_LABELS) {
+  const visibleLabels = options.dismissWithoutCancel
+    ? TASK_ACTION_LABELS.filter((label) => label !== "Cancel")
+    : TASK_ACTION_LABELS;
+  for (const label of visibleLabels) {
     const option = await ui.getTaskActionOption(label);
     await option.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     if (label === "Cancel") {
       await option.click();
     }
   }
+  await options.dismissWithoutCancel?.();
 
   await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 }
@@ -1422,7 +1428,9 @@ async function verifyTabletWorkspaceSelection(
   const shell = await driver.$(selectors.tabletWorkspaceShell);
   if (!(await shell.isExisting().catch(() => false))) return false;
 
-  await shell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  // React Native exposes this flex-only container in the native tree without
+  // assigning it an independently displayed accessibility frame on iPad.
+  // Its substantive children carry frames, so assert those instead.
   await (await driver.$(selectors.tabletWorkspaceSidebar)).waitForDisplayed({
     timeout: SCREEN_TIMEOUT_MS,
   });
@@ -1445,7 +1453,9 @@ async function verifyTabletWorkspaceSelection(
     const detailTaskId = await driver.$(selectors.taskDetailTaskId);
     await detailTaskId.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await ui.waitUntil(
-      async () => (await detailTaskId.getText()).includes(taskId.slice(0, 8)),
+      async () => (await detailTaskId.getText()).includes(
+        relayTaskDetailDisplayId(taskId),
+      ),
       {
         interval: POLL_INTERVAL_MS,
         timeout: SCREEN_TIMEOUT_MS,
@@ -1455,6 +1465,14 @@ async function verifyTabletWorkspaceSelection(
   }
 
   return true;
+}
+
+export function relayTaskDetailDisplayId(taskId: string): string {
+  if (!taskId.startsWith("cloud:")) return taskId;
+  const ownerLocalTaskSeparator = taskId.lastIndexOf(":");
+  return ownerLocalTaskSeparator >= 0
+    ? taskId.slice(ownerLocalTaskSeparator + 1)
+    : taskId;
 }
 
 async function returnToTaskListShell(ui: RelayUi): Promise<void> {
@@ -1563,7 +1581,7 @@ async function signInToRelay(
   ui: RelayUi,
   credentials: RelayCredentials
 ): Promise<void> {
-  await openProfileSheet(ui);
+  await openRelayProfileSheet(ui);
 
   const signOutButton = await ui.getAccountSignOutButton();
   if (await signOutButton.isExisting().catch(() => false)) {
@@ -1593,6 +1611,16 @@ async function signInToRelay(
   await closeAccountSheet(driver, ui);
 }
 
+async function openRelayProfileSheet(
+  ui: Pick<RelayUi, "getAccountButton" | "getAccountCloseButton">,
+): Promise<void> {
+  const accountButton = await ui.getAccountButton();
+  await accountButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await accountButton.click();
+  const closeButton = await ui.getAccountCloseButton();
+  await closeButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+}
+
 export async function runRelayTaskFlow(
   driver: Browser,
   options: RelayTaskFlowOptions
@@ -1613,6 +1641,31 @@ export async function runRelayTaskFlow(
     options.fixture.taskId,
     options.taskOrdering,
   );
+  const closeTaskForJourney = async () => {
+    if (!isTabletWorkspace) {
+      await returnToTaskListShell(ui);
+      return;
+    }
+
+    const alternateTaskId = options.taskOrdering.expectedVisualOrderTaskIds.find(
+      (taskId) => taskId !== options.fixture.taskId,
+    );
+    if (!alternateTaskId) {
+      throw new Error("Expected a second relay task for tablet task switching");
+    }
+    await openRelayFixtureTask(ui, alternateTaskId);
+    const detailTaskId = await driver.$(selectors.taskDetailTaskId);
+    await ui.waitUntil(
+      async () => (await detailTaskId.getText()).includes(
+        relayTaskDetailDisplayId(alternateTaskId),
+      ),
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: `Expected tablet workspace to switch away to ${alternateTaskId}`,
+      },
+    );
+  };
   await verifyTasksTabNewestFirst(ui, options.taskOrdering, !isTabletWorkspace);
   const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
   await exactTaskRow.scrollIntoView({ direction: "down", maxScrolls: 5 });
@@ -1652,15 +1705,19 @@ export async function runRelayTaskFlow(
       prepareUnread: options.prepareTaskUnreadForMarkRead,
       async openTask() {
         await openRelayFixtureTask(ui, options.fixture.taskId);
-        const backButton = await ui.getBackButton();
-        await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+        const detailTaskId = await driver.$(selectors.taskDetailTaskId);
+        await detailTaskId.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+        if (!isTabletWorkspace) {
+          const backButton = await ui.getBackButton();
+          await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+        }
       },
       waitForOwnerIdle: () => options.waitForLocalTaskActivity("idle"),
       async waitForSelectedDetailIdle() {
         await waitForSelectedTaskDetailActivity(ui, "idle");
         await options.waitForMobileTerminalGeometry();
       },
-      closeTask: () => returnToTaskListShell(ui),
+      closeTask: closeTaskForJourney,
     }),
     verifyPtySnapshotRevisit: () => verifyRelayPtySnapshotRevisit({
       openTask: () => openRelayFixtureTask(ui, options.fixture.taskId),
@@ -1668,9 +1725,22 @@ export async function runRelayTaskFlow(
         await waitForTaskTerminalLive(ui);
         await waitForRenderedPtyTerminal(ui, options.fixture);
       },
-      closeTask: () => returnToTaskListShell(ui),
+      closeTask: closeTaskForJourney,
     }),
-    verifyTaskActionMenu: () => verifyRelayTaskActionMenuJourney(ui),
+    verifyTaskActionMenu: () => verifyRelayTaskActionMenuJourney(
+      ui,
+      isTabletWorkspace
+        ? {
+            async dismissWithoutCancel() {
+              // iPad presents this as a popover with no Cancel row. Appium's
+              // dismissAlert chooses the destructive action in that shape;
+              // tapping outside the popover is the native cancellation path.
+              const sidebar = await driver.$(selectors.tabletWorkspaceSidebar);
+              await sidebar.click();
+            },
+          }
+        : {},
+    ),
     verifyVisualCompanion: () =>
       verifyRelayVisualCompanionJourney(
         createVisualCompanionUi(driver),
