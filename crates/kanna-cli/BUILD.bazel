@@ -18,6 +18,7 @@ rust_binary(
     crate_name = "kanna_cli",
     edition = "2021",
     deps = all_crate_deps(normal = True) + [
+        "//crates/runtime-defaults:kanna_runtime_defaults",
         "//crates/kanna-tool-catalog:kanna_tool_catalog_for_cli",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -30,6 +31,7 @@ rust_binary(
     crate_name = "kanna_cli",
     edition = "2021",
     deps = all_crate_deps(normal = True) + [
+        "//crates/runtime-defaults:kanna_runtime_defaults",
         "//crates/kanna-tool-catalog:kanna_tool_catalog_for_cli",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
