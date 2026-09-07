@@ -258,26 +258,59 @@ pub fn parse_provider_selector(value: &str) -> Result<ProviderSelector, String> 
     } else {
         Some(model_segments.join("-"))
     };
-    if model.is_some() && provider.model_override_flag().is_none() {
-        return Err(format!(
-            "invalid agent provider selector '{value}': \
-             model overrides are not supported for agent provider '{provider}'"
-        ));
-    }
-    if let (Some(effort), Some(values)) = (effort, provider.effort_values()) {
-        if !values.contains(&effort) {
-            return Err(format!(
-                "invalid agent provider selector '{value}': effort '{effort}' is not supported \
-                 for agent provider '{provider}' (supported: {})",
-                values.join(", ")
-            ));
-        }
-    }
+    // The provider-coherence rules are the same ones every other layer's
+    // model/effort is checked against; a selector only prefixes them with the
+    // token that failed.
+    validate_provider_model(provider, model.as_deref())
+        .map_err(|detail| format!("invalid agent provider selector '{value}': {detail}"))?;
+    validate_provider_effort(provider, effort)
+        .map_err(|detail| format!("invalid agent provider selector '{value}': {detail}"))?;
     Ok(ProviderSelector {
         provider,
         model,
         effort: effort.map(str::to_string),
     })
+}
+
+/// Whether `provider` accepts a model override at all.
+///
+/// This is the single statement of the rule, shared by compact selectors and
+/// by every other layer that may name a model (an explicit override, a repo
+/// `agentProviders` entry, agent frontmatter). A model id itself is never
+/// validated — Kanna keeps no model allowlist and passes the value to the CLI
+/// verbatim — but a provider with no model flag would silently drop it.
+pub fn validate_provider_model(provider: AgentProvider, model: Option<&str>) -> Result<(), String> {
+    if model.is_some() && provider.model_override_flag().is_none() {
+        return Err(format!(
+            "model overrides are not supported for agent provider '{provider}'"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `effort` is in `provider`'s published reasoning-effort vocabulary.
+///
+/// Providers that publish no vocabulary accept anything here and let their own
+/// CLI reject it. Like [`validate_provider_model`], this is the single
+/// statement of the rule for every layer that may name an effort.
+pub fn validate_provider_effort(
+    provider: AgentProvider,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    let Some(values) = provider.effort_values() else {
+        return Ok(());
+    };
+    if values.contains(&effort) {
+        Ok(())
+    } else {
+        Err(format!(
+            "effort '{effort}' is not supported for agent provider '{provider}' (supported: {})",
+            values.join(", ")
+        ))
+    }
 }
 
 pub fn agent_provider_specs() -> Vec<AgentProviderSpec> {

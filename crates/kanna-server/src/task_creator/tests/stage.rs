@@ -186,6 +186,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         super::super::SpawnAgentOverrides::default(),
         Some("claude"),
         crate::db::StageTrigger::Unspecified,
+        None,
     )
     .unwrap();
     assert_eq!(run.env.get("V1_ENV").map(String::as_str), Some("yes"));
@@ -482,6 +483,7 @@ async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
         effort: None,
         completion_transition: WorkflowStageTransition::Manual,
         trigger: crate::db::StageTrigger::Unspecified,
+        provider_override: None,
         feedback: None,
         provider_session_id: None,
         resumed_from_run_id: None,
@@ -2955,11 +2957,14 @@ fn post_completion_preserves_declared_advance_trigger() {
     let db = Db::open_for_tests(&config.db_path).unwrap();
     seed_post_workflow_task(&config, &db, &repo_root);
 
-    let post = match super::super::prepare_advance_stage_for_api_with_trigger(
+    let post = match super::super::prepare_advance_stage_for_api_with_intent(
         &db,
         &config,
         "task-1",
-        crate::db::StageTrigger::Manager,
+        super::super::StageAdvanceIntent {
+            trigger: crate::db::StageTrigger::Manager,
+            provider_override: None,
+        },
     )
     .unwrap()
     {
@@ -2982,6 +2987,126 @@ fn post_completion_preserves_declared_advance_trigger() {
             assert_eq!(run.trigger, crate::db::StageTrigger::Manager)
         }
         _ => panic!("expected post completion to spawn next stage"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// Past the final stage an advance closes the task, so there is no stage for a
+/// provider override to decide. Refuse it rather than accept a value that
+/// would silently decide nothing.
+#[test]
+fn an_advance_that_closes_the_task_refuses_a_next_stage_provider_override() {
+    let repo_root = init_git_repo_with_workflow(
+        "final-stage-refuses-provider-override",
+        "default",
+        "in progress",
+        "manual",
+        "claude",
+    );
+    let config = test_config("final-stage-refuses-provider-override");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Ship it",
+        Some("Ship it"),
+        "pr",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
+        .unwrap();
+
+    let refused = super::super::prepare_advance_stage_for_api_with_intent(
+        &db,
+        &config,
+        "task-1",
+        super::super::StageAdvanceIntent {
+            trigger: crate::db::StageTrigger::Operator,
+            provider_override: Some(crate::db::StageProviderOverride {
+                source: "operator".to_string(),
+                provider: "codex".to_string(),
+                model: None,
+                effort: None,
+            }),
+        },
+    );
+    let error = match refused {
+        Err(error) => error,
+        Ok(_) => panic!("an override on a closing advance should be refused"),
+    };
+    assert!(
+        error.starts_with("cannot apply a provider override"),
+        "unexpected error: {error}"
+    );
+    assert!(error.contains("closes the task"), "unexpected: {error}");
+
+    // Without the override the same advance still closes the task.
+    match super::super::prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Close { .. } => {}
+        _ => panic!("expected the final stage to close the task"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// An advance that dispatches the stage's post does not perform the
+/// transition — the post's own completion does. Carrying a next-stage provider
+/// override into that dispatch would silently drop it at the boundary, so the
+/// request is refused with the reason instead.
+#[test]
+fn an_advance_that_dispatches_a_post_refuses_a_next_stage_provider_override() {
+    let repo_root = init_git_repo("post-dispatch-refuses-provider-override");
+    write_post_workflow_fixtures(&repo_root);
+    let config = test_config("post-dispatch-refuses-provider-override");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_workflow_task(&config, &db, &repo_root);
+
+    let error = super::super::prepare_advance_stage_for_api_with_intent(
+        &db,
+        &config,
+        "task-1",
+        super::super::StageAdvanceIntent {
+            trigger: crate::db::StageTrigger::Operator,
+            provider_override: Some(crate::db::StageProviderOverride {
+                source: "operator".to_string(),
+                provider: "codex".to_string(),
+                model: None,
+                effort: None,
+            }),
+        },
+    );
+    let error = match error {
+        Err(error) => error,
+        Ok(_) => panic!("an override on a post-dispatching advance should be refused"),
+    };
+    assert!(
+        error.starts_with("cannot apply a provider override"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("codex"),
+        "the refusal should name what was asked for: {error}"
+    );
+
+    // The same advance without an override still dispatches the post, so the
+    // refusal is about the override alone.
+    match super::super::prepare_advance_stage_for_api_with_intent(
+        &db,
+        &config,
+        "task-1",
+        super::super::StageAdvanceIntent {
+            trigger: crate::db::StageTrigger::Operator,
+            provider_override: None,
+        },
+    )
+    .unwrap()
+    {
+        PreparedStageTransition::Post(_) => {}
+        _ => panic!("expected post dispatch"),
     }
 
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -3373,6 +3498,7 @@ fn current_stage_spawn_fixture(
         effort: None,
         completion_transition: WorkflowStageTransition::Manual,
         trigger: crate::db::StageTrigger::Operator,
+        provider_override: None,
         feedback: None,
         provider_session_id: None,
         resumed_from_run_id: None,

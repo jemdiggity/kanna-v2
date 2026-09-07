@@ -308,6 +308,12 @@ pub struct TaskLatestRun {
     /// How this run's stage was entered. Legacy rows are `unspecified`.
     #[serde(default = "default_stage_trigger")]
     pub trigger: String,
+    /// The provider override this run was started with, and who declared it.
+    /// Absent when the run resolved its provider through the ordinary
+    /// precedence chain — so a present value is the durable answer to who
+    /// picked this stage's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_override: Option<crate::db::StageProviderOverride>,
     #[serde(default)]
     pub agent: Option<String>,
     pub status: String,
@@ -1284,6 +1290,7 @@ fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
         stage: run.stage,
         kind: run.kind,
         trigger: run.trigger,
+        provider_override: run.provider_override,
         agent: run.agent,
         status: run.status,
         summary,

@@ -563,6 +563,32 @@ in `docs/task-specs/c9f5721b.md` and enforced by the router authorization tests.
   Engine policy transitions use `auto`. The trigger is stored on the spawned
   main `stage_run`, carried through any pending post run, emitted on
   `stage.changed`, and returned as `latestRun.trigger`.
+  It also accepts an optional provider override for the stage the advance
+  *enters* — `nextStageAgentProvider`, with `nextStageModel` and
+  `nextStageEffort` — which fills the explicit-override slot of the provider
+  precedence chain and so outranks that stage's own `agent_provider`
+  selectors, the repo's `agentProviders`, agent frontmatter, and the default.
+  It is a per-advance override: it changes no workflow definition, no pin, and
+  no default, and the stage after it resolves normally. Model and effort belong
+  to the provider named beside them and are refused without one, because a
+  model id written for one provider must never attach to another
+  ([Coding conventions](../AGENTS.md)). An incoherent pair — a model for a
+  provider with no model flag, an effort outside the provider's published
+  vocabulary — is a `400` at request time, checked against the same rules
+  compact provider selectors are parsed with, rather than a stage that fails at
+  spawn and parks the task. An override is also refused (`400`) when the
+  advance dispatches the current stage's post, because the transition then
+  happens on that post's completion and the override would be dropped at that
+  boundary, and when the advance closes the task past its final stage, where
+  there is no stage left to spawn. `nextStageProviderSource` (`operator` | `manager` | `agent`)
+  declares *who picked the model*, which is deliberately separate from
+  `source`: a human accepting a plan agent's builder-tier recommendation
+  advances as `operator` with the override sourced to `agent`. The whole
+  override is stored on the spawned `stage_run` and returned as
+  `latestRun.providerOverride` (`{source, provider, model?, effort?}`), so the
+  durable record answers who chose the successor's model. A run that reproduces
+  a recorded run — a rerun, resume, or revision resume — carries that record
+  forward with the stamp it reproduces.
 - `POST /v1/tasks/{task_id}/actions/signal-merge-handoff`
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
@@ -2177,7 +2203,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 
 - `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input`. Input is accepted only for an active daemon PTY session, fenced to the PTY process ID observed before acceptance while the server holds the task lifecycle lease. The daemon may retain it behind an active human draft, but never for a later run or stage. A successful acknowledgement prints `{ "ok": true }`; an absent or concurrently replaced session returns HTTP 409 with `reason: "no_live_agent_session"`, the latest run status/finish time when available, and explicit `kanna_resume_task` / `kanna_rerun_stage` recovery guidance. If the acknowledgement is lost after acceptance, the server reports uncertain delivery so callers do not retry blindly.
 - `kanna-cli task send-raw-input --task-id <TASK_ID> (--keys <NAMES> | --bytes <HEX>) [--encoding hex|base64] [--source operator|manager] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/raw-input`, the discrete-keystroke counterpart to `send-input`: no Enter is appended, nothing is queued behind a draft, and no `task_input` row is written. `--keys down,enter` dismisses or answers a menu; `--keys escape` closes a dialog; `--bytes 1b5b42` writes an arbitrary sequence with nothing added. Byte payloads are decoded server-side, so no shell is ever asked to produce an escape character, and a carriage return in `--bytes` is refused with a pointer at `--keys enter`, which declares the submission boundary. `--list-keys` prints the accepted vocabulary offline. The response's `writes` array reports each key as `written`, `uncertain`, or `not_written`; a non-zero exit with `delivery_uncertain` means some keys may already be at the terminal and the call must not be resent. See [Raw terminal keys](#raw-terminal-keys).
-- `kanna-cli task advance-stage --task-id <TASK_ID> [--source operator|manager] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON. Omitted source is recorded as `unspecified`; automatic policy transitions are `auto`.
+- `kanna-cli task advance-stage --task-id <TASK_ID> [--source operator|manager] [--next-stage-agent-provider <PROVIDER>] [--next-stage-model <MODEL>] [--next-stage-effort <EFFORT>] [--next-stage-provider-source operator|manager|agent] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON. Omitted source is recorded as `unspecified`; automatic policy transitions are `auto`. The next-stage provider flags are the per-advance override described above.
 - `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` sends an ordinary request to the repository's merge agent.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It accepts a latest `cancelled` or `failed` run whose daemon session is dead. It also accepts a latest `running` run only after a daemon `List` proves the run's recorded session is absent; the desktop uses that form when an attach after restart discovers a session lost with the old daemon. It resumes the provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; unsupported or missing provider context starts fresh and records `resumeFallbackReason`, while task-state precondition failures return an explanatory conflict. A present session returns a conflict for a running run and restores a false interruption for a previously interrupted run, so the route never creates a duplicate provider process. An empty route-level 404 identifies an older server that does not provide the action. Callers may use `rerun-stage` when recovery is unavailable or a deliberately fresh conversation is acceptable.
 - `kanna-cli task rerun-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/rerun-stage`. This is always an explicit fresh provider conversation, not recovery.

@@ -1,5 +1,6 @@
 use super::{Db, NewStageRun, StageRun, TaskEventKind};
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// Identity of a run closed by `finish_latest_running_stage_run`.
@@ -36,6 +37,95 @@ impl StageTrigger {
             other => Err(format!(
                 "unknown stage advance source: {other}; use \"operator\" or \"manager\", or omit it"
             )),
+        }
+    }
+}
+
+/// Who declared a per-advance provider override. Like [`StageTrigger`], every
+/// value here is a caller declaration the server records without
+/// authenticating it; unlike a trigger there is no server-owned value, because
+/// an override only ever exists because somebody asked for one.
+///
+/// `Agent` is the value that makes this worth recording separately from the
+/// trigger: a plan agent recommends a builder tier and a human accepts it by
+/// advancing the stage, so the advance is `operator` while the model was
+/// picked by the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderOverrideSource {
+    Operator,
+    Manager,
+    Agent,
+    Unspecified,
+}
+
+impl ProviderOverrideSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Manager => "manager",
+            Self::Agent => "agent",
+            Self::Unspecified => "unspecified",
+        }
+    }
+
+    pub fn from_caller_declared(value: &str) -> Result<Self, String> {
+        match value {
+            "operator" => Ok(Self::Operator),
+            "manager" => Ok(Self::Manager),
+            "agent" => Ok(Self::Agent),
+            other => Err(format!(
+                "unknown provider override source: {other}; use \"operator\", \"manager\" or \"agent\", or omit it"
+            )),
+        }
+    }
+}
+
+/// A provider/model/effort override carried by one explicit stage advance and
+/// applied to the stage that advance enters.
+///
+/// This is the durable record of *who chose the successor stage's model*, kept
+/// beside the run's own resolved `agent_provider`/`model`/`effort` because
+/// those alone cannot say whether a value was asked for or merely resolved: an
+/// override that names only a provider still lets that provider's own lower
+/// layers supply the model.
+///
+/// Model and effort belong to the provider named here and travel with it as
+/// one layer — the AGENTS.md rule that a pair is never composed across layers
+/// is why `model` and `effort` are meaningless without `provider`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StageProviderOverride {
+    /// `operator` | `manager` | `agent` | `unspecified`.
+    pub source: String,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl StageProviderOverride {
+    fn to_column(&self) -> Option<String> {
+        match serde_json::to_string(self) {
+            Ok(encoded) => Some(encoded),
+            Err(error) => {
+                // Never fail a spawn over its provenance record; a run with an
+                // unreadable override reads as one with none, which is what
+                // every pre-upgrade row already does.
+                log::warn!("failed to encode a stage provider override: {error}");
+                None
+            }
+        }
+    }
+
+    fn from_column(stored: Option<String>) -> Option<Self> {
+        let stored = stored?;
+        match serde_json::from_str(&stored) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => {
+                log::warn!("failed to parse a stored stage provider override: {error}");
+                None
+            }
         }
     }
 }
@@ -96,12 +186,32 @@ impl Db {
         completion_bound: bool,
         trigger: Option<StageTrigger>,
     ) -> Result<(), rusqlite::Error> {
+        self.insert_stage_run_with_provenance(
+            run,
+            completion_transition,
+            completion_bound,
+            trigger,
+            None,
+        )
+    }
+
+    /// Insert a run together with the full provenance of how it was started:
+    /// its trigger, and the per-advance provider override that picked its
+    /// model, if any.
+    pub fn insert_stage_run_with_provenance(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        completion_bound: bool,
+        trigger: Option<StageTrigger>,
+        provider_override: Option<&StageProviderOverride>,
+    ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
               session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
-              completion_bound, trigger)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              completion_bound, trigger, provider_override)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.id,
                 run.task_id,
@@ -121,6 +231,7 @@ impl Db {
                 completion_transition,
                 completion_bound,
                 trigger.map(StageTrigger::as_str),
+                provider_override.and_then(StageProviderOverride::to_column),
             ],
         )?;
         // A pending run has not started anything yet; the watcher wants the
@@ -157,7 +268,7 @@ impl Db {
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
                     resume_fallback_reason, completion_transition,
-                    COALESCE(trigger, 'unspecified'), started_at, finished_at
+                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
              ORDER BY rowid ASC",
@@ -174,7 +285,7 @@ impl Db {
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
                     resume_fallback_reason, completion_transition,
-                    COALESCE(trigger, 'unspecified'), started_at, finished_at
+                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
              FROM stage_run WHERE task_id = ? AND status = 'running' ORDER BY rowid ASC",
         )?;
         let rows = stmt.query_map([task_id], stage_run_from_row)?;
@@ -209,7 +320,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY rowid DESC
@@ -240,7 +351,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = ?
                  ORDER BY rowid DESC
@@ -262,7 +373,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
                  FROM stage_run WHERE id = ?",
                 [run_id],
                 stage_run_from_row,
@@ -285,7 +396,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
@@ -681,7 +792,8 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         resume_fallback_reason: row.get(15)?,
         completion_transition: row.get(16)?,
         trigger: row.get(17)?,
-        started_at: row.get(18)?,
-        finished_at: row.get(19)?,
+        provider_override: StageProviderOverride::from_column(row.get(18)?),
+        started_at: row.get(19)?,
+        finished_at: row.get(20)?,
     })
 }

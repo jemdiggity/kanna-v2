@@ -13,7 +13,7 @@ use crate::api::{
     search_tasks_with_options_via_api, send_task_input_via_api, send_task_raw_input_via_api,
     set_task_parent_via_api, set_task_workflow_via_api, signal_merge_handoff_via_api,
     task_inputs_via_api, task_logs_with_agent_view_via_api, unblock_task_via_api,
-    wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
+    wait_task_events_via_api, wait_task_via_api, NextStageProviderOverride, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
@@ -808,15 +808,26 @@ pub(crate) async fn run(command: TaskCommands) {
         TaskCommands::AdvanceStage {
             task_id,
             source,
+            next_stage_agent_provider,
+            next_stage_model,
+            next_stage_effort,
+            next_stage_provider_source,
             server_url,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let advanced = advance_stage_via_api(&base_url, &task_id, source.as_deref())
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Error: {e}");
-                    process::exit(1);
-                });
+            let next_stage = NextStageProviderOverride {
+                provider: next_stage_agent_provider.as_deref(),
+                model: next_stage_model.as_deref(),
+                effort: next_stage_effort.as_deref(),
+                source: next_stage_provider_source.as_deref(),
+            };
+            let advanced =
+                advance_stage_via_api(&base_url, &task_id, source.as_deref(), next_stage)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
             if let Err(e) = print_json(&advanced) {
                 eprintln!("Error: {e}");
                 process::exit(1);

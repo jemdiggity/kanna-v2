@@ -499,6 +499,29 @@ pub(crate) enum TaskCommands {
         #[arg(long, value_parser = ["operator", "manager"])]
         source: Option<String>,
 
+        /// Provider the stage this advance enters must spawn with; outranks
+        /// that stage's own selectors, the repo config, and the default
+        #[arg(long)]
+        next_stage_agent_provider: Option<String>,
+
+        /// Model for --next-stage-agent-provider, passed to that CLI verbatim
+        #[arg(long, requires = "next_stage_agent_provider")]
+        next_stage_model: Option<String>,
+
+        /// Reasoning effort for --next-stage-agent-provider, in that
+        /// provider's own vocabulary
+        #[arg(long, requires = "next_stage_agent_provider")]
+        next_stage_effort: Option<String>,
+
+        /// Who chose the next-stage provider: "operator", "manager", or
+        /// "agent" (an agent's own recommendation)
+        #[arg(
+            long,
+            value_parser = ["operator", "manager", "agent"],
+            requires = "next_stage_agent_provider"
+        )]
+        next_stage_provider_source: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,

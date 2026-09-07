@@ -184,6 +184,9 @@ pub(crate) struct PreparedStageRerun {
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,
+    /// Carried forward from the run this rerun reproduces, so the durable
+    /// record keeps naming whoever picked the model it respawns with.
+    pub(super) provider_override: Option<crate::db::StageProviderOverride>,
     pub(super) completion_transition: WorkflowStageTransition,
     pub(super) provider_session_id: Option<String>,
     pub(super) cwd: String,
@@ -267,6 +270,10 @@ pub(crate) struct PreparedStageRunSpawn {
     /// How this run's stage was entered. This is caller-declared for explicit
     /// advances and server-owned for automatic policy transitions.
     pub(super) trigger: crate::db::StageTrigger,
+    /// The provider override the advance that started this run carried, with
+    /// the source that declared it. Recorded on the run so the durable record
+    /// says who picked this stage's model.
+    pub(super) provider_override: Option<crate::db::StageProviderOverride>,
     pub(super) feedback: Option<String>,
     /// The agent CLI's own session id this run starts (fresh assign) or
     /// continues (resume); recorded on the stage run.

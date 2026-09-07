@@ -35,6 +35,7 @@ use environment::{
 };
 use local_config::LocalConfigOverride;
 use prompt::{build_stage_prompt, PromptContext};
+pub(crate) use provider::parse_stage_provider_override;
 use provider::{
     normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
     resolve_agent_type, validate_effort_shape, validate_model_shape, validate_provider_effort,
@@ -79,10 +80,11 @@ pub(crate) use prompt::RevisionRound;
 #[cfg(test)]
 pub(crate) use stages::{prepare_advance_stage_for_api, prepare_stage_completion_for_api};
 pub(crate) use stages::{
-    prepare_advance_stage_for_api_with_trigger, prepare_fresh_restart_after_rejected_resume,
+    prepare_advance_stage_for_api_with_intent, prepare_fresh_restart_after_rejected_resume,
     prepare_resume_task_for_api, prepare_revision_task_for_api,
     prepare_stage_completion_for_api_with_trigger, resolve_revision_budget, resolve_revision_limit,
     resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
+    StageAdvanceIntent,
 };
 pub(crate) use worktree::{local_branch_exists, resolve_current_source_worktree_branch};
 
@@ -428,6 +430,22 @@ impl SpawnAgentOverrides {
             effort: run.effort.clone(),
         }
     }
+
+    /// The provider override one explicit stage advance carried for the stage
+    /// it enters. It is the same explicit-override layer a run stamp occupies,
+    /// so it outranks the target stage's own selectors, the repo's
+    /// `agentProviders`, and the agent definition's frontmatter — and its
+    /// model and effort travel with the provider it names, never composed onto
+    /// a provider some other layer chose.
+    pub(in crate::task_creator) fn from_provider_override(
+        provider_override: &crate::db::StageProviderOverride,
+    ) -> Self {
+        Self {
+            provider: Some(provider_override.provider.clone()),
+            model: provider_override.model.clone(),
+            effort: provider_override.effort.clone(),
+        }
+    }
 }
 
 /// The provider/model/effort the caller explicitly asked for when the task
@@ -553,13 +571,16 @@ pub(crate) fn prepare_rerun_stage_for_api(
     // the blocked-at-creation task a rerun is being used to kick — falls
     // back to the creation request, which is what its first spawn would
     // have used.
-    let overrides = match db
+    let previous_run = db
         .latest_stage_run_for_stage(task_id, &stage_name, run_kind)
-        .map_err(|e| format!("db error: {}", e))?
-    {
-        Some(run) => SpawnAgentOverrides::from_stage_run(&run),
+        .map_err(|e| format!("db error: {}", e))?;
+    let overrides = match previous_run.as_ref() {
+        Some(run) => SpawnAgentOverrides::from_stage_run(run),
         None => create_intent_agent_overrides(db, task_id),
     };
+    // Reproducing a run reproduces where its provider came from too, so the
+    // record keeps naming whoever picked this stage's model.
+    let provider_override = previous_run.and_then(|run| run.provider_override);
     let provider = resolve_agent_provider(
         overrides.provider.as_deref(),
         current_stage.agent_provider.as_deref(),
@@ -675,6 +696,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
         effort,
+        provider_override,
         completion_transition: current_stage.policy.transition,
         provider_session_id,
         cwd: worktree_path,
@@ -819,6 +841,9 @@ pub(crate) fn prepare_create_task_repair_for_api(
             agent_provider: provider.as_str().to_string(),
             model: resolved.model,
             effort: resolved.effort,
+            // Rebuilding a task's *first* spawn from its creation request:
+            // no stage advance, and so no advance-carried override.
+            provider_override: None,
             completion_transition: resolved.stage_transition,
             provider_session_id,
             cwd: worktree_path,
@@ -941,6 +966,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         agent_provider: provider.as_str().to_string(),
         model,
         effort,
+        provider_override: None,
         completion_transition: resolved.stage_transition,
         provider_session_id,
         cwd: worktree_path,
@@ -991,6 +1017,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     overrides: SpawnAgentOverrides,
     fallback_provider: Option<&str>,
     trigger: crate::db::StageTrigger,
+    provider_override: Option<crate::db::StageProviderOverride>,
 ) -> Result<PreparedStageRunSpawn, String> {
     let agent = match target_stage.agent.as_deref() {
         Some(agent_name) => Some(definitions.agent(agent_name)?),
@@ -1225,6 +1252,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         effort: stage_run_effort,
         completion_transition,
         trigger,
+        provider_override,
         feedback,
         provider_session_id,
         resumed_from_run_id,

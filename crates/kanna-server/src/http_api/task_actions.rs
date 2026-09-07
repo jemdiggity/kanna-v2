@@ -15,6 +15,8 @@ use std::sync::Arc;
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     if error.starts_with("task is blocked:") || error.starts_with("post is still running") {
         axum::http::StatusCode::CONFLICT
+    } else if error.starts_with("cannot apply a provider override") {
+        axum::http::StatusCode::BAD_REQUEST
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
@@ -37,6 +39,22 @@ fn resume_action_error_status(error: &str) -> axum::http::StatusCode {
 pub(super) struct AdvanceStageRequest {
     expected_transition_revision: Option<String>,
     source: Option<String>,
+    /// Provider the stage this advance enters must spawn with. It fills the
+    /// explicit-override slot of the provider precedence chain, so it outranks
+    /// that stage's own `agent_provider` selectors, the repo's
+    /// `agentProviders`, the agent definition's frontmatter, and the default.
+    next_stage_agent_provider: Option<String>,
+    /// Model for `next_stage_agent_provider`, passed to that CLI verbatim.
+    /// Meaningless — and refused — without the provider it belongs to.
+    next_stage_model: Option<String>,
+    /// Reasoning effort for `next_stage_agent_provider`, in that provider's
+    /// own vocabulary.
+    next_stage_effort: Option<String>,
+    /// Who chose this override: `operator`, `manager`, or `agent`. Recorded
+    /// without authentication, and separate from `source` because the agent
+    /// that recommends a builder tier is usually not the one advancing the
+    /// stage.
+    next_stage_provider_source: Option<String>,
 }
 
 pub(super) async fn resolve_task_id_for_mutation(
@@ -866,6 +884,23 @@ pub(super) async fn advance_stage(
             .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?,
         None => StageTrigger::Unspecified,
     };
+    // An incoherent pair is refused before anything is scheduled: a stage that
+    // fails at spawn leaves the task parked with nothing running.
+    let provider_override = crate::task_creator::parse_stage_provider_override(
+        payload
+            .as_ref()
+            .and_then(|payload| payload.next_stage_agent_provider.as_deref()),
+        payload
+            .as_ref()
+            .and_then(|payload| payload.next_stage_model.as_deref()),
+        payload
+            .as_ref()
+            .and_then(|payload| payload.next_stage_effort.as_deref()),
+        payload
+            .as_ref()
+            .and_then(|payload| payload.next_stage_provider_source.as_deref()),
+    )
+    .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
     let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
@@ -940,11 +975,14 @@ pub(super) async fn advance_stage(
             {
                 return Ok(None);
             }
-            crate::task_creator::prepare_advance_stage_for_api_with_trigger(
+            crate::task_creator::prepare_advance_stage_for_api_with_intent(
                 &db,
                 &state.config,
                 &task_id,
-                trigger,
+                crate::task_creator::StageAdvanceIntent {
+                    trigger,
+                    provider_override,
+                },
             )
             .map(Some)
             .map_err(|e| (stage_action_error_status(&e), e))

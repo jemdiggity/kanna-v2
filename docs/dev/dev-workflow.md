@@ -260,9 +260,37 @@ depends on what the next spawn is:
 |---|---|---|
 | Rerun, resume, revision, recovery | the stamp | These reproduce a *recorded run*; its provider is fed back as an explicit override, which outranks `agentProviders`. Re-resolving would break `--resume` — agent-CLI transcripts are per-provider and per-worktree — and silently change what the run is continuing. |
 | Stage advance (and the fallback spawn of a stage's post, when the live session is gone) | re-resolved from the chain, with the stamp only as the final fallback | A transition is a new run of a stage, so it resolves that stage's own bindings: stage `agent_provider`, then this map (locally merged), then the agent definition, then the task's stamp. A local entry therefore does move an in-flight task at its next stage boundary — which is how a task is routed around a wedged provider without a commit. |
+| Stage advance carrying `next_stage_agent_provider` | that provider, with the `next_stage_model` / `next_stage_effort` written beside it | The advance fills the explicit-override slot, so it outranks everything above for *that one stage*. Nothing is pinned: no workflow definition, no default, and no later stage changes. |
 
 Nothing rebinds a task in place: the move happens when the task next spawns, and
 never mid-run.
+
+### Choosing the next stage's model at the boundary
+
+`kanna_advance_stage` / `kanna-cli task advance-stage` accept a provider
+override for the stage the advance *enters*:
+
+```sh
+kanna-cli task advance-stage --task-id "$TASK" --source operator \
+  --next-stage-agent-provider codex \
+  --next-stage-model gpt-6-astra --next-stage-effort low \
+  --next-stage-provider-source agent
+```
+
+This is what turns a plan agent's build-tier recommendation into the builder
+that actually runs: the human reads the plan at the `plan-build-review`
+workflow's manual gate and advances with the recommended tier, and the record
+keeps both facts apart — `--source operator` advanced the stage,
+`--next-stage-provider-source agent` picked the model. Both are unauthenticated
+caller declarations, stored on the spawned run and reported by
+`kanna_get_task` as `latestRun.providerOverride`.
+
+Model and effort need the provider beside them; a request naming one without it,
+or naming a pair the provider cannot take (`codex -m opus`, an effort outside a
+provider's published vocabulary) is a `400` before anything is scheduled rather
+than a stage that fails at spawn and parks the task. An override is also refused
+when the advance dispatches the current stage's post, because the transition
+then happens when that post completes.
 
 **What a local entry must never do is hand a task a model written for another
 provider.** A local `{"provider": "claude", "model": "opus"}` entry, applied to
