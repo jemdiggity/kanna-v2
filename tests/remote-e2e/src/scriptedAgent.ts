@@ -1,6 +1,7 @@
 import { chmod, writeFile } from "node:fs/promises";
 
 export interface ScriptedAgentOptions {
+  continuousOutput?: boolean;
   inputTraceFile?: string;
   redactInput?: boolean;
   terminalPasteSemantics?: boolean;
@@ -75,6 +76,7 @@ done
 }
 
 export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string {
+  const continuousOutput = options.continuousOutput !== false;
   const inputTrace = options.inputTraceFile
     ? `printf '%s\\000' "$line" >> ${shellSingleQuote(options.inputTraceFile)}`
     : ":";
@@ -146,12 +148,8 @@ if [ "$snapshot_history_enabled" -eq 1 ]; then
 fi
 `;
 
-  return `#!/bin/sh
-${snapshotHistory}${terminalModePrelude}
-printf 'SCRIPT_READY\\n'
-
-heartbeat=0
-(
+  const heartbeatLoop = continuousOutput
+    ? `(
   while :; do
     sleep 0.25
     heartbeat=$((heartbeat + 1))
@@ -164,10 +162,18 @@ heartbeat=0
     printf 'SCRIPT_HEARTBEAT %s\\n' "$heartbeat"
   done
 ) &
-heartbeat_pid=$!
+heartbeat_pid=$!`
+    : "heartbeat_pid=";
+
+  return `#!/bin/sh
+${snapshotHistory}${terminalModePrelude}
+printf 'SCRIPT_READY\\n'
+
+heartbeat=0
+${heartbeatLoop}
 
 cleanup() {
-  kill "$heartbeat_pid" 2>/dev/null || true
+  if [ -n "$heartbeat_pid" ]; then kill "$heartbeat_pid" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
 
@@ -176,7 +182,7 @@ stty -icanon min 1 time 0 -echo -icrnl
 
 cleanup() {
   stty "$original_tty" 2>/dev/null || true
-  kill "$heartbeat_pid" 2>/dev/null || true
+  if [ -n "$heartbeat_pid" ]; then kill "$heartbeat_pid" 2>/dev/null || true; fi
 }
 
 # This deliberately mirrors the model chooser failure mode: its cursor opens
@@ -212,6 +218,9 @@ while :; do
 
     ${inputReport}
     case "$line" in
+      *relay-fixture-idle*)
+        printf 'OpenAI Codex\\r\\nDone.\\r\\n› \\r\\n'
+        ;;
       *reconnect-fixture-start*)
         kill "$heartbeat_pid" 2>/dev/null || true
         heartbeat_pid=""

@@ -106,6 +106,7 @@ export async function createScriptedTask(
   harness: RemoteHarness,
   options: {
     displayName: string;
+    continuousOutput?: boolean;
     inputTraceFile?: string;
     prompt?: string;
     repoName?: string;
@@ -125,6 +126,7 @@ export async function createScriptedTask(
     `scripted-repo-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
   await writeScriptedRepo(repoPath, {
+    continuousOutput: options.continuousOutput,
     inputTraceFile: options.inputTraceFile,
     redactInput: options.redactInput,
     setupCommands: options.setupCommands,

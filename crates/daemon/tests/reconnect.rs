@@ -3637,6 +3637,40 @@ fn test_one_way_terminal_control_pipelines_without_success_replies() {
     );
 }
 
+/// A remote follower's control socket must not be constrained by a stale size
+/// written by an unattached management client when no rendered desktop owns
+/// the terminal geometry.
+#[test]
+fn test_one_way_follower_resize_applies_without_attached_size_owner() {
+    let daemon = DaemonHandle::start();
+
+    let mut management = daemon.connect();
+    spawn_echo_session(&mut management, "sess-follower-resize");
+    resize(&mut management, "sess-follower-resize", 80, 24);
+    let mut transient = daemon.connect();
+    resize(&mut transient, "sess-follower-resize", 100, 30);
+
+    let mut follower = daemon.connect();
+    // Model the KSP close/reopen race where the pointer-derived writer id for
+    // the new control socket is still present in the terminal-client set.
+    attach_snapshot_and_capture(&mut follower, "sess-follower-resize");
+    follower.send(&Cmd::ResizeNoReply {
+        session_id: "sess-follower-resize".to_string(),
+        cols: 80,
+        rows: 48,
+    });
+
+    let snapshot = recv_snapshot(&mut follower, "sess-follower-resize");
+    assert_eq!((snapshot.cols, snapshot.rows), (80, 48));
+
+    // Cleanup of an older socket used to recompute the minimum over stale
+    // entries and immediately restore the task's creation-time 80x24 grid.
+    drop(transient);
+    thread::sleep(Duration::from_millis(100));
+    let snapshot = recv_snapshot_for(&mut follower, "sess-follower-resize");
+    assert_eq!((snapshot.cols, snapshot.rows), (80, 48));
+}
+
 /// Two clients attached to the same session both receive output (broadcast model).
 #[test]
 fn test_broadcast_both_clients_receive_output() {

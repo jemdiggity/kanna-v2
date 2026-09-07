@@ -16,7 +16,8 @@ use crate::client::{
 };
 use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::{
-    existing_session_fanout, session_fanout, SessionFanout, SessionFanouts, SubscriberKind,
+    existing_session_fanout, session_fanout, EventLine, SessionFanout, SessionFanouts,
+    SubscriberKind,
 };
 use crate::handoff::{blank_snapshot, handle_handoff};
 use crate::operator_auth::OperatorAuthorizer;
@@ -1401,11 +1402,32 @@ pub(crate) async fn handle_command(
             // One persistent control socket owns one size entry. Commands on
             // that socket are read in order, preserving resize/input ordering.
             let writer_id = Arc::as_ptr(&writer) as usize;
+            let terminal_client_ids = terminal_emulator_clients
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_default();
             let (eff_cols, eff_rows) = {
                 let mut sizes = session_sizes.lock().await;
                 let client_sizes = sizes.entry(session_id.clone()).or_default();
                 client_sizes.insert(writer_id, (cols, rows));
-                effective_terminal_size(client_sizes, (cols, rows))
+                let terminal_client_sizes = client_sizes
+                    .iter()
+                    .filter(|(client_id, _)| {
+                        **client_id != writer_id && terminal_client_ids.contains(client_id)
+                    })
+                    .map(|(client_id, size)| (*client_id, *size))
+                    .collect::<std::collections::HashMap<_, _>>();
+                if terminal_client_sizes.is_empty() {
+                    // A follower is authoritative when no attached desktop
+                    // has supplied a size. Retire older management entries so
+                    // their later disconnect cannot restore stale geometry.
+                    client_sizes.retain(|client_id, _| *client_id == writer_id);
+                    (cols, rows)
+                } else {
+                    effective_terminal_size(&terminal_client_sizes, (cols, rows))
+                }
             };
 
             let result = match session_handle(&sessions, &session_id).await {
@@ -1417,6 +1439,22 @@ pub(crate) async fn handle_command(
                     recovery_manager
                         .resize_session(&session_id, eff_cols, eff_rows)
                         .await;
+                    if let (Some(session), Some(fanout)) = (
+                        session_handle(&sessions, &session_id).await,
+                        existing_session_fanout(&fanouts, &session_id).await,
+                    ) {
+                        let mut fanout_state = fanout.state.lock().await;
+                        if let Ok(snapshot) = session.snapshot(&session_id).await {
+                            let event = Event::Snapshot {
+                                session_id: session_id.clone(),
+                                snapshot,
+                                agent_provider: session.agent_provider().await,
+                            };
+                            if let Some(line) = EventLine::serialize(&event, 0, 0) {
+                                let _ = fanout_state.enqueue_attached(&line);
+                            }
+                        }
+                    }
                 }
                 Err(error) => {
                     let evt = error_event(None, error.to_string());

@@ -275,46 +275,17 @@ impl FanoutState {
         let budget = self.budget;
         let mut report = EnqueueReport::default();
         for list in [&mut self.attached, &mut self.observers] {
-            let mut index = 0;
-            while index < list.len() {
-                let subscriber = &mut list[index];
-                if subscriber.tx.is_closed() {
-                    list.remove(index);
-                    continue;
-                }
-                if subscriber.lagged_since.is_some() {
-                    if subscriber.pending_bytes.load(Ordering::Relaxed) == 0 {
-                        report.resync_ready = true;
-                    }
-                    index += 1;
-                    continue;
-                }
-                let pending = subscriber.pending_bytes.load(Ordering::Relaxed);
-                if pending + line.line.len() > budget {
-                    subscriber.lagged_since = Some(Instant::now());
-                    subscriber.lagged.store(true, Ordering::Release);
-                    // Close the race where the writer drained `pending`
-                    // between the load above and publishing the lagged flag:
-                    // that writer could not have notified because it still
-                    // observed `lagged == false`.
-                    if subscriber.pending_bytes.load(Ordering::Acquire) == 0 {
-                        report.resync_ready = true;
-                    }
-                    report.newly_lagged.push(TerminalPerfEvent {
-                        context: subscriber.perf_context(line, budget),
-                        kind: terminal_perf::TerminalPerfEventKind::Lag,
-                        duration: Duration::ZERO,
-                    });
-                    index += 1;
-                    continue;
-                }
-                if subscriber.enqueue(line.clone()).is_err() {
-                    list.remove(index);
-                    continue;
-                }
-                index += 1;
-            }
+            enqueue_to_list(list, line, budget, &mut report);
         }
+        report
+    }
+
+    /// Publish an authoritative geometry snapshot only to rendered clients.
+    /// Passive observers derive task activity from output and must not treat a
+    /// resize-only snapshot as fresh agent work.
+    pub(crate) fn enqueue_attached(&mut self, line: &EventLine) -> EnqueueReport {
+        let mut report = EnqueueReport::default();
+        enqueue_to_list(&mut self.attached, line, self.budget, &mut report);
         report
     }
 
@@ -449,6 +420,49 @@ impl FanoutState {
             SubscriberKind::Attached => &mut self.attached,
             SubscriberKind::Observer => &mut self.observers,
         }
+    }
+}
+
+fn enqueue_to_list(
+    list: &mut Vec<Subscriber>,
+    line: &EventLine,
+    budget: usize,
+    report: &mut EnqueueReport,
+) {
+    let mut index = 0;
+    while index < list.len() {
+        let subscriber = &mut list[index];
+        if subscriber.tx.is_closed() {
+            list.remove(index);
+            continue;
+        }
+        if subscriber.lagged_since.is_some() {
+            if subscriber.pending_bytes.load(Ordering::Relaxed) == 0 {
+                report.resync_ready = true;
+            }
+            index += 1;
+            continue;
+        }
+        let pending = subscriber.pending_bytes.load(Ordering::Relaxed);
+        if pending + line.line.len() > budget {
+            subscriber.lagged_since = Some(Instant::now());
+            subscriber.lagged.store(true, Ordering::Release);
+            if subscriber.pending_bytes.load(Ordering::Acquire) == 0 {
+                report.resync_ready = true;
+            }
+            report.newly_lagged.push(TerminalPerfEvent {
+                context: subscriber.perf_context(line, budget),
+                kind: terminal_perf::TerminalPerfEventKind::Lag,
+                duration: Duration::ZERO,
+            });
+            index += 1;
+            continue;
+        }
+        if subscriber.enqueue(line.clone()).is_err() {
+            list.remove(index);
+            continue;
+        }
+        index += 1;
     }
 }
 
