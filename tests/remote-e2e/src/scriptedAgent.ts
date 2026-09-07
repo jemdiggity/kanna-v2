@@ -3,6 +3,7 @@ import { chmod, writeFile } from "node:fs/promises";
 export interface ScriptedAgentOptions {
   inputTraceFile?: string;
   redactInput?: boolean;
+  terminalKeyTraceFile?: string;
   terminalPasteSemantics?: boolean;
   tracePartialInput?: boolean;
   traceTerminalKeys?: boolean;
@@ -97,11 +98,17 @@ esac`;
   const terminalKeyHandling = options.traceTerminalKeys
     ? `if [ "$char" = "$escape" ]; then
     printf 'SCRIPT_KEY:ESC\\n'
+    ${options.terminalKeyTraceFile
+      ? `printf 'ESC\\n' >> ${shellSingleQuote(options.terminalKeyTraceFile)}`
+      : ":"}
     continue
   fi`
     : "";
   const enterTrace = options.traceTerminalKeys
-    ? "printf 'SCRIPT_KEY:ENTER\\n'"
+    ? `printf 'SCRIPT_KEY:ENTER\\n'
+    ${options.terminalKeyTraceFile
+      ? `printf 'ENTER\\n' >> ${shellSingleQuote(options.terminalKeyTraceFile)}`
+      : ":"}`
     : ":";
   const bracketedPasteHandling = options.tracePartialInput || options.terminalPasteSemantics
     ? `if [ "$char" = "$escape" ]; then

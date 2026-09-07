@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
@@ -35,6 +36,8 @@ const RELAY_QUICK_REPLY_EXPECTED_INPUT =
 const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
+const INPUT_TRACE_FILE = ".kanna-e2e-inputs";
+const TERMINAL_KEY_TRACE_FILE = ".kanna-e2e-terminal-keys";
 
 export const MOBILE_RELAY_PTY_HISTORY_FIXTURE = {
   maxEncodedChars: 100_000,
@@ -164,6 +167,17 @@ interface TerminalEventCollector {
     rows: number;
     scrollbackLines: number;
   }>;
+  waitForNewSnapshot(
+    expectation: {
+      minEncodedChars: number;
+      sentinel: string;
+    },
+    timeoutMs?: number,
+  ): Promise<{
+    cols: number;
+    dataB64: string;
+    rows: number;
+  }>;
 }
 
 interface RemoteHarnessModule {
@@ -179,11 +193,13 @@ interface TerminalFlowModule {
     harness: RemoteHarness,
     options: {
       displayName: string;
+      inputTraceFile?: string;
       prompt?: string;
       repoName?: string;
       snapshotHistory?: {
         sentinel: string;
       };
+      terminalKeyTraceFile?: string;
       terminalCols?: number;
       terminalRows?: number;
       waitingPromptSnippet?: string;
@@ -266,7 +282,7 @@ export interface MobileRelayHarness {
     timeoutMs?: number,
   ): Promise<string>;
   waitForLocalTaskActivity(activity: TaskActivity, timeoutMs?: number): Promise<void>;
-  waitForMobileTerminalGeometry(timeoutMs?: number): Promise<void>;
+  beginMobileTerminalGeometryObservation(timeoutMs?: number): Promise<void>;
 }
 
 export interface RelayTaskOrderingFixture {
@@ -399,11 +415,15 @@ export async function startMobileRelayHarness(
         ? {
             prompt: RELAY_ORIGINAL_PROMPT,
             repoName: RELAY_REPO_LABEL,
+            inputTraceFile: INPUT_TRACE_FILE,
             snapshotHistory: {
               sentinel: MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
             },
-            terminalCols: DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
-            terminalRows: DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows,
+            // Start at the daemon default so the mobile detail's resize is
+            // observable, rather than inherited from fixture seeding.
+            terminalCols: 80,
+            terminalRows: 24,
+            terminalKeyTraceFile: TERMINAL_KEY_TRACE_FILE,
             traceTerminalKeys: true,
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
@@ -515,6 +535,12 @@ export async function startMobileRelayHarness(
       unresolvedTaskId: HYBRID_UNRESOLVED_TASK_ID
     };
     const taskOrdering = relayTaskOrderingFixture(localTask.repoId);
+    const terminalKeyTracePath = localTask.worktreePath === null
+      ? null
+      : join(localTask.worktreePath, TERMINAL_KEY_TRACE_FILE);
+    const inputTracePath = localTask.worktreePath === null
+      ? null
+      : join(localTask.worktreePath, INPUT_TRACE_FILE);
 
     return {
       credentials: {
@@ -575,11 +601,11 @@ export async function startMobileRelayHarness(
           // Emit after the simulator has attached so the paths cannot age out
           // of the bounded xterm scan while Metro and WebDriverAgent start.
           // The space also mirrors agent prose and creates a path boundary.
-          await postScriptedTaskInput(harness, localTask.taskId, ` ${link}`);
-          await remote.terminal.waitForTerminalOutput(
-            terminalEvents!,
-            `SCRIPT_INPUT: ${link}`
-          );
+          const input = ` ${link}`;
+          const expectedCount =
+            scriptedInputTraceCount(inputTracePath, input) + 1;
+          await postScriptedTaskInput(harness, localTask.taskId, input);
+          await waitForScriptedInput(inputTracePath, input, expectedCount);
         }
       },
       expirePairingSession: () => updateHarnessMobileMachineControls(
@@ -614,14 +640,14 @@ export async function startMobileRelayHarness(
       terminalEvents,
       terminalKeys: {
         count(key) {
-          return terminalEvents!.outputText().split(`SCRIPT_KEY:${key}`).length - 1;
+          return terminalKeyTraceCount(terminalKeyTracePath, key);
         },
         async waitForCount(key, count) {
           const deadline = Date.now() + 10_000;
           while (Date.now() < deadline) {
-            const observed =
-              terminalEvents!.outputText().split(`SCRIPT_KEY:${key}`).length - 1;
-            if (observed >= count) return;
+            if (terminalKeyTraceCount(terminalKeyTracePath, key) >= count) {
+              return;
+            }
             await new Promise((resolve) => setTimeout(resolve, 100));
           }
           throw new Error(`Expected desktop PTY to receive ${key} ${count} times`);
@@ -638,39 +664,42 @@ export async function startMobileRelayHarness(
         await harness.stop();
       },
       async waitForQuickReplyInput(expectedInput, timeoutMs = 10_000) {
-        const output = await remote.terminal.waitForTerminalOutput(
-          terminalEvents!,
-          `SCRIPT_INPUT:${expectedInput.split("\n", 1)[0]}`,
-          timeoutMs
+        await waitForScriptedInput(inputTracePath, expectedInput, 1, timeoutMs);
+        const response = await harness.client.invokeDesktop({
+          desktopId: harness.desktopId,
+          method: "GET",
+          path: `/v1/tasks/${localTask.taskId}/inputs`,
+        }) as { inputs: Array<{ message: string }> };
+        const matchingInputs = response.inputs.filter(
+          (candidate) => candidate.message === expectedInput,
         );
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
-        const settledOutput = terminalEvents!.outputText();
-        assertSingleSubmittedTaskInput(
-          settledOutput,
-          expectedInput,
-        );
-        return settledOutput || output;
+        if (matchingInputs.length !== 1) {
+          throw new Error(
+            `Expected exactly one durable matching task input, observed ` +
+              `${matchingInputs.length}`,
+          );
+        }
+        return expectedInput;
       },
       waitForLocalTaskActivity(activity, timeoutMs) {
         return waitForLocalTaskActivity(harness, localTask, activity, timeoutMs);
       },
-      async waitForMobileTerminalGeometry(timeoutMs = 10_000) {
-        const observer = remote.terminal.collectTerminalEvents(
-          harness,
-          localTask.taskId
+      async beginMobileTerminalGeometryObservation(timeoutMs = 10_000) {
+        const snapshot = await terminalEvents!.waitForNewSnapshot(
+          {
+            minEncodedChars: terminalFixture.minDecodedBytes,
+            sentinel: terminalFixture.sentinel
+          },
+          timeoutMs
         );
-        try {
-          await observer.waitForSnapshot(
-            {
-              cols: terminalFixture.expectedCols,
-              minEncodedChars: terminalFixture.minDecodedBytes,
-              rows: terminalFixture.expectedRows,
-              sentinel: terminalFixture.sentinel
-            },
-            timeoutMs
+        if (
+          snapshot.cols !== terminalFixture.expectedCols ||
+          snapshot.rows !== terminalFixture.expectedRows
+        ) {
+          throw new Error(
+            `Expected a post-mount daemon PTY resize to ${terminalFixture.expectedCols}x` +
+              `${terminalFixture.expectedRows}, received ${snapshot.cols}x${snapshot.rows}`
           );
-        } finally {
-          observer.close();
         }
       }
     };
@@ -894,6 +923,43 @@ export function publishedCloudTaskId(
   fallbackId: string,
 ): string {
   return fields?.cloudTaskId?.stringValue?.trim() || fallbackId;
+}
+
+export function terminalKeyTraceCount(
+  path: string | null,
+  key: "ESC" | "ENTER",
+): number {
+  if (path === null || !existsSync(path)) return 0;
+  return readFileSync(path, "utf8")
+    .split(/\r?\n/)
+    .filter((candidate) => candidate === key).length;
+}
+
+export function scriptedInputTraceCount(
+  path: string | null,
+  input: string,
+): number {
+  if (path === null || !existsSync(path)) return 0;
+  return readFileSync(path)
+    .toString("utf8")
+    .split("\0")
+    .filter((candidate) => candidate === input).length;
+}
+
+async function waitForScriptedInput(
+  path: string | null,
+  input: string,
+  count = 1,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (scriptedInputTraceCount(path, input) >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Expected desktop PTY to receive input occurrence ${count}: ${input}`,
+  );
 }
 
 async function seedHybridCloudSnapshots(input: {
