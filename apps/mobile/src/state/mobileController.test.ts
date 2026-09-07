@@ -6757,7 +6757,38 @@ describe("createMobileController", () => {
     expect(terminalText(store)).not.toContain("First line");
   });
 
-  it("applies the measured mobile grid on first attach and reasserts it after reconnect", async () => {
+  it("retires terminal attachment state across transport loss before rehydration", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "snapshot",
+      taskId: "task-1",
+      cols: 80,
+      rows: 24,
+      dataB64: ""
+    });
+    expect(store.getState().taskTerminalStatus).toBe("live");
+
+    client.__terminalStream.emit({
+      type: "connection",
+      taskId: "task-1",
+      connected: false
+    });
+    expect(store.getState().taskTerminalStatus).toBe("restarting");
+
+    client.__terminalStream.emit({
+      type: "connection",
+      taskId: "task-1",
+      connected: true
+    });
+    expect(store.getState().taskTerminalStatus).toBe("connecting");
+  });
+
+  it("applies the measured mobile grid once and hydrates from authoritative snapshots", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
@@ -6777,8 +6808,7 @@ describe("createMobileController", () => {
       rows: 24,
       dataB64: ""
     });
-    expect(resize).toHaveBeenCalledTimes(2);
-    expect(resize).toHaveBeenLastCalledWith(80, 48);
+    expect(resize).toHaveBeenCalledTimes(1);
 
     client.__terminalStream.emit({
       type: "snapshot",
@@ -6787,10 +6817,10 @@ describe("createMobileController", () => {
       rows: 48,
       dataB64: ""
     });
-    expect(resize).toHaveBeenCalledTimes(2);
+    expect(resize).toHaveBeenCalledTimes(1);
 
     controller.resizeTaskTerminal("task-1", 128, 72);
-    expect(resize).toHaveBeenCalledTimes(3);
+    expect(resize).toHaveBeenCalledTimes(2);
     expect(resize).toHaveBeenLastCalledWith(128, 72);
   });
 

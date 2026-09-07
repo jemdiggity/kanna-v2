@@ -198,6 +198,10 @@
     "remoteCompanionOpenFailed": "Could not open the visual companion.",
     "remoteTerminalFileDropUnavailable": "Files can’t be dropped into a terminal on another machine. Transfer the file to that machine, then paste its path."
   },
+  "terminalGeometry": {
+    "takeControl": "Take terminal control",
+    "releaseControl": "Release terminal control"
+  },
   "tags": {
     "inProgress": "In Progress",
     "pr": "PR",

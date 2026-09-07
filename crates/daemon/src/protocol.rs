@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn default_true() -> bool {
+    true
+}
+
 pub use kanna_agent_protocol::{
-    AgentEvent as NeutralAgentEvent, AgentProvider, PermissionDecision,
+    AgentEvent as NeutralAgentEvent, AgentProvider, PermissionDecision, TerminalViewerRole,
 };
 
 /// Transactional lifecycle-fenced and provenance-authenticated handoff.
@@ -15,6 +19,7 @@ pub const LEGACY_HANDOFF_PROTOCOL_VERSION: u32 = 2;
 /// created or inherited input policy may be classified.
 pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 =
     kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION;
+pub const TERMINAL_GEOMETRY_PROTOCOL_VERSION: u32 = 1;
 
 /// Server/daemon contract required before fenced raw terminal input carrying a
 /// producer-declared class may be sent.
@@ -254,7 +259,7 @@ pub enum ComposerAttestation {
     Unknown,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
     /// Negotiate the generic-input fence with the exact kanna-server process.
@@ -270,6 +275,12 @@ pub enum Command {
     /// proves nothing was written, which is what lets the server answer
     /// "unsupported" instead of "uncertain".
     NegotiateRawInput {
+        version: u32,
+    },
+    /// Probe whether this daemon understands viewer roles and controller
+    /// registration. Older daemons close the connection on this unknown
+    /// command, allowing kanna-server to fall back to legacy sizing.
+    NegotiateTerminalGeometry {
         version: u32,
     },
     Spawn {
@@ -421,6 +432,25 @@ pub enum Command {
         cols: u16,
         rows: u16,
     },
+    /// Atomically register the authenticated viewer and its initial measured
+    /// dimensions. Subsequent ResizeNoReply requests from the same control
+    /// connection only affect the elected controller.
+    RegisterViewer {
+        session_id: String,
+        viewer_id: String,
+        role: TerminalViewerRole,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+        #[serde(default = "default_true")]
+        visible: bool,
+    },
+    TakeoverViewer {
+        session_id: String,
+    },
+    ReleaseViewer {
+        session_id: String,
+    },
     Signal {
         session_id: String,
         signal: String,
@@ -493,6 +523,9 @@ pub enum Event {
     },
     /// This daemon speaks the fenced raw-input contract at `version`.
     RawInputReady {
+        version: u32,
+    },
+    TerminalGeometryReady {
         version: u32,
     },
     Output {

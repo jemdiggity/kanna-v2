@@ -133,6 +133,8 @@ export interface MobileController {
   ): Promise<TaskInputSendOutcome>;
   sendTaskTerminalInput(taskId: string, dataB64: string): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
+  takeTaskTerminalControl(taskId: string): void;
+  releaseTaskTerminalControl(taskId: string): void;
   /** Pull the next older chunk of terminal scrollback, if the desktop kept any
    * back and no request is already in flight. */
   requestTaskTerminalScrollback(taskId: string): void;
@@ -1024,10 +1026,17 @@ export function createMobileController(
   };
 
   const stopTaskTerminal = () => {
-    const subscription = activeTaskTerminal?.subscription;
+    const current = activeTaskTerminal;
+    const subscription = current?.subscription;
     activeTaskTerminal = null;
     taskTerminalGeneration += 1;
     subscription?.close();
+    if (current) {
+      // Closing the attachment is also the authority-release boundary. Drive
+      // the screen out of its optimistic takeover state before a replacement
+      // task or foreground rehydration can reuse the component.
+      store.setTaskTerminalStatus(current.taskId, "restarting");
+    }
   };
 
   const stopTaskAgent = () => {
@@ -1434,6 +1443,15 @@ export function createMobileController(
           recoveringTaskSessionAttempts.delete(streamTaskId);
         }
         switch (event.type) {
+          case "connection":
+            // A transport loss retires the daemon attachment's authority. The
+            // next snapshot is a fresh registration/reconciliation boundary;
+            // never keep presenting the old task's optimistic takeover state.
+            store.setTaskTerminalStatus(
+              streamTaskId,
+              event.connected ? "connecting" : "restarting"
+            );
+            break;
           case "snapshot":
             store.replaceTaskTerminalSnapshot(
               streamTaskId,
@@ -1442,10 +1460,6 @@ export function createMobileController(
               event.rows,
               event.window
             );
-            // Every reconnect produces a fresh daemon snapshot. Reassert the
-            // mounted mobile viewport if another client changed the shared PTY
-            // while this stream was disconnected.
-            resizeToRequestedGeometry(event);
             break;
           case "output":
             store.appendTaskTerminal(streamTaskId, `${event.dataB64}\n`);
@@ -3636,6 +3650,18 @@ export function createMobileController(
       requestedTaskTerminalGeometry = { taskId, cols, rows };
       if (activeTaskTerminal?.taskId === taskId) {
         activeTaskTerminal.subscription.resize?.(cols, rows);
+      }
+    },
+
+    takeTaskTerminalControl(taskId) {
+      if (activeTaskTerminal?.taskId === taskId) {
+        activeTaskTerminal.subscription.takeControl?.();
+      }
+    },
+
+    releaseTaskTerminalControl(taskId) {
+      if (activeTaskTerminal?.taskId === taskId) {
+        activeTaskTerminal.subscription.releaseControl?.();
       }
     },
 

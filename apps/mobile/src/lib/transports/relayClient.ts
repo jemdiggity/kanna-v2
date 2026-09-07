@@ -96,6 +96,7 @@ export function createRelayDesktopClient({
   let hasOpenedControlSocket = false;
   const pendingInvokes = new Map<string, PendingInvoke>();
   const terminalObservers = new Map<string, TerminalObserver>();
+  const terminalConnectionListeners = new Map<string, Set<(connected: boolean) => void>>();
   const streamClients = new Map<string, StreamClient>();
 
   const streamClientForDesktop = (desktopId: string) => {
@@ -118,6 +119,12 @@ export function createRelayDesktopClient({
       // minutes of viewing: bounded snapshots, on-demand scrollback, and delta
       // resubscribe are all negotiated here.
       terminalScrollbackWindow: true,
+      terminalViewerRole: "remote",
+      onConnectionChange(connected) {
+        for (const listener of terminalConnectionListeners.get(desktopId) ?? []) {
+          listener(connected);
+        }
+      },
     });
     streamClients.set(desktopId, client);
     return client;
@@ -455,6 +462,13 @@ export function createRelayDesktopClient({
     },
     observeTaskTerminal({ desktopId, taskId }, listener) {
       const client = streamClientForDesktop(desktopId);
+      const connectionListeners =
+        terminalConnectionListeners.get(desktopId) ?? new Set<(connected: boolean) => void>();
+      terminalConnectionListeners.set(desktopId, connectionListeners);
+      const onConnectionChange = (connected: boolean) => {
+        listener({ type: "connection", taskId, connected });
+      };
+      connectionListeners.add(onConnectionChange);
       client.attachTerminal(taskId, {
         onSnapshot(cols, rows, dataB64, _agentProvider, window) {
           listener({
@@ -489,6 +503,10 @@ export function createRelayDesktopClient({
 
       return {
         close() {
+          connectionListeners.delete(onConnectionChange);
+          if (connectionListeners.size === 0) {
+            terminalConnectionListeners.delete(desktopId);
+          }
           client.detach(taskId, "terminal");
         },
         sendInput(dataB64: string, submissionBoundary = false, controlInput = false) {
@@ -502,6 +520,12 @@ export function createRelayDesktopClient({
         },
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);
+        },
+        takeControl() {
+          client.takeTerminalControl(taskId);
+        },
+        releaseControl() {
+          client.releaseTerminalControl(taskId);
         },
         requestScrollback(request) {
           client.requestTerminalScrollback(taskId, request);

@@ -60,6 +60,7 @@ export type TaskTerminalStreamEvent =
       chunk: TerminalScrollbackChunk;
     }
   | { type: "exit"; taskId: string; code: number }
+  | { type: "connection"; taskId: string; connected: boolean }
   | { type: "error"; taskId: string; code?: string; message: string };
 
 export interface TaskTerminalSubscription {
@@ -75,6 +76,9 @@ export interface TaskTerminalSubscription {
   /** Resize both the observer's xterm grid and the owning PTY. The transport
    * keeps this scoped to the attached task session. */
   resize?(cols: number, rows: number): void;
+  /** Explicitly take/release PTY geometry ownership. */
+  takeControl?(): void;
+  releaseControl?(): void;
   /** Pull one bounded chunk of scrollback older than the loaded buffer.
    * Optional: a transport whose desktop sent the whole terminal has none to
    * pull. */

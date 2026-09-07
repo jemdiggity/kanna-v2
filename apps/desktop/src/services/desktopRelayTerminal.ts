@@ -130,6 +130,7 @@ export function createDesktopRelayTerminalClient({
         webSocketFactory: createSocket,
       }),
       reconnectDelaysMs: [250, 500, 1000, 2000],
+      terminalViewerRole: "remote",
       frameDecoder: createDesktopStreamFrameDecoder(),
     });
     clients.set(desktopId, client);
@@ -172,6 +173,15 @@ export function createDesktopRelayTerminalClient({
       return {
         close() {
           client.detach(options.taskId, "terminal");
+        },
+        registerViewer(cols: number, rows: number) {
+          client.registerTerminalViewer(options.taskId, cols, rows);
+        },
+        takeControl() {
+          client.takeTerminalControl(options.taskId);
+        },
+        releaseControl() {
+          client.releaseTerminalControl(options.taskId);
         },
       };
     },
@@ -241,7 +251,11 @@ export function createDesktopRelayTerminalClient({
       }
     },
     async resize(options) {
-      clientForDesktop(options.desktopId).sendTermResize(options.taskId, options.cols, options.rows);
+      clientForDesktop(options.desktopId).registerTerminalViewer(
+        options.taskId,
+        options.cols,
+        options.rows,
+      );
     },
     async closeTask(options) {
       const response = await clientForDesktop(options.desktopId).request(

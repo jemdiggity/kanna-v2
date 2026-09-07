@@ -153,6 +153,8 @@ interface TaskScreenProps {
   /** The terminal view scrolled near the top of its loaded buffer. */
   onRequestTerminalScrollback?(): void;
   onResizeTerminal?(cols: number, rows: number): void;
+  onTakeTerminalControl?(): void;
+  onReleaseTerminalControl?(): void;
   onStopAgent(): void;
   onRequestAgentHistory?(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
@@ -257,6 +259,8 @@ export function TaskScreen({
   onSendTerminalInput,
   onRequestTerminalScrollback,
   onResizeTerminal,
+  onTakeTerminalControl,
+  onReleaseTerminalControl,
   onStopAgent,
   onRequestAgentHistory,
   onResolveAgentPermission,
@@ -290,6 +294,19 @@ export function TaskScreen({
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isBackPending, setIsBackPending] = useState(false);
+  const [terminalControlTaken, setTerminalControlTaken] = useState(false);
+  useEffect(() => {
+    // Takeover belongs to one live terminal attachment, not to the task row
+    // or screen component. A task switch, reconnect, background expiry, or
+    // terminal replacement must never leave the next attachment showing a
+    // stale release action.
+    setTerminalControlTaken(false);
+  }, [task.id]);
+  useEffect(() => {
+    if (terminalStatus !== "live") {
+      setTerminalControlTaken(false);
+    }
+  }, [terminalStatus]);
   const [screenViewport, setScreenViewport] = useState<{
     width: number;
     height: number;
@@ -990,25 +1007,47 @@ export function TaskScreen({
             onResolvePermission={onResolveAgentPermission}
           />
         ) : model.isTerminalHealthy ? (
-          <TerminalWebView
-            fullscreen
-            key={task.id}
-            output={terminalOutput}
-            outputEpoch={terminalOutputEpoch}
-            outputStart={terminalOutputStart}
-            terminalOutputSource={terminalOutputSource}
-            status={terminalStatus}
-            cols={terminalGeometry.cols}
-            rows={terminalGeometry.rows}
-            taskId={task.id}
-            bottomInset={terminalBottomInset}
-            selectionToolbarTop={terminalSelectionToolbarTop}
-            onConsolePress={Keyboard.dismiss}
-            onMentionedFilesChange={handleTerminalMentionedFilesChange}
-            onOpenFile={handleTerminalOpenFile}
-            onTerminalInput={onSendTerminalInput}
-            onRequestScrollback={onRequestTerminalScrollback}
-          />
+          <>
+            <TerminalWebView
+              fullscreen
+              key={task.id}
+              output={terminalOutput}
+              outputEpoch={terminalOutputEpoch}
+              outputStart={terminalOutputStart}
+              terminalOutputSource={terminalOutputSource}
+              status={terminalStatus}
+              cols={terminalGeometry.cols}
+              rows={terminalGeometry.rows}
+              taskId={task.id}
+              bottomInset={terminalBottomInset}
+              selectionToolbarTop={terminalSelectionToolbarTop}
+              onConsolePress={Keyboard.dismiss}
+              onMentionedFilesChange={handleTerminalMentionedFilesChange}
+              onOpenFile={handleTerminalOpenFile}
+              onTerminalInput={onSendTerminalInput}
+              onRequestScrollback={onRequestTerminalScrollback}
+            />
+            {onTakeTerminalControl && onReleaseTerminalControl ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ selected: terminalControlTaken }}
+                style={styles.terminalControlButton}
+                onPress={() => {
+                  if (terminalControlTaken) {
+                    onReleaseTerminalControl();
+                    setTerminalControlTaken(false);
+                  } else {
+                    onTakeTerminalControl();
+                    setTerminalControlTaken(true);
+                  }
+                }}
+              >
+                <Text style={styles.terminalControlLabel}>
+                  {terminalControlTaken ? "Release terminal control" : "Take terminal control"}
+                </Text>
+              </Pressable>
+            ) : null}
+          </>
         ) : (
           <View style={styles.terminalSkeleton}>
             <View style={styles.skeletonLineWide} />
@@ -1562,6 +1601,23 @@ const styles = StyleSheet.create({
     position: "absolute",
     right: 0,
     top: 0
+  },
+  terminalControlButton: {
+    backgroundColor: "#101A29",
+    borderColor: "#33445F",
+    borderRadius: 6,
+    borderWidth: 1,
+    bottom: 112,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    position: "absolute",
+    right: 12,
+    zIndex: 3
+  },
+  terminalControlLabel: {
+    color: "#D8E4F4",
+    fontSize: 12,
+    fontWeight: "600"
   },
   terminalSkeleton: {
     backgroundColor: "#050B14",

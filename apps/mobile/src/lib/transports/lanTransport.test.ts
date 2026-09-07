@@ -946,12 +946,14 @@ describe("createLanTransport", () => {
         capabilities: [
           "companion_event_epoch",
           "term_input_boundary",
-          "term_scrollback_window"
+          "term_scrollback_window",
+          "terminal_geometry"
         ]
       },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
     expect(events).toEqual([
+      { type: "connection", taskId: "task-1", connected: true },
       {
         type: "snapshot",
         taskId: "task-1",
@@ -1043,7 +1045,7 @@ describe("createLanTransport", () => {
     socket.onmessage?.({
       data: JSON.stringify({
         type: "auth_ok",
-        capabilities: ["term_input_boundary"],
+        capabilities: ["term_input_boundary", "terminal_geometry"],
       } satisfies ServerFrame),
     });
     subscription.sendInput?.("G1s8NjU7MTsxTQ==", false, true);
@@ -1055,13 +1057,24 @@ describe("createLanTransport", () => {
       { type: "auth", capabilities: [
           "companion_event_epoch",
           "term_input_boundary",
-          "term_scrollback_window"
+          "term_scrollback_window",
+          "terminal_geometry"
         ] },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
       { type: "term_input_control", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" },
       { type: "term_input", task_id: "task-1", data_b64: "aHVtYW4gZHJhZnQ=" },
       { type: "term_input_boundary", task_id: "task-1", data_b64: "DQ==" },
-      { type: "term_resize", task_id: "task-1", cols: 80, rows: 48 }
+      {
+        type: "term_viewer_register",
+        task_id: "task-1",
+        viewer_id: "terminal-viewer-1",
+        role: "remote",
+        generation: 1,
+        cols: 80,
+        rows: 48,
+        visible: true
+      },
+      { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
   });
 

@@ -18,6 +18,14 @@ export interface VisibleTerminalTextCell {
   rows: number;
 }
 
+export interface TerminalCursorPosition {
+  column: number;
+  row: number;
+  visible: boolean;
+  columns: number;
+  rows: number;
+}
+
 export interface TerminalCellAttributes {
   bold: boolean;
   inverse: boolean;
@@ -38,7 +46,9 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     write: writeTerminalBuffer,
     input: inputTerminalBuffer,
     refresh: refreshTerminalBuffer,
+    element: getTerminalElement,
     findTextCell: findTerminalTextCell,
+    cursor: getTerminalCursorPosition,
     cellAttributes: getTerminalCellAttributes,
     selectText: selectTerminalBufferText,
   };
@@ -51,12 +61,23 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
   };
 }
 
+function getTerminalElement(sessionId: string): HTMLElement | null {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  return terminal.element ?? null;
+}
+
 function refreshTerminalBuffer(sessionId: string): void {
   const terminal = terminals.get(sessionId);
   if (!terminal) {
     throw new Error(`terminal buffer not registered for session ${sessionId}`);
   }
-  terminal.refresh(0, terminal.rows - 1);
+  const synchronousTerminal = terminal as unknown as {
+    _core?: { refresh(start: number, end: number, sync: boolean): void };
+  };
+  synchronousTerminal._core?.refresh(0, terminal.rows - 1, true);
 }
 
 function getTerminalCellAttributes(
@@ -110,6 +131,24 @@ function findTerminalTextCell(
     throw new Error(`terminal buffer not registered for session ${sessionId}`);
   }
   return findVisibleTerminalTextCell(terminal, text);
+}
+
+function getTerminalCursorPosition(sessionId: string): TerminalCursorPosition {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  const activeBuffer = terminal.buffer.active;
+  return {
+    column: activeBuffer.cursorX,
+    row: activeBuffer.cursorY,
+    // xterm's public buffer API exposes the authoritative cell; cursor
+    // visibility is verified separately against the rendered terminal in the
+    // real E2E lane (the public Terminal API has no cursorVisible property).
+    visible: true,
+    columns: terminal.cols,
+    rows: terminal.rows,
+  };
 }
 
 export function findVisibleTerminalTextCell(

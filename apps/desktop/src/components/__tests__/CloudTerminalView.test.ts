@@ -645,15 +645,49 @@ describe("CloudTerminalView remote visual companion links", () => {
       data: "hello",
       controlInput: true,
     });
-    expect(client.resize).toHaveBeenCalledWith({
-      desktopId: "peer-1",
-      taskId: "task-2",
-      cols: 80,
-      rows: 24,
-    });
+    expect(client.resize).not.toHaveBeenCalled();
     testState.effectiveCodeTheme!.value = "light";
     await nextTick();
     expect(testState.terminals[0]?.options.theme).toEqual({ theme: "light" });
+    wrapper.unmount();
+  });
+
+  it("coalesces remote ResizeObserver geometry proposals to the latest frame", async () => {
+    const client = createClient();
+    const registerViewer = vi.fn();
+    client.observeTerminal.mockImplementation(() => ({
+      close: client.terminalClose,
+      registerViewer,
+    }));
+    mocks.relayFactory.mockResolvedValue(client);
+
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-geometry",
+      },
+    });
+    await flushAsync();
+    registerViewer.mockClear();
+
+    const fitAddon = testState.terminals[0]?.loadedAddons.find(
+      (addon) => addon instanceof testState.FakeFitAddon,
+    ) as (InstanceType<typeof testState.FakeFitAddon> & {
+      proposeDimensions: ReturnType<typeof vi.fn>;
+    }) | undefined;
+    if (!fitAddon) throw new Error("terminal fit addon should be initialized");
+    fitAddon.proposeDimensions = vi.fn();
+    fitAddon.proposeDimensions
+      .mockReturnValueOnce({ cols: 100, rows: 30 })
+      .mockReturnValueOnce({ cols: 101, rows: 31 })
+      .mockReturnValueOnce({ cols: 102, rows: 32 });
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    await flushAsync();
+
+    expect(registerViewer).toHaveBeenCalledTimes(1);
+    expect(registerViewer).toHaveBeenCalledWith(102, 32);
     wrapper.unmount();
   });
 
@@ -713,12 +747,7 @@ describe("CloudTerminalView remote visual companion links", () => {
     await flushAsync();
 
     expect(fitAddon.fit).toHaveBeenCalledTimes(1);
-    expect(client.resize).toHaveBeenCalledExactlyOnceWith({
-      desktopId: "peer-1",
-      taskId: "task-2",
-      cols: 132,
-      rows: 41,
-    });
+    expect(client.resize).not.toHaveBeenCalled();
     expect(mocks.lanFactory).toHaveBeenCalledTimes(1);
     expect(client.observeTerminal).toHaveBeenCalledTimes(1);
     expect(client.terminalClose).not.toHaveBeenCalled();
@@ -814,7 +843,7 @@ describe("CloudTerminalView remote visual companion links", () => {
     wrapper.unmount();
   });
 
-  it("replays each authoritative snapshot at its source dimensions before fitting the owner PTY", async () => {
+  it("replays each authoritative snapshot at its source dimensions without fitting the owner PTY", async () => {
     const client = createClient();
     let terminalListener: ((event: DesktopRemoteTerminalEvent) => void) | undefined;
     client.observeTerminal.mockImplementation((options) => {
@@ -837,10 +866,6 @@ describe("CloudTerminalView remote visual companion links", () => {
     if (!terminal || !fitAddon || !terminalListener) {
       throw new Error("remote terminal was not initialized");
     }
-    fitAddon.fit.mockImplementation(() => {
-      terminal.cols = 117;
-      terminal.rows = 39;
-    });
     client.resize.mockClear();
     const snapshot = new TextEncoder().encode("\u001b[?1049h\u001b[2J\u001b[24;80Hcorner");
 
@@ -865,13 +890,8 @@ describe("CloudTerminalView remote visual companion links", () => {
     expect(terminal.resize).toHaveBeenCalledWith(80, 24);
     expect(terminal.write).toHaveBeenCalledWith(snapshot, expect.any(Function));
     expect(wrapper.attributes("data-status")).toBe("live");
-    expect(client.resize).toHaveBeenCalledExactlyOnceWith({
-      desktopId: "desktop-1",
-      taskId: "task-1",
-      cols: 117,
-      rows: 39,
-    });
-    expect(terminal.refresh).toHaveBeenCalledWith(0, 38);
+    expect(client.resize).not.toHaveBeenCalled();
+    expect(terminal.refresh).toHaveBeenCalledWith(0, 23);
     wrapper.unmount();
   });
 

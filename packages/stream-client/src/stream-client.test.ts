@@ -2872,6 +2872,228 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("registers a remote viewport without sending a legacy owner resize", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    expect(socket.sent[0]).toEqual({
+      type: "auth",
+      capabilities: [
+        "companion_event_epoch",
+        "term_input_boundary",
+        "terminal_geometry",
+      ],
+    });
+    socket.receive({
+      type: "auth_ok",
+      capabilities: ["term_input_boundary", "terminal_geometry"],
+    });
+    client.attachTerminal("task-pty", { onOutput() {} });
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "attach", task_id: "task-pty" }),
+    );
+    client.sendTermResize("task-pty", 42, 18);
+
+    expect(socket.sent.slice(-2)).toEqual([{
+      type: "term_viewer_register",
+      task_id: "task-pty",
+      viewer_id: "terminal-viewer-1",
+      role: "remote",
+      generation: 1,
+      cols: 42,
+      rows: 18,
+      visible: true,
+    }, {
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    }]);
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "term_resize" }),
+    );
+    client.close();
+  });
+
+  it("coalesces remote geometry bursts while preserving the first registration order", async () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+    client.attachTerminal("task-pty", { onOutput() {} });
+
+    client.sendTermResize("task-pty", 42, 18);
+    client.sendTermResize("task-pty", 43, 18);
+    client.sendTermResize("task-pty", 44, 19);
+    vi.advanceTimersByTime(50);
+
+    expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toEqual([
+      expect.objectContaining({ cols: 42, rows: 18 }),
+      expect.objectContaining({ cols: 44, rows: 19 }),
+    ]);
+    client.sendTermResize("task-pty", 44, 19);
+    vi.advanceTimersByTime(50);
+    expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toHaveLength(2);
+    client.close();
+  });
+
+  it("keeps geometry latest-value-only across event-loop turns", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+    client.attachTerminal("task-pty", { onOutput() {} });
+
+    client.sendTermResize("task-pty", 42, 18);
+    vi.advanceTimersByTime(10);
+    client.sendTermResize("task-pty", 43, 18);
+    vi.advanceTimersByTime(10);
+    client.sendTermResize("task-pty", 44, 19);
+
+    expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toEqual([
+      expect.objectContaining({ cols: 42, rows: 18 }),
+    ]);
+    vi.advanceTimersByTime(40);
+    expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toEqual([
+      expect.objectContaining({ cols: 42, rows: 18 }),
+      expect.objectContaining({ cols: 44, rows: 19 }),
+    ]);
+    client.close();
+  });
+
+  it("keeps pre-auth geometry latest-value-only while preserving input and attach order", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    client.attachTerminal("task-pty", { onOutput() {} });
+    client.sendTermResize("task-pty", 42, 18);
+    client.sendTermResize("task-pty", 43, 18);
+    client.sendTermResize("task-pty", 44, 19);
+    client.sendTermInput("task-pty", "YQ==");
+    client.sendTermInput("task-pty", "Yg==", true);
+
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["term_input_boundary", "terminal_geometry"] });
+
+    expect(socket.sent).toEqual([
+      {
+        type: "auth",
+        capabilities: [
+          "companion_event_epoch",
+          "term_input_boundary",
+          "terminal_geometry",
+        ],
+      },
+      expect.objectContaining({
+        type: "term_viewer_register",
+        task_id: "task-pty",
+        cols: 44,
+        rows: 19,
+      }),
+      { type: "attach", task_id: "task-pty", kind: "terminal", from_seq: 0 },
+      { type: "term_input", task_id: "task-pty", data_b64: "YQ==" },
+      { type: "term_input_boundary", task_id: "task-pty", data_b64: "Yg==" },
+    ]);
+    expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toHaveLength(1);
+    client.close();
+  });
+
+  it("coalesces a disconnected resize burst into one reconnect registration", () => {
+    const { client, socket } = (() => {
+      const client = new StreamClient({
+        url: "ws://test/v1/stream",
+        webSocketFactory: factory,
+        terminalViewerRole: "remote",
+      });
+      const socket = sockets[0];
+      socket.open();
+      socket.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+      client.attachTerminal("task-pty", { onOutput() {} });
+      client.sendTermResize("task-pty", 42, 18);
+      return { client, socket };
+    })();
+
+    socket.drop();
+    client.sendTermResize("task-pty", 43, 18);
+    client.sendTermResize("task-pty", 44, 19);
+    vi.advanceTimersByTime(250);
+    const replacement = sockets[1];
+    replacement.open();
+    replacement.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+
+    expect(replacement.sent.filter((frame) => frame.type === "term_viewer_register")).toEqual([
+      expect.objectContaining({ cols: 44, rows: 19 }),
+    ]);
+    expect(replacement.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    });
+    client.close();
+  });
+
+  it("re-registers unchanged geometry before a terminal detach/reattach", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+    client.attachTerminal("task-pty", { onOutput() {} });
+    client.sendTermResize("task-pty", 42, 18);
+    client.detach("task-pty", "terminal");
+    client.attachTerminal("task-pty", { onOutput() {} });
+
+    expect(socket.sent.slice(-3)).toEqual([
+      { type: "detach", task_id: "task-pty", kind: "terminal" },
+      expect.objectContaining({ type: "term_viewer_register", cols: 42, rows: 18 }),
+      { type: "attach", task_id: "task-pty", kind: "terminal", from_seq: 0 },
+    ]);
+    client.close();
+  });
+
+  it("suppresses remote geometry control against an old owner", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["term_input_boundary"] });
+    client.attachTerminal("task-pty", { onOutput() {} });
+    client.sendTermResize("task-pty", 42, 18);
+    client.takeTerminalControl("task-pty");
+    client.releaseTerminalControl("task-pty");
+
+    expect(socket.sent).toHaveLength(2);
+    expect(socket.sent[1]).toEqual({
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    });
+    client.close();
+  });
+
   it("fails closed without server boundary support and never emits terminal input", () => {
     const errors: Array<{ code: string; message: string }> = [];
     const client = new StreamClient({

@@ -493,6 +493,15 @@ export async function startMobileRelayHarness(
           : MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
       expectedCols: DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
       expectedRows: DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows,
+      expectedCell: {
+        column: 0,
+        row: 2,
+        text: "RELAY_GRID_CELL"
+      },
+      expectedCursor: {
+        column: 0,
+        row: 3
+      },
       minDecodedBytes:
         historySnapshot === null
           ? RELAY_TASK_SENTINEL.length

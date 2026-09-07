@@ -108,6 +108,15 @@ enum Cmd {
         cols: u16,
         rows: u16,
     },
+    RegisterViewer {
+        session_id: String,
+        viewer_id: String,
+        role: TerminalViewerRole,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+        visible: bool,
+    },
     Snapshot {
         session_id: String,
     },
@@ -125,6 +134,14 @@ enum RawInputClass {
     Draft,
     Submission,
     Control,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalViewerRole {
+    Local,
+    Remote,
 }
 
 #[allow(dead_code)]
@@ -2886,6 +2903,7 @@ fn wait_for_ok(conn: &mut ClientConn, action: &str) {
             Evt::Ok => break,
             Evt::Output { .. } => continue,
             Evt::StatusChanged { .. } => continue,
+            Evt::Snapshot { .. } => continue,
             Evt::Error { message, .. } => panic!("{action} failed: {message}"),
             other => panic!("expected Ok for {action}, got: {:?}", other),
         }
@@ -2903,7 +2921,9 @@ fn wait_for_ok_with_timeout(conn: &mut ClientConn, action: &str, timeout: Durati
 
         match conn.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
             Ok(Evt::Ok) => break,
-            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) => continue,
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) | Ok(Evt::Snapshot { .. }) => {
+                continue
+            }
             Ok(Evt::Error { message, .. }) => panic!("{action} failed: {message}"),
             Ok(other) => panic!("expected Ok for {action}, got: {:?}", other),
             Err(_) => continue,
@@ -4080,10 +4100,14 @@ fn test_one_way_follower_resize_applies_without_attached_size_owner() {
     // Model the KSP close/reopen race where the pointer-derived writer id for
     // the new control socket is still present in the terminal-client set.
     attach_snapshot_and_capture(&mut follower, "sess-follower-resize");
-    follower.send(&Cmd::ResizeNoReply {
+    follower.send(&Cmd::RegisterViewer {
         session_id: "sess-follower-resize".to_string(),
+        viewer_id: "remote-follower".to_string(),
+        role: TerminalViewerRole::Remote,
+        generation: 1,
         cols: 80,
         rows: 48,
+        visible: true,
     });
 
     let snapshot = recv_snapshot(&mut follower, "sess-follower-resize");

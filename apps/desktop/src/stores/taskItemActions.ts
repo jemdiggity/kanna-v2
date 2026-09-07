@@ -123,6 +123,8 @@ export function createTaskItemActions(
         agent: opts?.customTask?.agent,
         agentProvider: effectiveAgentProvider,
         agentType: effectiveAgentType,
+        terminalCols: opts?.terminalCols,
+        terminalRows: opts?.terminalRows,
         model: resolvedModel,
         effort: resolvedEffort,
         permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode,

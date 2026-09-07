@@ -356,7 +356,11 @@ export function createLanTransport(
         reconnectDelaysMs: [250, 500, 1000, 2000],
         // A phone on LAN is still a phone: same xterm buffer, same cold-open
         // latency. The window is negotiated on both mobile transports.
-        terminalScrollbackWindow: true
+        terminalScrollbackWindow: true,
+        terminalViewerRole: "remote",
+        onConnectionChange(connected) {
+          listener({ type: "connection", taskId, connected });
+        }
       });
 
       client.attachTerminal(taskId, {
@@ -400,6 +404,12 @@ export function createLanTransport(
         },
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);
+        },
+        takeControl() {
+          client.takeTerminalControl(taskId);
+        },
+        releaseControl() {
+          client.releaseTerminalControl(taskId);
         },
         requestScrollback(request) {
           client.requestTerminalScrollback(taskId, request);

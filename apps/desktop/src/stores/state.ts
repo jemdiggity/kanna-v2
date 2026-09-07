@@ -114,6 +114,8 @@ export interface CreateItemOptions {
   workflowName?: string;
   stage?: string;
   customTask?: import("@kanna/core").CustomTaskConfig;
+  terminalCols?: number;
+  terminalRows?: number;
   agentProvider?: AgentProvider;
   model?: string;
   effort?: string;

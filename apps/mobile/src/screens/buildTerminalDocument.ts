@@ -1369,13 +1369,23 @@ export function buildTerminalDocument({
           inspection: {
             byteCount: Number.parseInt(root.dataset.kannaByteCount || "0", 10) || 0,
             cols: Number.parseInt(root.dataset.kannaCols || "", 10) || null,
+            cursorColumn: Number.isInteger(term.buffer.active.cursorX)
+              ? term.buffer.active.cursorX
+              : null,
+            cursorRow: Number.isInteger(term.buffer.active.cursorY)
+              ? term.buffer.active.cursorY
+              : null,
             frameCount: Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0,
             mentionedFiles: {
               mentions: Array.from(terminalFileMentionHistory.values()).reverse(),
               overflow: terminalFileMentionOverflow
             },
             rows: Number.parseInt(root.dataset.kannaRows || "", 10) || null,
-            text: renderedTerminalText()
+            text: renderedTerminalText(),
+            visibleRows: Array.from({ length: term.rows }, (_, row) => {
+              const line = term.buffer.active.getLine(term.buffer.active.baseY + row);
+              return line ? line.translateToString(true) : "";
+            })
           }
         }));
       }` : ""}

@@ -880,6 +880,14 @@ function TaskDetailRoute({
           controller.resizeTaskTerminal(durableTaskId, cols, rows);
         }
       }}
+      onTakeTerminalControl={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) controller.takeTaskTerminalControl(durableTaskId);
+      }}
+      onReleaseTerminalControl={() => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (durableTaskId) controller.releaseTaskTerminalControl(durableTaskId);
+      }}
       onRequestTerminalScrollback={() => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) {

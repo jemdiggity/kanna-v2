@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -49,6 +49,40 @@ interface WindowRectInput {
 interface PtySize {
   cols: number;
   rows: number;
+}
+
+interface RenderedTerminalState {
+  cols: number;
+  rows: number;
+  cursorColumn: number;
+  cursorRow: number;
+  markerColumn: number | null;
+  markerRow: number | null;
+  cursorLine: string | null;
+  rendered: boolean;
+  authoritativeGrid: string[];
+  renderedGrid: string[];
+  renderedMarkerColumn: number | null;
+  renderedMarkerRow: number | null;
+  renderedCell: boolean;
+  renderedCursor: boolean;
+  canvasDataLength: number;
+}
+
+function comparableRenderedTerminalState(state: RenderedTerminalState) {
+  return {
+    cols: state.cols,
+    rows: state.rows,
+    cursorColumn: state.cursorColumn,
+    cursorRow: state.cursorRow,
+    markerColumn: state.markerColumn,
+    markerRow: state.markerRow,
+    cursorLine: state.cursorLine,
+    authoritativeGrid: state.authoritativeGrid,
+    renderedGrid: state.renderedGrid,
+    renderedMarkerColumn: state.renderedMarkerColumn,
+    renderedMarkerRow: state.renderedMarkerRow,
+  };
 }
 
 const execFileAsync = promisify(execFile);
@@ -226,6 +260,25 @@ async function waitForFocusedTerminalReady(
     await sleep(200);
   }
   throw new Error(`Timed out waiting for focused terminal ${sessionId}; latest=${JSON.stringify(latest)}`);
+}
+
+async function focusTerminalWindow(client: WebDriverClient): Promise<void> {
+  await client.executeAsync(`
+    const callback = arguments[arguments.length - 1];
+    Promise.resolve(window.__TAURI_INTERNALS__?.invoke(
+      "plugin:window|set_focus",
+      { label: "main" },
+    )).then(() => callback("ok"), () => callback("unavailable"));
+  `);
+  await client.executeSync(`
+    window.focus();
+    const input = document.querySelector(
+      ".main-panel .terminal-container .xterm-helper-textarea",
+    );
+    if (input instanceof HTMLElement) input.focus();
+    return true;
+  `);
+  await sleep(250);
 }
 
 async function setWindowRect(
@@ -750,32 +803,102 @@ async function waitForPtySize(
   );
 }
 
-async function waitForPtySizeDifferentFrom(
+async function readRenderedTerminalState(
   client: WebDriverClient,
   sessionId: string,
-  original: PtySize,
-  timeoutMs = 10_000,
-): Promise<PtySize> {
-  const deadline = Date.now() + timeoutMs;
-  let lastSize: PtySize | null = null;
-
-  while (Date.now() < deadline) {
-    lastSize = await probePtySize(client, sessionId, "KWAIT_DIFF_SIZE");
-    if (
-      lastSize.cols <= original.cols &&
-      lastSize.rows <= original.rows &&
-      !samePtySize(lastSize, original)
-    ) {
-      return lastSize;
-    }
-    await sleep(250);
-  }
-
-  throw new Error(
-    `Timed out waiting for PTY size to differ from ${original.cols}x${original.rows}; last size was ${
-      lastSize ? `${lastSize.cols}x${lastSize.rows}` : "unknown"
-    }`,
-  );
+  marker: string,
+): Promise<RenderedTerminalState> {
+  return client.executeSync<RenderedTerminalState>(`
+    const hook = window.__KANNA_E2E__?.terminalBuffers;
+    if (!hook) throw new Error("terminal buffer hook unavailable");
+    const cursor = hook.cursor(${JSON.stringify(sessionId)});
+    const markerCell = hook.findTextCell(
+      ${JSON.stringify(sessionId)},
+      ${JSON.stringify(marker)},
+    );
+    const lines = hook.lines(${JSON.stringify(sessionId)});
+    const stats = hook.stats(${JSON.stringify(sessionId)});
+    const container = document.querySelector(".main-panel .terminal-container");
+    const screen = container?.querySelector(".xterm-screen");
+    const rowsElement = screen?.querySelector(".xterm-rows");
+    const rowElements = Array.from(rowsElement?.querySelectorAll(":scope > div") ?? []);
+    const renderedGrid = rowElements.map((row) => row.textContent?.trimEnd() ?? "");
+    const renderedMarkerRow = renderedGrid.findIndex((line) => line.includes(${JSON.stringify(marker)}));
+    const renderedMarkerColumn = renderedMarkerRow >= 0
+      ? renderedGrid[renderedMarkerRow].indexOf(${JSON.stringify(marker)}) +
+        Math.floor(${JSON.stringify(marker)}.length / 2)
+      : null;
+    const rect = screen?.getBoundingClientRect();
+    const cursorElement = screen?.querySelector(".xterm-cursor");
+    const cursorRect = cursorElement?.getBoundingClientRect();
+    const cellWidth = rect && cursor.columns > 0 ? rect.width / cursor.columns : 0;
+    const cellHeight = rect && cursor.rows > 0 ? rect.height / cursor.rows : 0;
+    const canvas = Array.from(screen?.querySelectorAll("canvas") ?? [])
+      .find((candidate) => candidate instanceof HTMLCanvasElement);
+    const canvasRect = canvas?.getBoundingClientRect();
+    const canvasDataLength = Math.max(0, ...Array.from(
+      screen?.querySelectorAll("canvas") ?? [],
+    ).filter((candidate) => candidate instanceof HTMLCanvasElement).map((candidate) => {
+      try {
+        return candidate.toDataURL().length;
+      } catch {
+        return 0;
+      }
+    }));
+    const canvasPainted = canvasDataLength > 1000 && Boolean(
+      canvasRect && canvasRect.width > 0 && canvasRect.height > 0,
+    );
+    const cellSurface = canvasPainted ? canvasRect : rect;
+    const surfaceCellWidth = cellSurface && cursor.columns > 0
+      ? cellSurface.width / cursor.columns
+      : 0;
+    const surfaceCellHeight = cellSurface && cursor.rows > 0
+      ? cellSurface.height / cursor.rows
+      : 0;
+    const renderedCursor = Boolean(
+      cursorRect && cursorRect.width > 0 && cursorRect.height > 0 &&
+      rect && cellWidth > 0 && cellHeight > 0 &&
+      Math.abs(cursorRect.left - (rect.left + cursor.column * cellWidth)) <= 2 &&
+      Math.abs(cursorRect.top - (rect.top + cursor.row * cellHeight)) <= 2,
+    ) || Boolean(
+      canvasPainted && cellSurface && surfaceCellWidth > 0 && surfaceCellHeight > 0 &&
+      cursor.column >= 0 && cursor.column < cursor.columns &&
+      cursor.row >= 0 && cursor.row < cursor.rows,
+    );
+    const markerElement = renderedMarkerRow >= 0 ? rowElements[renderedMarkerRow] : undefined;
+    const markerRect = markerElement?.getBoundingClientRect();
+    const renderedCell = Boolean(
+      markerElement && markerRect && markerRect.width > 0 && markerRect.height > 0 &&
+      markerElement.textContent?.includes(${JSON.stringify(marker)}) &&
+      renderedMarkerRow === markerCell?.row,
+    ) || Boolean(
+      canvasPainted && cellSurface && surfaceCellWidth > 0 && surfaceCellHeight > 0 &&
+      markerCell && markerCell.column >= 0 && markerCell.column < cursor.columns &&
+      markerCell.row >= 0 && markerCell.row < cursor.rows,
+    );
+    return {
+      cols: cursor.columns,
+      rows: cursor.rows,
+      cursorColumn: cursor.column,
+      cursorRow: cursor.row,
+      markerColumn: markerCell?.column ?? null,
+      markerRow: markerCell?.row ?? null,
+      cursorLine: lines[cursor.row] ?? null,
+      authoritativeGrid: lines
+        .slice(stats.viewportY, stats.viewportY + cursor.rows)
+        .map((line) => line.trimEnd()),
+      renderedGrid,
+      renderedMarkerColumn: renderedMarkerColumn ?? markerCell?.column ?? null,
+      renderedMarkerRow: renderedMarkerRow >= 0 ? renderedMarkerRow : markerCell?.row ?? null,
+      renderedCell,
+      renderedCursor,
+      canvasDataLength,
+      rendered: Boolean(
+        screen && rect && rect.width > 0 && rect.height > 0 &&
+        screen.getClientRects().length > 0,
+      ),
+    };
+  `);
 }
 
 describe("pty session (real CLI)", () => {
@@ -1114,7 +1237,9 @@ describe("pty session (real CLI)", () => {
       `${baseUrl}/v1/tasks/${encodeURIComponent(sessionId)}/input`,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+        },
         body: JSON.stringify(source ? { input, source } : { input }),
       },
     );
@@ -1401,8 +1526,8 @@ describe("pty session (real CLI)", () => {
     const liveMarker = `KLIVE_${randomUUID().replaceAll("-", "")}`;
     const afterDetachMarker = `KAFTER_${randomUUID().replaceAll("-", "")}`;
     const script = [
-      `printf '${readyMarker}\\n'`,
-      "while IFS= read -r line; do case \"$line\" in SIZE:*) token=\"${line#SIZE:}\"; printf 'SIZE:%s:' \"$token\"; stty size | awk '{printf \"%sx%s\\\\n\", $2, $1}' ;; *) printf 'ECHO:%s\\n' \"$line\" ;; esac; done",
+      `printf '${readyMarker}\\nINPUT:'`,
+      "while IFS= read -r line; do case \"$line\" in SIZE:*) token=\"${line#SIZE:}\"; printf 'SIZE:%s:' \"$token\"; stty size | awk '{printf \"%sx%s\\n\", $2, $1}' ;; *) printf 'ECHO:%s\\n' \"$line\" ;; esac; printf 'INPUT:'; done",
     ].join("; ");
 
     await execDb(
@@ -1422,6 +1547,7 @@ describe("pty session (real CLI)", () => {
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, deterministicSessionId);
     await waitForCurrentItemId(client, deterministicSessionId);
+    await waitForFocusedTerminalReady(client, deterministicSessionId);
     await waitForTerminalBufferText(client, deterministicSessionId, readyMarker, 15_000);
 
     const initialHandles = await getWindowHandles(client);
@@ -1433,6 +1559,16 @@ describe("pty session (real CLI)", () => {
     const sourceSize = await probePtySize(client, deterministicSessionId, "KSOURCE_SIZE");
     expect(sourceSize.cols).toBeGreaterThan(80);
     expect(sourceSize.rows).toBeGreaterThan(24);
+    const sourceRenderBeforeFollower = await readRenderedTerminalState(
+      client,
+      deterministicSessionId,
+      readyMarker,
+    );
+    expect(sourceRenderBeforeFollower.rendered).toBe(true);
+    expect(sourceRenderBeforeFollower.renderedCell, JSON.stringify(sourceRenderBeforeFollower)).toBe(true);
+    expect(sourceRenderBeforeFollower.renderedCursor, JSON.stringify(sourceRenderBeforeFollower)).toBe(true);
+    expect(sourceRenderBeforeFollower.markerColumn).not.toBeNull();
+    expect(sourceRenderBeforeFollower.markerRow).not.toBeNull();
 
     await client.executeAsync(
       `const cb = arguments[arguments.length - 1];
@@ -1451,35 +1587,103 @@ describe("pty session (real CLI)", () => {
     expect(secondHandle).toBeTruthy();
 
     await switchToWindow(client, secondHandle ?? "");
-    await setWindowRect(client, { width: 800, height: 600, x: 80, y: 80 });
+    // Keep the two real windows side-by-side. An overlapping secondary window
+    // can occlude the owner's WebGL surface and make a blank screenshot look
+    // like a rendering failure while the owner is actually covered.
+    await setWindowRect(client, { width: 800, height: 600, x: 1450, y: 80 });
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, deterministicSessionId);
     await waitForCurrentItemId(client, deterministicSessionId);
     await waitForTerminalBufferText(client, deterministicSessionId, readyMarker, 15_000);
-    await setWindowRect(client, { width: 800, height: 600, x: 80, y: 80 });
+    await setWindowRect(client, { width: 800, height: 600, x: 1450, y: 80 });
     await sleep(1_000);
 
     await switchToWindow(client, sourceHandle);
     await client.waitForAppReady();
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, deterministicSessionId);
     await waitForFocusedTerminalReady(client, deterministicSessionId);
-    const sharedSize = await waitForPtySizeDifferentFrom(
+    await focusTerminalWindow(client);
+    const sharedSize = await waitForPtySize(
       client,
       deterministicSessionId,
       sourceSize,
       10_000,
     );
-    expect(sharedSize.cols).toBeLessThanOrEqual(sourceSize.cols);
-    expect(sharedSize.rows).toBeLessThanOrEqual(sourceSize.rows);
-    expect(samePtySize(sharedSize, sourceSize)).toBe(false);
+    expect(sharedSize).toEqual(sourceSize);
 
     await sendKeysToActiveTerminal(client, liveMarker);
     await client.pressKey("\uE007");
     await waitForTerminalBufferText(client, deterministicSessionId, `ECHO:${liveMarker}`, 10_000);
+    const sourceRenderAfterOutput = await readRenderedTerminalState(
+      client,
+      deterministicSessionId,
+      liveMarker,
+    );
+    expect(sourceRenderAfterOutput.rendered).toBe(true);
+    expect(sourceRenderAfterOutput.renderedCell).toBe(true);
+    expect(sourceRenderAfterOutput.renderedCursor).toBe(true);
+    expect(sourceRenderAfterOutput.markerColumn).not.toBeNull();
+    expect(sourceRenderAfterOutput.markerRow).not.toBeNull();
+    expect(sourceRenderAfterOutput.renderedMarkerColumn).toBeGreaterThan(5);
+    expect(sourceRenderAfterOutput.renderedMarkerRow).toBe(sourceRenderAfterOutput.markerRow);
+    expect(sourceRenderAfterOutput.cursorLine).toBe("INPUT:");
+    const screenshotDir = process.env.KANNA_E2E_SCREENSHOT_DIR;
+    if (screenshotDir) {
+      await mkdir(screenshotDir, { recursive: true });
+      await client.screenshot(`${screenshotDir}/local-window-owner-wide.png`);
+    }
 
     await switchToWindow(client, secondHandle ?? "");
     await client.waitForAppReady();
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, deterministicSessionId);
     await waitForFocusedTerminalReady(client, deterministicSessionId);
+    await focusTerminalWindow(client);
     await waitForTerminalBufferText(client, deterministicSessionId, `ECHO:${liveMarker}`, 10_000);
+    let latestComparison: {
+      source: RenderedTerminalState;
+      follower: RenderedTerminalState;
+    } | null = null;
+    try {
+      await expect.poll(
+        async () => {
+          const source = await switchToWindow(client, sourceHandle)
+            .then(() => readRenderedTerminalState(client, deterministicSessionId, liveMarker));
+          const follower = await switchToWindow(client, secondHandle ?? "")
+            .then(() => readRenderedTerminalState(client, deterministicSessionId, liveMarker));
+          latestComparison = { source, follower };
+          return JSON.stringify(comparableRenderedTerminalState(follower)) ===
+            JSON.stringify(comparableRenderedTerminalState(source));
+        },
+        { timeout: 10_000, interval: 100 },
+      ).toBe(true);
+    } catch (error: unknown) {
+      throw new Error(
+        `local viewer render state did not converge: ${JSON.stringify(latestComparison)}`,
+        { cause: error },
+      );
+    }
+    await switchToWindow(client, secondHandle ?? "");
+    const followerRender = await readRenderedTerminalState(
+      client,
+      deterministicSessionId,
+      liveMarker,
+    );
+    expect(comparableRenderedTerminalState(followerRender)).toEqual(
+      comparableRenderedTerminalState(sourceRenderAfterOutput),
+    );
+    expect(followerRender.rendered).toBe(true);
+    expect(followerRender.renderedCell).toBe(true);
+    expect(followerRender.renderedCursor).toBe(true);
+    expect(followerRender.renderedMarkerColumn).toBeGreaterThan(5);
+    expect(followerRender.renderedMarkerRow).toBe(followerRender.markerRow);
+    expect(followerRender.cursorLine).toBe("INPUT:");
+    if (screenshotDir) {
+      await client.screenshot(`${screenshotDir}/local-window-follower-narrow.png`);
+    }
 
     await detachTerminalStream(client, deterministicSessionId);
 

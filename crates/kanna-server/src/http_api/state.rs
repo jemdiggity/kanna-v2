@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
 
 type SingletonOwnerObservations =
     HashMap<(String, String), HashMap<String, Vec<ObservedSingletonTask>>>;
@@ -21,6 +21,12 @@ type SingletonOwnerObservations =
 pub(crate) struct ObservedSingletonTask {
     pub task_id: String,
     pub local_repo_id: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalGeometryCapability {
+    pub(crate) daemon_pid: u32,
+    pub(crate) supported: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +56,15 @@ pub struct AppState {
     pub(crate) companion_resources: crate::ksp::CompanionResources,
     pub(crate) terminal_taps: crate::ksp::TerminalTapRegistry,
     pub(crate) agent_histories: crate::ksp::AgentHistoryRegistry,
+    /// Capability negotiated with the daemon generation currently serving the
+    /// server. The generation and result are published together so a KSP auth
+    /// never observes a worker's transient probe state.
+    pub(crate) terminal_geometry_capability: Arc<StdMutex<TerminalGeometryCapability>>,
+    /// Changes whenever the serving daemon generation or its geometry verdict
+    /// changes. KSP connections use this to retire an auth negotiated against
+    /// the previous generation instead of carrying stale authority through a
+    /// replacement probe.
+    pub(crate) terminal_geometry_changed: Arc<watch::Sender<()>>,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     pub(super) repo_checkouts: Arc<StdMutex<HashMap<String, RepoCheckoutOperation>>>,
@@ -362,6 +377,7 @@ impl AppState {
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
             .join(".kanna")
             .join("repos");
+        let (terminal_geometry_changed, _) = watch::channel(());
         Self {
             config,
             local_task_events_token,
@@ -378,6 +394,16 @@ impl AppState {
             companion_resources: crate::ksp::CompanionResources::default(),
             terminal_taps: crate::ksp::TerminalTapRegistry::default(),
             agent_histories: crate::ksp::AgentHistoryRegistry::default(),
+            terminal_geometry_capability: Arc::new(StdMutex::new(TerminalGeometryCapability {
+                // Test state starts enabled, and a real daemon PID is always
+                // non-zero. The value is replaced before production auth.
+                daemon_pid: 1,
+                // The listener is not started until runtime has probed the
+                // real daemon. Unit-test connections retain the old test-only
+                // enabled default until a generation is installed.
+                supported: cfg!(test),
+            })),
+            terminal_geometry_changed: Arc::new(terminal_geometry_changed),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             repo_checkouts: Arc::new(StdMutex::new(HashMap::new())),
@@ -425,6 +451,58 @@ impl AppState {
 
     pub fn subscribe_state_changes(&self) -> broadcast::Receiver<ServerFrame> {
         self.state_changes.subscribe()
+    }
+
+    pub(crate) fn terminal_geometry_supported(&self) -> bool {
+        let capability = self.terminal_geometry_capability();
+        capability.daemon_pid != 0 && capability.supported
+    }
+
+    pub(crate) fn terminal_geometry_capability(&self) -> TerminalGeometryCapability {
+        let capability = self
+            .terminal_geometry_capability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .to_owned();
+        capability
+    }
+
+    pub(crate) fn subscribe_terminal_geometry_changes(&self) -> watch::Receiver<()> {
+        self.terminal_geometry_changed.subscribe()
+    }
+
+    pub(crate) fn set_terminal_geometry_capability(&self, daemon_pid: u32, supported: bool) {
+        let mut capability = self
+            .terminal_geometry_capability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next = TerminalGeometryCapability {
+            daemon_pid,
+            supported,
+        };
+        if *capability == next {
+            return;
+        }
+        *capability = next;
+        let _ = self.terminal_geometry_changed.send(());
+    }
+
+    pub(crate) fn invalidate_terminal_geometry_capability(&self, daemon_pid: u32) {
+        let mut capability = self
+            .terminal_geometry_capability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if capability.daemon_pid != daemon_pid {
+            return;
+        }
+        if !capability.supported && capability.daemon_pid == 0 {
+            return;
+        }
+        *capability = TerminalGeometryCapability {
+            daemon_pid: 0,
+            supported: false,
+        };
+        let _ = self.terminal_geometry_changed.send(());
     }
 
     pub fn publish_state_changed(&self, scope: StateChangeScope) {

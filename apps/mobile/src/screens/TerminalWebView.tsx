@@ -92,10 +92,13 @@ interface PendingTerminalState {
 interface TerminalInspection {
   byteCount: number;
   cols: number | null;
+  cursorColumn?: number | null;
+  cursorRow?: number | null;
   frameCount: number;
   mentionedFiles?: TerminalFileMentionHistory;
   rows: number | null;
   text: string;
+  visibleRows?: string[];
 }
 
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<

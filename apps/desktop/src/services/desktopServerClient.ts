@@ -291,6 +291,8 @@ export interface CreateDesktopTaskRequest {
   agent?: string;
   agentProvider?: string;
   agentType?: string;
+  terminalCols?: number;
+  terminalRows?: number;
   model?: string;
   effort?: string;
   permissionMode?: string;

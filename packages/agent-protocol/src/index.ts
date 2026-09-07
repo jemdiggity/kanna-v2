@@ -25,6 +25,7 @@ export type { StreamKind } from "./generated/StreamKind";
 export type { TermResumePosition } from "./generated/TermResumePosition";
 export type { TurnStats } from "./generated/TurnStats";
 export type { TurnStatus } from "./generated/TurnStatus";
+export type { TerminalViewerRole } from "./generated/TerminalViewerRole";
 export {
   AGENT_PROVIDERS,
   AGENT_PROVIDER_SPECS,

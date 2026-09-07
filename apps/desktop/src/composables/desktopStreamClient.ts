@@ -45,6 +45,7 @@ export async function getSharedStreamClient(): Promise<StreamClient> {
       // same loopback port — with the local control credential in the first
       // `auth` frame. See `crates/kanna-server/src/http_api/ksp.rs`.
       credentialProvider: (forceRefresh) => localControlCredential(forceRefresh),
+      terminalViewerRole: "local",
       onConnectionChange: notifyConnectionListeners,
       frameDecoder: createDesktopStreamFrameDecoder(),
     });

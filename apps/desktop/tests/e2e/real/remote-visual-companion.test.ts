@@ -368,17 +368,20 @@ async function ownerTerminalDimensions(
   return { cols: snapshot.cols, rows: snapshot.rows };
 }
 
-async function createFullscreenOwnerTask(): Promise<{
+async function createFullscreenOwnerTask(options: {
+  keepOwnerAttached?: boolean;
+} = {}): Promise<{
   taskId: string;
   prompt: string;
 }> {
-  const taskId = `remote-fullscreen-${randomUUID()}`;
+  let taskId = `remote-fullscreen-${randomUUID()}`;
   const prompt = `Remote full-screen TUI ${randomUUID()}`;
   const script = [
     "use Errno qw(EINTR);",
     "select(STDOUT); $| = 1;",
     "system('stty raw -echo');",
     "my $stream = 'REMOTE_TUI_STREAM_WAITING';",
+    "my $typed = '';",
     "sub draw_screen {",
     "  my $size = `stty size`;",
     "  $size =~ s/\\s+$//;",
@@ -388,8 +391,9 @@ async function createFullscreenOwnerTask(): Promise<{
     "  print qq{\\e[1;31mREMOTE_TUI_TOP:${cols}x${rows}\\e[0m};",
     "  print qq{\\e[2;5H\\e[7mREMOTE_TUI_ATTR\\e[0m};",
     "  print qq{\\e[4;3H$stream};",
+    "  print qq{\\e[5;3HINPUT:$typed};",
     "  print qq{\\e[${rows};1HREMOTE_TUI_BOTTOM};",
-    "  print qq{\\e[3;7H};",
+    "  if ($typed eq '') { print qq{\\e[3;7H}; } else { print qq{\\e[5;10H}; }",
     "}",
     "$SIG{WINCH} = sub { draw_screen(); };",
     "draw_screen();",
@@ -401,25 +405,50 @@ async function createFullscreenOwnerTask(): Promise<{
     "    $stream = qq{REMOTE_TUI_STREAM_界};",
     "    draw_screen();",
     "  }",
+    "  if (index($chunk, 'x') >= 0) {",
+    "    $typed = 'x';",
+    "    draw_screen();",
+    "  }",
     "}",
     "print qq{\\e[?2004l\\e[?1049l};",
   ].join("\n");
 
-  await execDb(
-    primary,
-    "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-    [taskId, primaryRepoId, prompt, "in progress", "pty"],
-  );
-  await tauriInvoke(primary, "spawn_session", {
-    sessionId: taskId,
-    cwd: fixtureRepoPath,
-    executable: "/usr/bin/perl",
-    args: ["-e", script],
-    env: { TERM: "xterm-256color" },
-    cols: 80,
-    rows: 24,
+  const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+  const setupCommand = `/usr/bin/perl -e ${shellQuote(script)}`;
+  // Give the owning app a desktop-sized CSS viewport before task creation so
+  // its first local registration is measured from the wide layout.
+  await primary.setWindowRect({ width: 2200, height: 1200, x: 40, y: 40 });
+  const { baseUrl } = await resolveAppKannaServer(primary);
+  const response = await localProcessFetch(`${baseUrl}/v1/tasks`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      repoId: primaryRepoId,
+      prompt,
+      displayName: "Remote full-screen TUI fixture",
+      baseRef: "origin/main",
+      agentProvider: "codex",
+      agentType: "pty",
+      terminalCols: 140,
+      terminalRows: 50,
+      setupCmds: [setupCommand],
+    }),
   });
+  if (!response.ok) {
+    throw new Error(`full-screen fixture task creation failed: ${response.status} ${await response.text()}`);
+  }
+  const created = await response.json() as { taskId?: unknown };
+  if (typeof created.taskId !== "string") {
+    throw new Error(`full-screen fixture task creation returned no task id: ${JSON.stringify(created)}`);
+  }
+  taskId = created.taskId;
   await callVueMethod(primary, "loadItems", primaryRepoId);
+  // WebDriver reports native points here; on the Retina host this produces a
+  // desktop-sized CSS viewport and keeps the local TerminalView in a real
+  // vertical flex layout rather than the narrow responsive shell.
+  await primary.setWindowRect({ width: 2200, height: 1200, x: 40, y: 40 });
   await expect.poll(
     async () => (await tauriInvoke(
       primary,
@@ -428,17 +457,392 @@ async function createFullscreenOwnerTask(): Promise<{
     ) as { serialized?: string } | null)?.serialized ?? "",
     { timeout: 30_000, interval: 100 },
   ).toContain("REMOTE_TUI_BOTTOM");
-  // `loadItems` may restore a newly inserted task when no older task is
-  // selected. Detach only in that case; in the full suite the companion task
-  // remains selected and this raw fixture never creates a local xterm.
-  await sleep(250);
-  await primary.executeSync(`
-    const store = window.__KANNA_E2E__.setupState.store;
-    if (store.selectedItemId === ${JSON.stringify(taskId)}) {
-      store.selectedItemId = null;
+  if (!options.keepOwnerAttached) {
+    await expect.poll(
+      async () => (await tauriInvoke(
+        primary,
+        "get_session_recovery_state",
+        { sessionId: taskId },
+      ) as { serialized?: string } | null)?.serialized ?? "",
+      { timeout: 30_000, interval: 100 },
+    ).toContain("REMOTE_TUI_TOP:140x50");
+  }
+  if (options.keepOwnerAttached) {
+    const selectionDeadline = Date.now() + 30_000;
+    let selectionDiagnostics: unknown = null;
+    while (Date.now() < selectionDeadline) {
+      await callVueMethod(primary, "store.selectItem", taskId);
+      await waitForTerminalLine(primary, taskId, "REMOTE_TUI_BOTTOM", 1_000).catch(() => undefined);
+      selectionDiagnostics = await primary.executeSync(`
+        const ctx = window.__KANNA_E2E__.setupState;
+        const read = (value) => value?.__v_isRef ? value.value : value;
+        const container = document.querySelector(".main-panel .terminal-container");
+        const rect = container?.getBoundingClientRect();
+        return {
+        selectedItemId: read(ctx.store.selectedItemId),
+        currentItemId: read(ctx.store.currentItem)?.id ?? null,
+        currentSlot: read(ctx.store.currentTaskSlot)?.slot_id ?? null,
+        currentSlotState: read(ctx.store.currentTaskSlot)?.state ?? null,
+        currentSlotTaskId: read(ctx.store.currentTaskSlot)?.task_id ?? null,
+        currentSlotTaskType: read(ctx.store.currentTaskSlot)?.task?.agent_type ?? null,
+        mainPanelSlot: read(ctx.mainPanelUiSlot)?.state ?? null,
+        mainPanelSlotTaskId: read(ctx.mainPanelUiSlot)?.task_id ?? null,
+        cloudTask: read(ctx.mainPanelIsCloudTask) ?? null,
+        mainPanelItemId: read(ctx.mainPanelItem)?.id ?? null,
+        terminalSessionIds: window.__KANNA_E2E__?.terminalBuffers?.sessionIds?.() ?? [],
+        container: rect ? { width: rect.width, height: rect.height } : null,
+        mainColumn: (() => {
+          const main = document.querySelector(".main-column")?.getBoundingClientRect();
+          return main ? { width: main.width, height: main.height } : null;
+        })(),
+        app: (() => {
+          const app = document.querySelector(".app");
+          const rect = app?.getBoundingClientRect();
+          const style = app ? getComputedStyle(app) : null;
+          return rect && style ? {
+            width: rect.width,
+            height: rect.height,
+            display: style.display,
+            alignItems: style.alignItems,
+          } : null;
+        })(),
+      };
+      `);
+      if (
+        selectionDiagnostics?.currentItemId === taskId
+        && selectionDiagnostics?.currentSlotTaskId === taskId
+        && selectionDiagnostics?.terminalSessionIds?.includes(taskId)
+        && selectionDiagnostics?.container
+        && selectionDiagnostics.container.width > 0
+        && selectionDiagnostics.container.height > 0
+      ) break;
+      await callVueMethod(primary, "loadItems", primaryRepoId);
+      await sleep(250);
     }
-  `);
+    if (
+      selectionDiagnostics?.currentItemId !== taskId
+      || selectionDiagnostics?.currentSlotTaskId !== taskId
+      || !selectionDiagnostics?.terminalSessionIds?.includes(taskId)
+      || !selectionDiagnostics?.container
+      || selectionDiagnostics.container.width <= 0
+      || selectionDiagnostics.container.height <= 0
+    ) {
+      const screenshotDir = process.env.KANNA_E2E_SCREENSHOT_DIR;
+      if (screenshotDir) {
+        await mkdir(screenshotDir, { recursive: true });
+        await primary.screenshot(`${screenshotDir}/geometry-owner-setup.png`);
+      }
+      throw new Error(`local owner selection did not mount TerminalView: ${JSON.stringify(selectionDiagnostics)}`);
+    }
+    // Resize after the local terminal is mounted. This mirrors a real owner
+    // window being resized while its session is visible and lets the
+    // ResizeObserver proposal reach the daemon before the follower attaches.
+    // WebDriver reports native points on the Retina host. 2200x1200 keeps
+    // the owner in the desktop layout and leaves the main terminal wide
+    // enough to exercise the source-window side of the incident.
+    await primary.setWindowRect({ width: 2200, height: 1200, x: 40, y: 40 });
+    await sleep(1_000);
+    await waitForTerminalLine(primary, taskId, "REMOTE_TUI_TOP:");
+    await sleep(1_000);
+    const setupDiagnostics = await primary.executeSync(`
+      const terminal = window.__KANNA_E2E__?.terminalBuffers?.cursor(${JSON.stringify(taskId)});
+      const container = document.querySelector(".main-panel .terminal-container");
+      const rect = container?.getBoundingClientRect();
+      return {
+        currentItemId: window.__KANNA_E2E__.setupState.currentItem?.id ?? null,
+        terminal,
+        container: rect ? { width: rect.width, height: rect.height } : null,
+        window: { width: window.innerWidth, height: window.innerHeight },
+      };
+    `);
+    const screenshotDir = process.env.KANNA_E2E_SCREENSHOT_DIR;
+    if (screenshotDir) {
+      await mkdir(screenshotDir, { recursive: true });
+      await primary.screenshot(`${screenshotDir}/geometry-owner-setup.png`);
+    }
+    if (
+      !setupDiagnostics?.container
+      || setupDiagnostics.container.width <= 0
+      || setupDiagnostics.container.height <= 0
+    ) {
+      throw new Error(`local owner terminal is not visible after selection: ${JSON.stringify(setupDiagnostics)}`);
+    }
+    return { taskId, prompt };
+  }
+  await sleep(250);
   return { taskId, prompt };
+}
+
+async function waitForTerminalLine(
+  client: WebDriverClient,
+  taskId: string,
+  expected: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  await expect.poll(
+    () => client.executeSync<boolean>(`
+      const buffers = window.__KANNA_E2E__?.terminalBuffers;
+      return buffers?.lines(${JSON.stringify(taskId)})
+        .some((line) => line.includes(${JSON.stringify(expected)})) ?? false;
+    `),
+    { timeout: timeoutMs, interval: 100 },
+  ).toBe(true);
+}
+
+interface RenderedTerminalState {
+  cols: number;
+  rows: number;
+  cursorColumn: number;
+  cursorRow: number;
+  markerColumn: number | null;
+  markerRow: number | null;
+  rendered: boolean;
+  renderedCell: boolean;
+  renderedCursor: boolean;
+  canvasDataLength: number;
+  debug?: {
+    rowCount: number;
+    rowText: string | null;
+    cursorRect: { width: number; height: number } | null;
+    screenRect: { width: number; height: number } | null;
+  };
+}
+
+function comparableRenderedTerminalState(state: RenderedTerminalState) {
+  return {
+    cols: state.cols,
+    rows: state.rows,
+    cursorColumn: state.cursorColumn,
+    cursorRow: state.cursorRow,
+    markerColumn: state.markerColumn,
+    markerRow: state.markerRow,
+  };
+}
+
+async function readRenderedTerminal(
+  client: WebDriverClient,
+  taskId: string,
+  marker: string,
+): Promise<RenderedTerminalState> {
+  return client.executeSync<RenderedTerminalState>(`
+    const hook = window.__KANNA_E2E__?.terminalBuffers;
+    if (!hook) throw new Error("terminal buffer hook unavailable");
+    const remoteBufferId = "remote:" + ${JSON.stringify(taskId)};
+    const bufferId = hook.sessionIds().includes(remoteBufferId)
+      ? remoteBufferId
+      : ${JSON.stringify(taskId)};
+    const cursor = hook.cursor(bufferId);
+    const lines = hook.lines(bufferId);
+    const markerLine = lines.findIndex((line) =>
+      line.includes(${JSON.stringify(marker)}),
+    );
+    const markerColumn = markerLine >= 0
+      ? lines[markerLine].indexOf(${JSON.stringify(marker)}) +
+        Math.floor(${JSON.stringify(marker)}.length / 2)
+      : null;
+    const stats = hook.stats(bufferId);
+    const terminalElement = hook.element(bufferId);
+    const host = terminalElement?.closest(".cloud-terminal-cache-entry")
+      ?? terminalElement;
+    const rect = host?.getBoundingClientRect();
+    const screen = host?.querySelector(".xterm-screen");
+    const rowsElement = screen?.querySelector(".xterm-rows");
+    const screenRect = screen?.getBoundingClientRect();
+    const canvasDataLength = Math.max(0, ...Array.from(
+      screen?.querySelectorAll("canvas") ?? [],
+    ).filter((candidate) =>
+      candidate instanceof HTMLCanvasElement,
+    ).map((candidate) => {
+      try {
+        return candidate.toDataURL().length;
+      } catch {
+        return 0;
+      }
+    }));
+    const canvas = Array.from(screen?.querySelectorAll("canvas") ?? [])
+      .find((candidate) => candidate instanceof HTMLCanvasElement);
+    const canvasRect = canvas?.getBoundingClientRect();
+    const canvasPainted = canvasDataLength > 1000 && Boolean(
+      canvasRect && canvasRect.width > 0 && canvasRect.height > 0,
+    );
+    const row = markerLine >= 0
+      ? rowsElement?.querySelectorAll(":scope > div")[markerLine - stats.viewportY]
+      : undefined;
+    const rowRect = row?.getBoundingClientRect();
+    const cursorElement = screen?.querySelector(".xterm-cursor");
+    const cursorRect = cursorElement?.getBoundingClientRect();
+    const cellSurface = canvasRect && canvasPainted
+      ? canvasRect
+      : screenRect;
+    const cellWidth = cellSurface && cursor.columns > 0 ? cellSurface.width / cursor.columns : 0;
+    const cellHeight = cellSurface && cursor.rows > 0 ? cellSurface.height / cursor.rows : 0;
+    const renderedCursor = Boolean(
+      canvasPainted
+        ? cellSurface && cellWidth > 0 && cellHeight > 0
+          && cursor.column >= 0 && cursor.column < cursor.columns
+          && cursor.row >= 0 && cursor.row < cursor.rows
+        : cursorRect && cursorRect.width > 0 && cursorRect.height > 0,
+    );
+    const renderedCell = Boolean(
+      canvasPainted
+        ? cellSurface && cellWidth > 0 && cellHeight > 0
+          && markerColumn !== null && markerColumn >= 0 && markerColumn < cursor.columns
+          && markerLine - stats.viewportY >= 0 && markerLine - stats.viewportY < cursor.rows
+        : rowRect && rowRect.width > 0 && rowRect.height > 0
+          && row?.textContent?.includes(${JSON.stringify(marker)}),
+    );
+    return {
+      cols: cursor.columns,
+      rows: cursor.rows,
+      cursorColumn: cursor.column,
+      cursorRow: cursor.row,
+      markerColumn,
+      markerRow: markerLine >= 0 ? markerLine - stats.viewportY : null,
+      renderedCell,
+      renderedCursor,
+      canvasDataLength,
+      rendered: Boolean(
+        host && rect && rect.width > 0 && rect.height > 0 &&
+        host.getClientRects().length > 0,
+      ),
+      debug: {
+        rowCount: rowsElement?.querySelectorAll(":scope > div").length ?? 0,
+        rowText: row?.textContent ?? null,
+        cursorRect: cursorRect ? { width: cursorRect.width, height: cursorRect.height } : null,
+        screenRect: screenRect ? { width: screenRect.width, height: screenRect.height } : null,
+      },
+    };
+  `);
+}
+
+async function refreshRenderedTerminal(
+  client: WebDriverClient,
+  taskId: string,
+): Promise<void> {
+  await client.executeSync(`
+    window.__KANNA_E2E__?.terminalBuffers?.refresh(${JSON.stringify(taskId)});
+    const screen = document.querySelector(".main-panel .xterm-screen");
+    return Array.from(screen?.querySelectorAll("canvas") ?? []).map((canvas) => {
+      try {
+        return canvas.toDataURL().length;
+      } catch {
+        return 0;
+      }
+    });
+  `);
+  await sleep(500);
+}
+
+async function focusRenderedTerminal(client: WebDriverClient): Promise<void> {
+  await client.executeAsync(`
+    const callback = arguments[arguments.length - 1];
+    Promise.resolve(window.__TAURI_INTERNALS__?.invoke(
+      "plugin:window|set_focus",
+      { label: "main" },
+    )).then(() => callback("ok"), () => callback("unavailable"));
+  `);
+  await client.executeSync(`
+    window.focus();
+    const input = document.querySelector(
+      ".main-panel .terminal-container .xterm-helper-textarea",
+    );
+    if (input instanceof HTMLElement) input.focus();
+  `);
+  await sleep(250);
+}
+
+async function waitForRenderedTerminalEquality(
+  taskId: string,
+  marker: string,
+  expected: Partial<RenderedTerminalState> = {},
+): Promise<{
+  owner: RenderedTerminalState;
+  follower: RenderedTerminalState;
+  applied: TerminalDimensions;
+}> {
+  let latest: {
+    owner: RenderedTerminalState;
+    follower: RenderedTerminalState;
+    applied: TerminalDimensions;
+  } | null = null;
+  let latestError = "";
+  await expect.poll(
+    async () => {
+      try {
+        await refreshRenderedTerminal(primary, taskId);
+        await refreshRenderedTerminal(secondary, taskId);
+        const owner = await readRenderedTerminal(primary, taskId, marker);
+        const follower = await readRenderedTerminal(secondary, taskId, marker);
+        const applied = await ownerTerminalDimensions(taskId);
+        latest = { owner, follower, applied };
+        return applied.cols === owner.cols && applied.rows === owner.rows
+          && owner.rendered && follower.rendered
+          && owner.renderedCell && follower.renderedCell
+          && owner.renderedCursor && follower.renderedCursor
+          && JSON.stringify({
+            cols: owner.cols,
+            rows: owner.rows,
+            cursorColumn: owner.cursorColumn,
+            cursorRow: owner.cursorRow,
+            markerColumn: owner.markerColumn,
+            markerRow: owner.markerRow,
+          }) === JSON.stringify({
+            cols: follower.cols,
+            rows: follower.rows,
+            cursorColumn: follower.cursorColumn,
+            cursorRow: follower.cursorRow,
+            markerColumn: follower.markerColumn,
+            markerRow: follower.markerRow,
+          })
+          && Object.entries(expected).every(([key, value]) =>
+            owner[key as keyof RenderedTerminalState] === value,
+          );
+      } catch (error: unknown) {
+        latestError = error instanceof Error ? error.message : String(error);
+        return false;
+      }
+    },
+    { timeout: 15_000, interval: 100 },
+  ).toBe(true);
+  if (!latest) {
+    throw new Error(`rendered terminal equality produced no state: ${latestError}`);
+  }
+  return latest;
+}
+
+async function waitForRenderedTerminal(
+  client: WebDriverClient,
+  taskId: string,
+  marker: string,
+): Promise<RenderedTerminalState> {
+  let latest: RenderedTerminalState | null = null;
+  let latestError = "";
+  try {
+    await expect.poll(
+      async () => {
+        try {
+          latest = await readRenderedTerminal(client, taskId, marker);
+          return latest.markerColumn !== null
+            && latest.rendered
+            && latest.renderedCell
+            && latest.renderedCursor;
+        } catch (error: unknown) {
+          latestError = error instanceof Error ? error.message : String(error);
+          return false;
+        }
+      },
+      { timeout: 10_000, interval: 100 },
+    ).toBe(true);
+  } catch (error: unknown) {
+    throw new Error(
+      `rendered terminal did not paint: ${JSON.stringify({ latest, latestError })}`,
+      { cause: error },
+    );
+  }
+  if (!latest) {
+    throw new Error(`rendered terminal produced no state: ${latestError}`);
+  }
+  return latest;
 }
 
 async function assertFullscreenRemoteTerminal(taskId: string): Promise<void> {
@@ -490,11 +894,29 @@ async function assertFullscreenRemoteTerminal(taskId: string): Promise<void> {
     inverse: expect.objectContaining({ bold: false, inverse: true }),
   });
 
+  const cursor = await secondary.executeSync<{
+    column: number;
+    row: number;
+    visible: boolean;
+  }>(`
+    return window.__KANNA_E2E__?.terminalBuffers?.cursor(${JSON.stringify(taskId)}) ?? null;
+  `);
+  expect(cursor).toEqual(expect.objectContaining({
+    column: 6,
+    row: 2,
+    visible: true,
+  }));
+
   await expect.poll(
-    () => secondary.executeSync<boolean>(`
-      const entry = Array.from(document.querySelectorAll(
-        ".main-panel .cloud-terminal-cache-entry"
-      )).find((candidate) => candidate.getClientRects().length > 0);
+    async () => {
+      await refreshRenderedTerminal(secondary, taskId);
+      return secondary.executeSync<boolean>(`
+      const hook = window.__KANNA_E2E__?.terminalBuffers;
+      const remoteBufferId = "remote:" + ${JSON.stringify(taskId)};
+      const bufferId = hook?.sessionIds().includes(remoteBufferId)
+        ? remoteBufferId
+        : ${JSON.stringify(taskId)};
+      const entry = hook?.element(bufferId);
       const canvasPainted = Array.from(
         entry?.querySelectorAll(".xterm-screen canvas") ?? []
       ).some((canvas) => {
@@ -509,7 +931,7 @@ async function assertFullscreenRemoteTerminal(taskId: string): Promise<void> {
           style.opacity !== "0";
       });
       if (canvasPainted) return true;
-      const rows = Array.from(entry?.querySelectorAll(".xterm-rows > div") ?? []);
+      const rows = Array.from(document.querySelectorAll(".xterm-rows > div"));
       const top = rows.find((row) => row.textContent?.includes("REMOTE_TUI_TOP:"));
       if (!(top instanceof HTMLElement) || top.getClientRects().length === 0) {
         return false;
@@ -525,7 +947,8 @@ async function assertFullscreenRemoteTerminal(taskId: string): Promise<void> {
           style.opacity !== "0" &&
           style.color !== "rgba(0, 0, 0, 0)";
       });
-    `),
+    `);
+    },
     { timeout: 10_000, interval: 100 },
   ).toBe(true);
 }
@@ -542,13 +965,19 @@ async function assertRemoteTerminalDimensionsPropagated(taskId: string): Promise
         return window.__KANNA_E2E__?.terminalBuffers
           ?.lines(${JSON.stringify(taskId)})[0] ?? null;
       `);
-      return owner.cols === visible.cols &&
-        owner.rows === visible.rows &&
-        (owner.cols !== 80 || owner.rows !== 24) &&
-        top === "REMOTE_TUI_TOP:" + owner.cols + "x" + owner.rows;
+      const state = {
+        equal: owner.cols === visible.cols &&
+          owner.rows === visible.rows &&
+          (owner.cols !== 80 || owner.rows !== 24) &&
+          top === "REMOTE_TUI_TOP:" + owner.cols + "x" + owner.rows,
+        owner,
+        visible,
+        top,
+      };
+      return state.equal ? "ok" : JSON.stringify(state);
     },
     { timeout: 15_000, interval: 100 },
-  ).toBe(true);
+  ).toBe("ok");
 }
 
 async function sendRemoteTerminalInput(taskId: string, data: string): Promise<void> {
@@ -556,6 +985,18 @@ async function sendRemoteTerminalInput(taskId: string, data: string): Promise<vo
     window.__KANNA_E2E__?.terminalBuffers
       ?.input(${JSON.stringify(taskId)}, ${JSON.stringify(data)});
   `);
+}
+
+async function typeRemoteTerminalInput(taskId: string, data: string): Promise<void> {
+  // Exercise the real remote viewer input path after explicit takeover. The
+  // terminal buffer hook remains observation-only for this acceptance lane.
+  const selector = `.cloud-terminal-shell[data-owner-task-id="${taskId}"] .xterm-helper-textarea`;
+  const input = await secondary.waitForElement(selector, 5_000);
+  await secondary.executeSync(`
+    const input = document.querySelector(${JSON.stringify(selector)});
+    if (input instanceof HTMLElement) input.focus();
+  `);
+  await secondary.sendKeys(input, data);
 }
 
 async function assertRemoteDropRefused(taskId: string): Promise<void> {
@@ -735,7 +1176,10 @@ async function selectRemoteTask(input: {
         );
         return {
           renderedRowCount: rows.length,
-          status: document.querySelector(".cloud-terminal-shell")
+          status: document.querySelector(
+            ".cloud-terminal-shell[data-owner-task-id=" +
+            JSON.stringify(${JSON.stringify(input.owner.ownerTaskId)}) + "]"
+          )
             ?.getAttribute("data-status") ?? null,
           error: document.querySelector(".cloud-terminal-status")
             ?.textContent?.trim() ?? null,
@@ -1151,6 +1595,235 @@ describe("remote desktop visual companion", () => {
     await assertRemoteTerminalDimensionsPropagated(task.taskId);
     await assertFullscreenRemoteTerminal(task.taskId);
     await waitForRemoteTerminalLine(task.taskId, "  REMOTE_TUI_STREAM_界");
+  }, 180_000);
+
+  it("keeps a wide local owner and a narrow authenticated desktop follower on one rendered grid", async () => {
+    const task = await createFullscreenOwnerTask({ keepOwnerAttached: true });
+    const screenshotDir = process.env.KANNA_E2E_SCREENSHOT_DIR;
+    try {
+      // Establish the owner invariant before a second instance can affect the
+      // session. This distinguishes a local registration race from a remote
+      // follower accidentally sending a legacy resize.
+      const ownerBeforeFollower = await ownerTerminalDimensions(task.taskId);
+      expect(ownerBeforeFollower.cols).toBeGreaterThan(80);
+      expect(ownerBeforeFollower.rows).toBeGreaterThan(24);
+      const remote = await waitForRemoteTask({
+        prompt: task.prompt,
+        transport: "cloud",
+        expectedOwnerDesktopId: primaryDesktopId,
+        expectedOwnerTaskId: task.taskId,
+      });
+      await secondary.setWindowRect({ width: 1600, height: 900, x: 80, y: 80 });
+      await selectRemoteTask({ ...remote, prompt: task.prompt, transport: "cloud" });
+
+      await assertRemoteTerminalDimensionsPropagated(task.taskId);
+      await waitForTerminalLine(secondary, task.taskId, "REMOTE_TUI_STREAM_");
+      await focusRenderedTerminal(primary);
+      await focusRenderedTerminal(secondary);
+      await refreshRenderedTerminal(primary, task.taskId);
+      await refreshRenderedTerminal(secondary, task.taskId);
+      const wideOwnerDimensions = await ownerTerminalDimensions(task.taskId);
+      expect(wideOwnerDimensions.cols).toBeGreaterThan(80);
+      expect(wideOwnerDimensions.rows).toBeGreaterThan(24);
+
+      const ownerInitial = await waitForRenderedTerminal(
+        primary,
+        task.taskId,
+        "REMOTE_TUI_STREAM_",
+      );
+      const followerInitial = await waitForRenderedTerminal(
+        secondary,
+        task.taskId,
+        "REMOTE_TUI_STREAM_",
+      );
+      expect(ownerInitial.rendered).toBe(true);
+      expect(followerInitial.rendered).toBe(true);
+      expect(ownerInitial.renderedCell, JSON.stringify(ownerInitial)).toBe(true);
+      expect(followerInitial.renderedCell, JSON.stringify(followerInitial)).toBe(true);
+      expect(ownerInitial.renderedCursor).toBe(true);
+      expect(followerInitial.renderedCursor).toBe(true);
+      // The E2E renderer is intentionally DOM-backed so these checks prove
+      // that the visible row and cursor were painted, not just buffered.
+      expect(ownerInitial.canvasDataLength).toBe(0);
+      expect(followerInitial.canvasDataLength).toBe(0);
+      expect(comparableRenderedTerminalState(ownerInitial)).toEqual(
+        comparableRenderedTerminalState(followerInitial),
+      );
+      expect(ownerInitial.cols).toBe(wideOwnerDimensions.cols);
+      expect(ownerInitial.rows).toBe(wideOwnerDimensions.rows);
+      expect(ownerInitial.cursorColumn).toBe(6);
+      expect(ownerInitial.cursorRow).toBe(2);
+
+      if (screenshotDir) {
+        await mkdir(screenshotDir, { recursive: true });
+        await focusRenderedTerminal(secondary);
+        await refreshRenderedTerminal(primary, task.taskId);
+        await refreshRenderedTerminal(secondary, task.taskId);
+        await sleep(1_000);
+        await secondary.screenshot(`${screenshotDir}/geometry-follower-narrow.png`);
+        await focusRenderedTerminal(primary);
+        await sleep(1_000);
+        await primary.screenshot(`${screenshotDir}/geometry-owner-wide.png`);
+      }
+
+      // A changed follower viewport is presentation-only while the local
+      // owner remains the eligible controller.
+      await secondary.setWindowRect({ width: 1600, height: 800, x: 100, y: 100 });
+      await assertRemoteTerminalDimensionsPropagated(task.taskId);
+      expect(await ownerTerminalDimensions(task.taskId)).toEqual(wideOwnerDimensions);
+
+      const takeControl = await secondary.waitForText(
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
+        "Take terminal control",
+        10_000,
+      );
+      await secondary.click(takeControl);
+      await secondary.waitForText(
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
+        "Release terminal control",
+        10_000,
+      );
+      let takeoverDimensions = await ownerTerminalDimensions(task.taskId);
+      const takeoverDeadline = Date.now() + 10_000;
+      while (
+        takeoverDimensions.cols === wideOwnerDimensions.cols
+        && takeoverDimensions.rows === wideOwnerDimensions.rows
+        && Date.now() < takeoverDeadline
+      ) {
+        await sleep(100);
+        takeoverDimensions = await ownerTerminalDimensions(task.taskId);
+      }
+      if (
+        takeoverDimensions.cols === wideOwnerDimensions.cols
+        && takeoverDimensions.rows === wideOwnerDimensions.rows
+      ) {
+        const diagnostics = await secondary.executeSync(`
+          const shell = document.querySelector(
+            ".main-panel .cloud-terminal-shell[data-owner-task-id=\\"${task.taskId}\\"]"
+          );
+          const container = shell?.querySelector(".terminal-container");
+          const rect = container?.getBoundingClientRect();
+          return {
+            window: { width: window.innerWidth, height: window.innerHeight },
+            shell: shell?.getBoundingClientRect().toJSON?.() ?? null,
+            container: rect?.toJSON?.() ?? null,
+          };
+        `);
+        throw new Error(
+          `remote takeover did not apply its registered viewport: ${JSON.stringify({
+            wideOwnerDimensions,
+            takeoverDimensions,
+            diagnostics,
+          })}`,
+        );
+      }
+      expect(takeoverDimensions.cols).toBeLessThan(wideOwnerDimensions.cols);
+      expect(takeoverDimensions.rows).toBeLessThan(wideOwnerDimensions.rows);
+
+      await secondary.waitForElement(
+        ".main-panel .cloud-terminal-shell[data-status=\"live\"]",
+        10_000,
+      );
+      await typeRemoteTerminalInput(task.taskId, "x");
+      await waitForTerminalLine(primary, task.taskId, "INPUT:x");
+      await waitForTerminalLine(secondary, task.taskId, "INPUT:x");
+      const takeoverRendered = await waitForRenderedTerminalEquality(
+        task.taskId,
+        "INPUT:x",
+        { cursorColumn: 9, cursorRow: 4 },
+      );
+      const ownerAfterTakeover = takeoverRendered.owner;
+      const followerAfterTakeover = takeoverRendered.follower;
+      const appliedTakeoverDimensions = takeoverRendered.applied;
+      expect(ownerAfterTakeover.rendered).toBe(true);
+      expect(followerAfterTakeover.rendered).toBe(true);
+      expect(comparableRenderedTerminalState(ownerAfterTakeover)).toEqual(
+        comparableRenderedTerminalState(followerAfterTakeover),
+      );
+      expect(ownerAfterTakeover.cols).toBe(appliedTakeoverDimensions.cols);
+      expect(ownerAfterTakeover.rows).toBe(appliedTakeoverDimensions.rows);
+      expect(ownerAfterTakeover.cursorColumn).toBe(9);
+      expect(ownerAfterTakeover.cursorRow).toBe(4);
+      expect(ownerAfterTakeover.markerColumn).not.toBeNull();
+      expect(ownerAfterTakeover.markerRow).toBe(4);
+      if (screenshotDir) {
+        await focusRenderedTerminal(primary);
+        await refreshRenderedTerminal(primary, task.taskId);
+        await sleep(1_000);
+        await primary.screenshot(`${screenshotDir}/geometry-owner-takeover.png`);
+        await focusRenderedTerminal(secondary);
+        await refreshRenderedTerminal(secondary, task.taskId);
+        await sleep(1_000);
+        await secondary.screenshot(`${screenshotDir}/geometry-follower-takeover.png`);
+      }
+
+      const releaseControl = await secondary.waitForText(
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
+        "Release terminal control",
+        10_000,
+      );
+      await secondary.click(releaseControl);
+      await secondary.waitForText(
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
+        "Take terminal control",
+        10_000,
+      );
+      await assertRemoteTerminalDimensionsPropagated(task.taskId);
+      expect(await ownerTerminalDimensions(task.taskId)).toEqual(wideOwnerDimensions);
+      const ownerAfterRelease = await readRenderedTerminal(primary, task.taskId, "INPUT:x");
+      const followerAfterRelease = await readRenderedTerminal(secondary, task.taskId, "INPUT:x");
+      expect(comparableRenderedTerminalState(ownerAfterRelease)).toEqual(
+        comparableRenderedTerminalState(followerAfterRelease),
+      );
+      expect(ownerAfterRelease.cols).toBe(wideOwnerDimensions.cols);
+      expect(ownerAfterRelease.rows).toBe(wideOwnerDimensions.rows);
+
+      // Reload the independent secondary app to exercise the real relay
+      // attachment/reconnect path. The owner remains wide throughout.
+      await secondary.reload();
+      await secondary.setWindowRect({ width: 1600, height: 800, x: 100, y: 100 });
+      const reconnectedRemote = await waitForRemoteTask({
+        prompt: task.prompt,
+        transport: "cloud",
+        expectedOwnerDesktopId: primaryDesktopId,
+        expectedOwnerTaskId: task.taskId,
+      });
+      await selectRemoteTask({
+        ...reconnectedRemote,
+        prompt: task.prompt,
+        transport: "cloud",
+      });
+      await waitForTerminalLine(secondary, task.taskId, "INPUT:x");
+      await assertRemoteTerminalDimensionsPropagated(task.taskId);
+      const ownerAfterReconnect = await readRenderedTerminal(primary, task.taskId, "INPUT:x");
+      const followerAfterReconnect = await readRenderedTerminal(secondary, task.taskId, "INPUT:x");
+      expect(comparableRenderedTerminalState(ownerAfterReconnect)).toEqual(
+        comparableRenderedTerminalState(followerAfterReconnect),
+      );
+      expect(comparableRenderedTerminalState(ownerAfterReconnect)).toEqual(
+        comparableRenderedTerminalState(ownerAfterRelease),
+      );
+      expect(await ownerTerminalDimensions(task.taskId)).toEqual(wideOwnerDimensions);
+      if (screenshotDir) {
+        await focusRenderedTerminal(primary);
+        await refreshRenderedTerminal(primary, task.taskId);
+        await sleep(1_000);
+        await primary.screenshot(`${screenshotDir}/geometry-owner-after-reconnect.png`);
+        await focusRenderedTerminal(secondary);
+        await refreshRenderedTerminal(secondary, task.taskId);
+        await sleep(1_000);
+        await secondary.screenshot(`${screenshotDir}/geometry-follower-after-reconnect.png`);
+      }
+    } finally {
+      // The geometry journey deliberately narrows the follower. Restore the
+      // shared secondary instance before the subsequent paired-LAN journeys,
+      // whose task picker lives in the desktop sidebar.
+      await secondary.setWindowRect({ width: 3000, height: 1600, x: 80, y: 80 })
+        .catch(() => undefined);
+      await setSetupState(secondary, "maximized", false).catch(() => undefined);
+      await setSetupState(secondary, "sidebarHidden", false).catch(() => undefined);
+      await tauriInvoke(primary, "kill_session", { sessionId: task.taskId }).catch(() => undefined);
+    }
   }, 180_000);
 
   it("mirrors the paired LAN companion through the same external-browser bridge", async () => {
@@ -1618,7 +2291,9 @@ async function runCausalRemoteInputTest(): Promise<void> {
         `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/input`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+          },
           body: JSON.stringify({ input: managerInput }),
         },
       );

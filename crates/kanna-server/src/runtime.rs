@@ -96,6 +96,30 @@ async fn establish_protected_input_generation(
     }
 }
 
+/// Probe geometry support before the first KSP client is authenticated. The
+/// KSP capability is a server-to-daemon contract as well as a client claim;
+/// advertising it only after a terminal control socket exists would deadlock
+/// a new client because it correctly suppresses registration against an old
+/// owner. Use a separate connection so an old daemon closing on the unknown
+/// probe command cannot poison the protected-input generation connection.
+async fn establish_terminal_geometry_capability(config: &Config) -> bool {
+    let Ok(mut daemon) = crate::daemon_client::DaemonClient::connect(&config.daemon_dir).await
+    else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            daemon.send_command(&kanna_daemon::protocol::Command::NegotiateTerminalGeometry {
+                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+            }),
+        )
+        .await,
+        Ok(Ok(kanna_daemon::protocol::Event::TerminalGeometryReady { version }))
+            if version == kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION
+    )
+}
+
 /// Re-establish the contract on every *new* daemon generation, and only on a
 /// new one.
 ///
@@ -107,20 +131,33 @@ async fn establish_protected_input_generation(
 /// anything polling for it.
 async fn maintain_protected_input_generations(
     config: Config,
+    state: Arc<http_api::AppState>,
     mut daemon: crate::daemon_client::DaemonClient,
 ) {
     loop {
         let previous_pid = daemon.connected_pid();
         let ended = daemon.wait_until_disconnected().await;
+        // No KSP connection may continue to advertise the old generation's
+        // geometry authority while the successor is being probed. The state
+        // update also wakes active KSP handlers so they reconnect and
+        // authenticate against the successor's verdict.
+        state.invalidate_terminal_geometry_capability(previous_pid);
         log::info!(
             "daemon pid {previous_pid} ended its protected-input generation ({ended}); \
              re-establishing the policy on its successor"
         );
         daemon =
             establish_protected_input_generation(&config, ProtectedInputWait::SteadyState).await;
+        let daemon_pid = daemon.connected_pid();
         log::info!(
             "protected-input policy established on successor daemon pid {}",
-            daemon.connected_pid()
+            daemon_pid
+        );
+        let geometry_supported = establish_terminal_geometry_capability(&config).await;
+        state.set_terminal_geometry_capability(daemon_pid, geometry_supported);
+        log::info!(
+            "terminal geometry capability established on successor daemon pid {} (geometry_supported={geometry_supported})",
+            daemon_pid
         );
     }
 }
@@ -199,14 +236,20 @@ pub(crate) async fn run_server_services(
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
     let mut protected_input_daemon =
         establish_protected_input_generation(&config, ProtectedInputWait::Startup).await;
+    let daemon_pid = protected_input_daemon.connected_pid();
+    let geometry_supported = establish_terminal_geometry_capability(&config).await;
+    http_state.set_terminal_geometry_capability(daemon_pid, geometry_supported);
     crate::task_creator::reconcile_lifecycle_operations_on_startup(
         &mut protected_input_daemon,
         &config.db_path,
         &db,
     )
     .await;
-    let protected_input_maintenance =
-        maintain_protected_input_generations(config.clone(), protected_input_daemon);
+    let protected_input_maintenance = maintain_protected_input_generations(
+        config.clone(),
+        Arc::clone(&http_state),
+        protected_input_daemon,
+    );
     // The transfer engine is a peer of the LAN API, not a child of it: a
     // transfer must keep making progress whether or not anything is connected.
     //
@@ -254,6 +297,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             Arc,
         },
+        thread,
         time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::{
@@ -373,6 +417,29 @@ mod tests {
             ] if session_id == "pty-session"
         ));
         let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[test]
+    fn terminal_geometry_probe_publishes_generation_and_result_together() {
+        let config = daemon_only_config(&unique_path("geometry-capability", "dir"));
+        let state = Arc::new(http_api::AppState::new(config));
+        state.set_terminal_geometry_capability(2, true);
+
+        let writer_state = Arc::clone(&state);
+        let writer = thread::spawn(move || {
+            for daemon_pid in 3..10_000 {
+                writer_state
+                    .set_terminal_geometry_capability(daemon_pid, daemon_pid.is_multiple_of(2));
+            }
+        });
+        for _ in 0..10_000 {
+            let capability = state.terminal_geometry_capability();
+            assert_eq!(
+                capability.supported,
+                capability.daemon_pid.is_multiple_of(2)
+            );
+        }
+        writer.join().unwrap();
     }
 
     #[tokio::test]
@@ -709,12 +776,15 @@ mod tests {
         });
 
         let config = daemon_only_config(&daemon_dir);
+        let state = Arc::new(http_api::AppState::new(config.clone()));
         let daemon = super::establish_protected_input_generation(
             &config,
             super::ProtectedInputWait::Startup,
         )
         .await;
-        let maintenance = tokio::spawn(super::maintain_protected_input_generations(config, daemon));
+        let maintenance = tokio::spawn(super::maintain_protected_input_generations(
+            config, state, daemon,
+        ));
         // The clock is paused, so this is 10 minutes of the loop's own time —
         // more than thirty of the old spin's cycles — without 10 minutes of
         // wall clock.
@@ -768,17 +838,48 @@ mod tests {
             let _ = std::fs::remove_file(&successor_socket);
             let successor = UnixListener::bind(&successor_socket).unwrap();
             let (stream, _) = successor.accept().await.unwrap();
-            serve_generation_setup(stream, daemon_negotiations).await
+            let commands = serve_generation_setup(stream, Arc::clone(&daemon_negotiations)).await;
+            let (stream, _) = successor.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+                kanna_daemon::protocol::Command::NegotiateTerminalGeometry { version }
+                    if version == kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION
+            ));
+            write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(
+                            &kanna_daemon::protocol::Event::TerminalGeometryReady {
+                                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+                            }
+                        )
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            commands
         });
 
         let config = daemon_only_config(&daemon_dir);
+        let state = Arc::new(http_api::AppState::new(config.clone()));
         let daemon = super::establish_protected_input_generation(
             &config,
             super::ProtectedInputWait::Startup,
         )
         .await;
         assert_eq!(negotiations.load(Ordering::SeqCst), 1);
-        let maintenance = tokio::spawn(super::maintain_protected_input_generations(config, daemon));
+        let maintenance = tokio::spawn(super::maintain_protected_input_generations(
+            config,
+            Arc::clone(&state),
+            daemon,
+        ));
         retire_outgoing.send(()).unwrap();
 
         let successor_commands = tokio::time::timeout(Duration::from_secs(30), fake_daemons)
@@ -786,6 +887,10 @@ mod tests {
             .expect("the successor daemon was never negotiated with")
             .expect("successor fixture should not panic");
         assert_eq!(negotiations.load(Ordering::SeqCst), 2);
+        assert!(
+            state.terminal_geometry_supported(),
+            "attach-only viewers must see the successor geometry capability"
+        );
         maintenance.abort();
         assert!(
             matches!(
@@ -907,8 +1012,36 @@ mod tests {
                 .unwrap();
             // A real daemon keeps serving after the generation is established,
             // and the server holds that connection for as long as it does.
-            // Hanging up here would tell the server its daemon had been
-            // replaced. Aborted with the task below.
+            // Answer the independent geometry probe before holding the
+            // generation connection open. This models an attach-only viewer
+            // discovering the capability without first creating a control
+            // worker.
+            let (geometry_stream, _) = daemon_listener.accept().await.unwrap();
+            let (geometry_read, mut geometry_write) = geometry_stream.into_split();
+            let mut geometry_reader = tokio::io::BufReader::new(geometry_read);
+            line.clear();
+            geometry_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+                kanna_daemon::protocol::Command::NegotiateTerminalGeometry { .. }
+            ));
+            geometry_write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(
+                            &kanna_daemon::protocol::Event::TerminalGeometryReady {
+                                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+                            }
+                        )
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            // Hanging up the protected-input connection would tell the server
+            // its daemon had been replaced. Aborted with the task below.
             std::future::pending::<()>().await;
         });
         let lan_port = free_port().await;
@@ -939,7 +1072,7 @@ mod tests {
         let assertions = async {
             let status_url = format!("http://127.0.0.1:{lan_port}/v1/status");
             let client = reqwest::Client::new();
-            for _ in 0..40 {
+            for _ in 0..200 {
                 if client.get(&status_url).send().await.is_ok() {
                     break;
                 }

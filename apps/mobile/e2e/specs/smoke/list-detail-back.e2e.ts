@@ -108,6 +108,15 @@ export interface PtyTerminalFixture {
   expectedCols: number;
   expectedRows: number;
   minDecodedBytes: number;
+  expectedCell?: {
+    column: number;
+    row: number;
+    text: string;
+  };
+  expectedCursor?: {
+    column: number;
+    row: number;
+  };
 }
 
 interface PtyFixtureTaskUi {
@@ -127,6 +136,8 @@ type TerminalWebViewInspection =
       kind: "rendered";
       byteCount: number;
       cols: number | null;
+      cursorColumn?: number | null;
+      cursorRow?: number | null;
       frameCount: number;
       mentionedFiles?: {
         mentions: Array<{ line?: number; path: string; raw: string }>;
@@ -134,6 +145,7 @@ type TerminalWebViewInspection =
       };
       rows: number | null;
       text: string;
+      visibleRows?: string[];
     }
   | {
       kind: "unavailable";
@@ -686,13 +698,18 @@ export async function inspectTerminalWebView(
       const cols = Number.parseInt(root.dataset.kannaCols ?? "", 10);
       const frameCount = Number.parseInt(root.dataset.kannaFrameCount ?? "", 10);
       const rows = Number.parseInt(root.dataset.kannaRows ?? "", 10);
+      const visibleRows = Array.from(
+        { length: Number.isNaN(rows) ? 0 : rows },
+        (_, row) => root.querySelector(".xterm-rows")?.children[row]?.textContent ?? ""
+      );
       return {
         kind: "rendered" as const,
         byteCount: Number.isNaN(byteCount) ? 0 : byteCount,
         cols: Number.isNaN(cols) ? null : cols,
         frameCount: Number.isNaN(frameCount) ? 0 : frameCount,
         rows: Number.isNaN(rows) ? null : rows,
-        text: terminalRows || root.dataset.kannaTextSample || ""
+        text: terminalRows || root.dataset.kannaTextSample || "",
+        visibleRows
       };
     });
   } finally {

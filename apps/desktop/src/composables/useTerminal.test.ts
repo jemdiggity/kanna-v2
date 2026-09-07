@@ -174,6 +174,7 @@ vi.mock("@xterm/xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     fit = vi.fn();
+    proposeDimensions = vi.fn(() => ({ cols: 80, rows: 24 }));
   },
 }));
 
@@ -3394,6 +3395,10 @@ describe("useTerminal", () => {
   });
   it("backs off repeated attach refusals once per interval and resets after recovery", async () => {
     vi.useFakeTimers();
+    vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(performance.now());
+      return 1;
+    });
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     const { useTerminal } = await import("./useTerminal");
     const refusal = "session requires authenticated operator input: refused-session";

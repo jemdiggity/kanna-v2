@@ -66,10 +66,14 @@ let inputEventContainer: HTMLElement | null = null;
 let relayClient: DesktopRemoteTaskClient | null = null;
 let subscription: DesktopRemoteTerminalSubscription | null = null;
 let companionOwnership: DesktopCompanionRemoteOwnership | null = null;
+const terminalControlTaken = ref(false);
+const terminalControlAvailable = ref(false);
 let currentRemoteKey: string | null = null;
-let currentOwnerDesktopId: string | null = null;
-let currentOwnerTaskId: string | null = null;
+let lastRemoteViewerProposal: { cols: number; rows: number } | null = null;
+let pendingRemoteViewerProposal: { cols: number; rows: number } | null = null;
+let remoteViewerRefreshScheduled = false;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
+let unregisterRemoteE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
 const {
   cancelPendingFocus,
@@ -173,6 +177,16 @@ function closeInputQueue() {
   inputQueue = null;
 }
 
+function takeTerminalControl() {
+  subscription?.takeControl?.();
+  terminalControlTaken.value = true;
+}
+
+function releaseTerminalControl() {
+  subscription?.releaseControl?.();
+  terminalControlTaken.value = false;
+}
+
 function drainRemoteInput(queue: RemoteInputQueue) {
   if (queue.closed || queue.inFlight || queue.pending.length === 0) return;
   const pending = queue.pending[0];
@@ -253,25 +267,53 @@ function enqueueRemoteInput(data: string, submissionBoundary = false, controlInp
   drainRemoteInput(queue);
 }
 
-function fitAndResizeRemote() {
+function refreshRemoteViewer() {
   if (!props.active) return;
-  fitAddon?.fit();
-  if (
-    !terminal ||
-    !relayClient ||
-    !currentOwnerDesktopId ||
-    !currentOwnerTaskId ||
-    status.value !== "live"
-  ) {
+  const proposed = fitAddon?.proposeDimensions?.();
+  if (proposed && subscription) {
+    if (
+      lastRemoteViewerProposal?.cols !== proposed.cols ||
+      lastRemoteViewerProposal.rows !== proposed.rows
+    ) {
+      lastRemoteViewerProposal = { cols: proposed.cols, rows: proposed.rows };
+      subscription.registerViewer?.(proposed.cols, proposed.rows);
+    }
+  } else {
+    // Older/test FitAddon implementations may not expose measurement yet;
+    // fitting remains presentation-only and never resizes the owner PTY.
+    fitAddon?.fit?.();
+  }
+  terminal?.refresh(0, Math.max(0, terminal.rows - 1));
+}
+
+function scheduleRemoteViewerRefresh() {
+  if (!props.active) return;
+  const proposed = fitAddon?.proposeDimensions?.();
+  if (!proposed || !subscription) {
+    refreshRemoteViewer();
     return;
   }
-  void relayClient.resize({
-    desktopId: currentOwnerDesktopId,
-    taskId: currentOwnerTaskId,
-    cols: terminal.cols,
-    rows: terminal.rows,
-  }).catch((error) => {
-    console.debug("[cloud-terminal] failed to resize remote terminal:", error);
+  pendingRemoteViewerProposal = { cols: proposed.cols, rows: proposed.rows };
+  if (
+    lastRemoteViewerProposal?.cols === proposed.cols &&
+    lastRemoteViewerProposal.rows === proposed.rows
+  ) {
+    pendingRemoteViewerProposal = null;
+    return;
+  }
+  if (remoteViewerRefreshScheduled) return;
+  remoteViewerRefreshScheduled = true;
+  queueMicrotask(() => {
+    remoteViewerRefreshScheduled = false;
+    const latest = pendingRemoteViewerProposal;
+    pendingRemoteViewerProposal = null;
+    if (!latest || !props.active || !subscription) return;
+    if (
+      lastRemoteViewerProposal?.cols === latest.cols &&
+      lastRemoteViewerProposal.rows === latest.rows
+    ) return;
+    lastRemoteViewerProposal = latest;
+    subscription.registerViewer?.(latest.cols, latest.rows);
   });
 }
 
@@ -279,7 +321,7 @@ async function fitAndResizeRemoteAfterLayout(generation: number) {
   await nextTick();
   await nextFrameOrTimeout();
   if (unmounted || generation !== lifecycleGeneration || !props.active) return;
-  fitAndResizeRemote();
+  refreshRemoteViewer();
   terminal?.refresh(0, terminal.rows - 1);
 }
 
@@ -298,8 +340,7 @@ function applyRemoteSnapshot(
   // A daemon snapshot is a serialized terminal grid at its recorded PTY
   // dimensions. Replaying it into the viewer's unrelated dimensions reflows
   // full-screen TUIs before their cursor-addressed redraw can run. Restore the
-  // source geometry first, then fit and resize the owning PTY after xterm has
-  // parsed the authoritative snapshot.
+  // source geometry first; the viewer's fit proposal remains presentation-only.
   terminal.reset();
   terminal.resize(cols, rows);
   terminal.write(data, () => {
@@ -312,6 +353,9 @@ function applyRemoteSnapshot(
 
 async function start() {
   stopSubscription();
+  lastRemoteViewerProposal = null;
+  pendingRemoteViewerProposal = null;
+  remoteViewerRefreshScheduled = false;
   const generation = lifecycleGeneration;
   const desktopId = props.ownerDesktopId;
   const taskId = props.ownerTaskId;
@@ -353,8 +397,6 @@ async function start() {
     relayClient = client;
     companionOwnership = ownership;
     currentRemoteKey = remoteKey;
-    currentOwnerDesktopId = desktopId;
-    currentOwnerTaskId = taskId;
     const queue: RemoteInputQueue = {
       client,
       desktopId,
@@ -396,6 +438,8 @@ async function start() {
         writeRemoteTerminalError(event.message);
       },
     });
+    terminalControlAvailable.value = Boolean(subscription.takeControl);
+    refreshRemoteViewer();
   } catch (error) {
     if (unmounted || generation !== lifecycleGeneration) {
       if (acquiredClient && !adopted) acquiredClient.close();
@@ -426,12 +470,12 @@ function stopSubscription() {
     // The manager still owns the parent transport.
   }
   subscription = null;
+  terminalControlAvailable.value = false;
+  terminalControlTaken.value = false;
   companionOwnership?.release();
   companionOwnership = null;
   relayClient = null;
   currentRemoteKey = null;
-  currentOwnerDesktopId = null;
-  currentOwnerTaskId = null;
 }
 
 async function activateLink(uri: string): Promise<void> {
@@ -480,12 +524,17 @@ async function openCurrentCompanion(): Promise<void> {
 
 function registerTerminalBufferForE2E() {
   unregisterE2ETerminalBuffer?.();
+  unregisterRemoteE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = terminal
     ? registerE2ETerminalBuffer(props.ownerTaskId, terminal)
     : null;
+  unregisterRemoteE2ETerminalBuffer = terminal
+    ? registerE2ETerminalBuffer(`remote:${props.ownerTaskId}`, terminal)
+    : null;
 }
 
-onMounted(() => {
+function initializeTerminal() {
+  if (terminal) return;
   terminal = new Terminal({
     allowProposedApi: true,
     cursorBlink: false,
@@ -532,18 +581,25 @@ onMounted(() => {
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(new WebLinksAddon(handleLinkActivate));
-  try {
-    const webgl = new WebglAddon();
-    webgl.onContextLoss(() => {
-      console.warn("[cloud-terminal] WebGL context lost, falling back to DOM renderer");
-      webgl.dispose();
-    });
-    terminal.loadAddon(webgl);
-  } catch (error) {
-    console.warn(
-      "[cloud-terminal] WebGL addon failed, falling back to DOM renderer:",
-      error,
-    );
+  // Native WKWebView screenshots can capture an unfurled WebGL surface when
+  // two isolated desktop instances are running side by side. Keep the real
+  // renderer in production, while the E2E lane deliberately uses xterm's DOM
+  // renderer so its screenshot and cell/cursor assertions observe painted
+  // content rather than only the logical buffer.
+  if (!window.__KANNA_E2E__) {
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        console.warn("[cloud-terminal] WebGL context lost, falling back to DOM renderer");
+        webgl.dispose();
+      });
+      terminal.loadAddon(webgl);
+    } catch (error) {
+      console.warn(
+        "[cloud-terminal] WebGL addon failed, falling back to DOM renderer:",
+        error,
+      );
+    }
   }
   terminal.loadAddon(new ImageAddon());
   if (containerRef.value) {
@@ -578,12 +634,36 @@ onMounted(() => {
       },
     });
     cleanupDropEvents = dropBridge.registerContainerDropHandlers();
-    fitAndResizeRemote();
-    resizeObserver = new ResizeObserver(() => fitAndResizeRemote());
+    refreshRemoteViewer();
+    resizeObserver = new ResizeObserver(() => scheduleRemoteViewerRefresh());
     resizeObserver.observe(containerRef.value);
   }
   void start();
   void focusWhenActive();
+}
+
+async function initializeTerminalWhenVisible() {
+  if (terminal || unmounted || !props.active) return;
+  for (let frame = 0; frame < 30; frame += 1) {
+    await nextTick();
+    const container = containerRef.value;
+    const rect = container?.getBoundingClientRect();
+    if (container && container.getClientRects().length > 0 && rect && rect.width > 0 && rect.height > 0) {
+      initializeTerminal();
+      return;
+    }
+    await nextFrameOrTimeout();
+  }
+}
+
+onMounted(() => {
+  // Vitest's DOM has no layout engine, so a visibility wait would prevent the
+  // component's normal mount contract from being exercised by unit tests.
+  if (import.meta.env.MODE === "test") {
+    initializeTerminal();
+  } else if (props.active) {
+    void initializeTerminalWhenVisible();
+  }
 });
 
 watch(
@@ -598,6 +678,11 @@ watch(
   () => props.active,
   async (active) => {
     if (!active) return;
+    if (import.meta.env.MODE === "test") {
+      initializeTerminal();
+    } else {
+      await initializeTerminalWhenVisible();
+    }
     await fitAndResizeRemoteAfterLayout(lifecycleGeneration);
     await focusWhenActive();
   },
@@ -613,9 +698,14 @@ onUnmounted(() => {
   cancelPendingFocus();
   unmounted = true;
   lifecycleGeneration += 1;
+  pendingRemoteViewerProposal = null;
+  remoteViewerRefreshScheduled = false;
+  lastRemoteViewerProposal = null;
   stopSubscription();
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;
+  unregisterRemoteE2ETerminalBuffer?.();
+  unregisterRemoteE2ETerminalBuffer = null;
   resizeObserver?.disconnect();
   cleanupDropEvents?.();
   cleanupDropEvents = null;
@@ -642,7 +732,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="cloud-terminal-shell" :data-status="status">
+  <div
+    class="cloud-terminal-shell"
+    :data-owner-task-id="ownerTaskId"
+    :data-status="status"
+  >
     <button
       v-if="!mentionedFilesOpen"
       type="button"
@@ -663,6 +757,16 @@ onUnmounted(() => {
       @keydown.space.prevent="openCurrentCompanion"
     >
       {{ t("visualCompanion.open") }}
+    </button>
+    <button
+      v-if="terminalControlAvailable"
+      type="button"
+      class="terminal-control-control"
+      :aria-pressed="terminalControlTaken"
+      :title="terminalControlTaken ? t('terminalGeometry.releaseControl') : t('terminalGeometry.takeControl')"
+      @click="terminalControlTaken ? releaseTerminalControl() : takeTerminalControl()"
+    >
+      {{ terminalControlTaken ? t("terminalGeometry.releaseControl") : t("terminalGeometry.takeControl") }}
     </button>
     <div ref="containerRef" class="terminal-container"></div>
     <div v-if="status === 'error' && errorMessage" class="cloud-terminal-status">
@@ -724,6 +828,28 @@ onUnmounted(() => {
   font-size: 11px;
   cursor: pointer;
   opacity: 0.78;
+}
+
+.terminal-control-control {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 12px;
+  padding: 5px 8px;
+  border: 1px solid var(--kn-border-default);
+  border-radius: 5px;
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.78;
+}
+
+.terminal-control-control:hover,
+.terminal-control-control:focus-visible {
+  color: var(--kn-text-primary);
+  opacity: 1;
 }
 
 .mentioned-files-control:hover { opacity: 1; color: var(--kn-text-primary); }

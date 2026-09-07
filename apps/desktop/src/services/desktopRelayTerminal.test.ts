@@ -118,7 +118,7 @@ describe("configured desktop relay helpers", () => {
     }));
     expect(sent).toContainEqual({
       type: "auth",
-      capabilities: ["companion_event_epoch", "term_input_boundary"],
+      capabilities: ["companion_event_epoch", "term_input_boundary", "terminal_geometry"],
       credential: "id-token",
     });
     expect(sent).toContainEqual({
@@ -216,7 +216,7 @@ describe("createDesktopRelayTerminalClient", () => {
     });
     expect(refreshedSocket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
       type: "auth",
-      capabilities: ["companion_event_epoch", "term_input_boundary"],
+      capabilities: ["companion_event_epoch", "term_input_boundary", "terminal_geometry"],
       credential: "refreshed-token",
     });
     expect(refreshedSocket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
@@ -428,10 +428,15 @@ describe("createDesktopRelayTerminalClient", () => {
 
     expect(JSON.parse(socket.sent[2])).toEqual({
       type: "auth",
-      capabilities: ["companion_event_epoch", "term_input_boundary"],
+      capabilities: ["companion_event_epoch", "term_input_boundary", "terminal_geometry"],
       credential: "id-token",
     });
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        capabilities: ["terminal_geometry"],
+      }),
+    });
     await Promise.resolve();
     expect(JSON.parse(socket.sent[3])).toEqual({
       type: "attach",
@@ -513,7 +518,12 @@ describe("createDesktopRelayTerminalClient", () => {
     });
 
     await openRelayTunnel(socket);
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        capabilities: ["terminal_geometry"],
+      }),
+    });
     await Promise.resolve();
 
     subscription.close();
@@ -587,15 +597,24 @@ describe("createDesktopRelayTerminalClient", () => {
     });
 
     await openRelayTunnel(socket);
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        capabilities: ["terminal_geometry"],
+      }),
+    });
     await Promise.resolve();
 
     const sent = socket.sent.map((entry) => JSON.parse(entry));
     expect(sent).toContainEqual({
-      type: "term_resize",
+      type: "term_viewer_register",
       task_id: "task-1",
+      viewer_id: "terminal-viewer-1",
+      role: "remote",
+      generation: 1,
       cols: 100,
       rows: 32,
+      visible: true,
     });
     const closeRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/close");
     const advanceRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/advance-stage");

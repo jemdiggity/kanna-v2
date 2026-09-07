@@ -198,6 +198,10 @@
     "remoteCompanionOpenFailed": "ビジュアルコンパニオンを開けませんでした。",
     "remoteTerminalFileDropUnavailable": "別のマシンのターミナルにはファイルをドロップできません。ファイルをそのマシンへ転送してから、パスを貼り付けてください。"
   },
+  "terminalGeometry": {
+    "takeControl": "ターミナルの制御を取得",
+    "releaseControl": "ターミナルの制御を解除"
+  },
   "tags": {
     "inProgress": "進行中",
     "pr": "PR",

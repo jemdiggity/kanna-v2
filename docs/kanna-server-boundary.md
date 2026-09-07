@@ -350,6 +350,51 @@ what makes a dropped link cost O(delta); an offset only means anything inside
 the `stream_id` generation that produced it, so a daemon reconnect voids it and
 the client falls back to a bounded snapshot.
 
+## Terminal Geometry Ownership
+
+Terminal geometry is daemon runtime state, not task or database state. New KSP
+clients negotiate `terminal_geometry`, then register each visible terminal on
+the authenticated control path with `term_viewer_register` before input or
+resize. The role is explicit: the owning desktop may declare `local`; paired,
+LAN, relay, observer, and shared-tap clients are `remote` and cannot claim
+that role. An undeclared peer is legacy and is never implicitly local.
+
+The daemon elects one controller per PTY. It retains the current eligible local
+controller, otherwise chooses a deterministic local candidate, then does the
+same for remote candidates. A local arrival preempts an automatically selected
+remote controller. Remote/mobile viewers therefore render the authoritative
+desktop-sized grid and use their existing pan/scroll presentation; fitting a
+remote viewport never resizes the owner. A sole phone can still become the
+automatic controller. `term_viewer_takeover` explicitly grants any authorized
+viewer control until `term_viewer_release` or disconnect; focus and input do
+not reclaim it. A transient transport loss may relinquish takeover, without a
+heartbeat or timeout loop.
+
+Only the elected viewer's measured proposal changes the PTY and headless
+terminal. Registration and election are serialized with resize and snapshot
+cutover. Repeated proposals for the applied size are no-ops; no-viewer state
+retains the last applied size. Geometry changes use an ordered snapshot and a
+new stream generation rather than byte-offset replay, while resume within
+unchanged geometry remains incremental. Snapshot application never echoes a
+resize request. Geometry does not clear draft bytes, alter composer
+attestation, or release held logical input.
+
+Mixed versions are deliberately conservative. New clients against an old owner
+suppress automatic remote sizing and report that takeover is unavailable. On a
+new owner, legacy resize remains a compatibility minimum only for all-legacy
+sessions and cannot shrink a declared controller. New event fields are sent
+only after capability negotiation; upgrading the server cannot make an old
+renderer a faithful follower. In particular, old mobile/new owner, new
+mobile/old owner, new server/old daemon, and rollback combinations must be
+treated as unsupported for the synchronized-grid guarantee.
+
+The server separately probes terminal-geometry protocol version 1 on the
+daemon control socket. An old daemon closes that probe, so the server falls
+back to legacy commands for local compatibility and never sends an automatic
+remote resize. A new daemon is probed again after its PID changes. This
+prevents a new server from mistaking a successfully written but unsupported
+viewer command for an authority grant.
+
 ## The Browser/Local-Client Boundary
 
 A loopback address is not authority. `kanna-server` listens on a port any web

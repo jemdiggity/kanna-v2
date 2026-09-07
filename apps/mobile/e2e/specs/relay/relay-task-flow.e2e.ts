@@ -336,6 +336,60 @@ export async function verifyRelayPtySnapshotRevisit(
   await journey.waitForRenderedTerminal();
 }
 
+/**
+ * Executable mobile rendered-grid coverage for the geometry change. The
+ * snapshot sentinel alone proves bytes arrived, but not that the WebView
+ * hydrated the source grid or retained a valid cursor after the authoritative
+ * resize snapshot. The E2E inspection is emitted by the real xterm document
+ * and read through Appium's WebView/native bridge.
+ */
+export async function verifyRelayPtyRenderedGridAndCursor(
+  ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
+  fixture: PtyTerminalFixture,
+): Promise<void> {
+  let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
+  await ui.waitUntil(
+    async () => {
+      lastInspection = await ui.inspectTerminalWebView();
+      if (lastInspection.kind !== "rendered") return false;
+      const cursorColumn = lastInspection.cursorColumn;
+      const cursorRow = lastInspection.cursorRow;
+      const expectedCell = fixture.expectedCell;
+      const expectedCursor = fixture.expectedCursor;
+      const renderedCell = expectedCell && lastInspection.visibleRows
+        ? lastInspection.visibleRows[expectedCell.row]?.slice(
+            expectedCell.column,
+            expectedCell.column + expectedCell.text.length,
+          )
+        : undefined;
+      return (
+        lastInspection.cols === fixture.expectedCols &&
+        lastInspection.rows === fixture.expectedRows &&
+        lastInspection.text.includes(fixture.sentinel) &&
+        typeof cursorColumn === "number" &&
+        Number.isInteger(cursorColumn) &&
+        typeof cursorRow === "number" &&
+        Number.isInteger(cursorRow) &&
+        cursorColumn >= 0 &&
+        cursorColumn < fixture.expectedCols &&
+        cursorRow >= 0 &&
+        cursorRow < fixture.expectedRows &&
+        (!expectedCell || renderedCell === expectedCell.text) &&
+        (!expectedCursor ||
+          (cursorColumn === expectedCursor.column && cursorRow === expectedCursor.row))
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected the mobile WebView to render ${fixture.expectedCols}x${fixture.expectedRows} ` +
+        `with cursor ${JSON.stringify(fixture.expectedCursor)} and cell ` +
+        `${JSON.stringify(fixture.expectedCell)}; last inspection ${JSON.stringify(lastInspection)}`,
+    },
+  );
+}
+
 async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
   for (const selector of [
     "~Not Now",
@@ -1724,6 +1778,7 @@ export async function runRelayTaskFlow(
       async waitForRenderedTerminal() {
         await waitForTaskTerminalLive(ui);
         await waitForRenderedPtyTerminal(ui, options.fixture);
+        await verifyRelayPtyRenderedGridAndCursor(ui, options.fixture);
       },
       closeTask: closeTaskForJourney,
     }),

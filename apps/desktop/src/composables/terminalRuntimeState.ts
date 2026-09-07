@@ -37,6 +37,8 @@ export interface TerminalRuntimeState {
   attachFailureMessage: string | null
   attachRetryAttempt: number
   attachRetryTimer: ReturnType<typeof setTimeout> | null
+  /** Hydrating an authoritative snapshot must not echo a resize proposal. */
+  applyingSnapshot: boolean
 }
 
 export function createTerminalRuntimeState(): TerminalRuntimeState {
@@ -69,6 +71,7 @@ export function createTerminalRuntimeState(): TerminalRuntimeState {
     attachFailureMessage: null,
     attachRetryAttempt: 0,
     attachRetryTimer: null,
+    applyingSnapshot: false,
   }
 }
 
