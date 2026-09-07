@@ -46,6 +46,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     write: writeTerminalBuffer,
     input: inputTerminalBuffer,
     refresh: refreshTerminalBuffer,
+    element: getTerminalElement,
     findTextCell: findTerminalTextCell,
     cursor: getTerminalCursorPosition,
     cellAttributes: getTerminalCellAttributes,
@@ -60,12 +61,23 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
   };
 }
 
+function getTerminalElement(sessionId: string): HTMLElement | null {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  return terminal.element ?? null;
+}
+
 function refreshTerminalBuffer(sessionId: string): void {
   const terminal = terminals.get(sessionId);
   if (!terminal) {
     throw new Error(`terminal buffer not registered for session ${sessionId}`);
   }
-  terminal.refresh(0, terminal.rows - 1);
+  const synchronousTerminal = terminal as unknown as {
+    _core?: { refresh(start: number, end: number, sync: boolean): void };
+  };
+  synchronousTerminal._core?.refresh(0, terminal.rows - 1, true);
 }
 
 function getTerminalCellAttributes(

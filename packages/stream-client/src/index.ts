@@ -462,6 +462,17 @@ export class StreamClient {
     ) {
       this.sendTerminalViewerRegistration(registration, taskId);
     }
+    // A geometry-aware remote attach is admitted only after the viewer has
+    // declared its measured viewport. The desktop creates the subscription
+    // before layout can return that measurement, so hold the attach here and
+    // let the first registration send the ordered register → attach pair.
+    if (
+      this.options.terminalViewerRole === "remote"
+      && !registration
+      && (!this.authed || this.supportsCapability("terminal_geometry"))
+    ) {
+      return;
+    }
     this.sendFrame({ type: "attach", task_id: taskId, kind: "terminal", from_seq: 0 });
   }
 
@@ -665,6 +676,12 @@ export class StreamClient {
     const send = () => this.sendTerminalViewerRegistration(registration, taskId);
     if (!current || !this.authed) {
       send();
+      if (
+        !current
+        && this.attachments.has(attachmentKey(taskId, "terminal"))
+      ) {
+        this.sendFrame({ type: "attach", task_id: taskId, kind: "terminal", from_seq: 0 });
+      }
       return;
     }
     if (registration.flushTimer !== undefined) return;

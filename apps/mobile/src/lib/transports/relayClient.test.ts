@@ -491,7 +491,8 @@ describe("createRelayDesktopClient", () => {
     );
     subscription.resize?.(80, 48);
     await flushPromises();
-    expect(socket.send).toHaveBeenLastCalledWith(
+    expect(socket.send).toHaveBeenNthCalledWith(
+      socket.send.mock.calls.length - 1,
       JSON.stringify({
         type: "term_viewer_register",
         task_id: "task-1",

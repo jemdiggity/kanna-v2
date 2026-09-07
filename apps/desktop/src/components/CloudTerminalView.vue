@@ -73,6 +73,7 @@ let lastRemoteViewerProposal: { cols: number; rows: number } | null = null;
 let pendingRemoteViewerProposal: { cols: number; rows: number } | null = null;
 let remoteViewerRefreshScheduled = false;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
+let unregisterRemoteE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
 const {
   cancelPendingFocus,
@@ -345,10 +346,6 @@ function applyRemoteSnapshot(
   terminal.write(data, () => {
     if (!terminal || unmounted || generation !== lifecycleGeneration) return;
     status.value = "live";
-    // A snapshot may include scrollback from a source grid larger than the
-    // follower viewport. Always paint the authoritative top-of-grid origin;
-    // local presentation scrolling can be restored by the viewer afterward.
-    terminal.scrollToTop?.();
     terminal.refresh(0, terminal.rows - 1);
     void fitAndResizeRemoteAfterLayout(generation);
   });
@@ -527,8 +524,12 @@ async function openCurrentCompanion(): Promise<void> {
 
 function registerTerminalBufferForE2E() {
   unregisterE2ETerminalBuffer?.();
+  unregisterRemoteE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = terminal
     ? registerE2ETerminalBuffer(props.ownerTaskId, terminal)
+    : null;
+  unregisterRemoteE2ETerminalBuffer = terminal
+    ? registerE2ETerminalBuffer(`remote:${props.ownerTaskId}`, terminal)
     : null;
 }
 
@@ -703,6 +704,8 @@ onUnmounted(() => {
   stopSubscription();
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;
+  unregisterRemoteE2ETerminalBuffer?.();
+  unregisterRemoteE2ETerminalBuffer = null;
   resizeObserver?.disconnect();
   cleanupDropEvents?.();
   cleanupDropEvents = null;
@@ -729,7 +732,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="cloud-terminal-shell" :data-status="status">
+  <div
+    class="cloud-terminal-shell"
+    :data-owner-task-id="ownerTaskId"
+    :data-status="status"
+  >
     <button
       v-if="!mentionedFilesOpen"
       type="button"

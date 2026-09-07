@@ -24,6 +24,7 @@ interface KannaTerminalBuffersE2EApi {
   write: (sessionId: string, data: string, callback?: () => void) => void;
   input: (sessionId: string, data: string) => void;
   refresh: (sessionId: string) => void;
+  element: (sessionId: string) => HTMLElement | null;
   findTextCell: (
     sessionId: string,
     text: string,

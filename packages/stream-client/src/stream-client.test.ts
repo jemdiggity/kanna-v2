@@ -2893,9 +2893,12 @@ describe("StreamClient", () => {
       capabilities: ["term_input_boundary", "terminal_geometry"],
     });
     client.attachTerminal("task-pty", { onOutput() {} });
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "attach", task_id: "task-pty" }),
+    );
     client.sendTermResize("task-pty", 42, 18);
 
-    expect(socket.sent.at(-1)).toEqual({
+    expect(socket.sent.slice(-2)).toEqual([{
       type: "term_viewer_register",
       task_id: "task-pty",
       viewer_id: "terminal-viewer-1",
@@ -2904,7 +2907,12 @@ describe("StreamClient", () => {
       cols: 42,
       rows: 18,
       visible: true,
-    });
+    }, {
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    }]);
     expect(socket.sent).not.toContainEqual(
       expect.objectContaining({ type: "term_resize" }),
     );

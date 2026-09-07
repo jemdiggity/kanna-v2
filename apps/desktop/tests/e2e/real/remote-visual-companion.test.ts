@@ -18,7 +18,6 @@ import {
 } from "../helpers/remoteCompanion";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
-import { sendKeysToActiveTerminal } from "../helpers/terminalInput";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
@@ -628,8 +627,12 @@ async function readRenderedTerminal(
   return client.executeSync<RenderedTerminalState>(`
     const hook = window.__KANNA_E2E__?.terminalBuffers;
     if (!hook) throw new Error("terminal buffer hook unavailable");
-    const cursor = hook.cursor(${JSON.stringify(taskId)});
-    const lines = hook.lines(${JSON.stringify(taskId)});
+    const remoteBufferId = "remote:" + ${JSON.stringify(taskId)};
+    const bufferId = hook.sessionIds().includes(remoteBufferId)
+      ? remoteBufferId
+      : ${JSON.stringify(taskId)};
+    const cursor = hook.cursor(bufferId);
+    const lines = hook.lines(bufferId);
     const markerLine = lines.findIndex((line) =>
       line.includes(${JSON.stringify(marker)}),
     );
@@ -637,13 +640,10 @@ async function readRenderedTerminal(
       ? lines[markerLine].indexOf(${JSON.stringify(marker)}) +
         Math.floor(${JSON.stringify(marker)}.length / 2)
       : null;
-    const stats = hook.stats(${JSON.stringify(taskId)});
-    const remoteEntry = Array.from(document.querySelectorAll(
-      ".main-panel .cloud-terminal-cache-entry",
-    )).find((candidate) => candidate.getClientRects().length > 0);
-    const container = remoteEntry?.querySelector(".terminal-container")
-      ?? document.querySelector(".main-panel .terminal-container");
-    const host = remoteEntry ?? container;
+    const stats = hook.stats(bufferId);
+    const terminalElement = hook.element(bufferId);
+    const host = terminalElement?.closest(".cloud-terminal-cache-entry")
+      ?? terminalElement;
     const rect = host?.getBoundingClientRect();
     const screen = host?.querySelector(".xterm-screen");
     const rowsElement = screen?.querySelector(".xterm-rows");
@@ -769,6 +769,8 @@ async function waitForRenderedTerminalEquality(
   await expect.poll(
     async () => {
       try {
+        await refreshRenderedTerminal(primary, taskId);
+        await refreshRenderedTerminal(secondary, taskId);
         const owner = await readRenderedTerminal(primary, taskId, marker);
         const follower = await readRenderedTerminal(secondary, taskId, marker);
         const applied = await ownerTerminalDimensions(taskId);
@@ -906,10 +908,15 @@ async function assertFullscreenRemoteTerminal(taskId: string): Promise<void> {
   }));
 
   await expect.poll(
-    () => secondary.executeSync<boolean>(`
-      const entry = Array.from(document.querySelectorAll(
-        ".main-panel .cloud-terminal-cache-entry, .main-panel .terminal-container"
-      )).find((candidate) => candidate.getClientRects().length > 0);
+    async () => {
+      await refreshRenderedTerminal(secondary, taskId);
+      return secondary.executeSync<boolean>(`
+      const hook = window.__KANNA_E2E__?.terminalBuffers;
+      const remoteBufferId = "remote:" + ${JSON.stringify(taskId)};
+      const bufferId = hook?.sessionIds().includes(remoteBufferId)
+        ? remoteBufferId
+        : ${JSON.stringify(taskId)};
+      const entry = hook?.element(bufferId);
       const canvasPainted = Array.from(
         entry?.querySelectorAll(".xterm-screen canvas") ?? []
       ).some((canvas) => {
@@ -940,7 +947,8 @@ async function assertFullscreenRemoteTerminal(taskId: string): Promise<void> {
           style.opacity !== "0" &&
           style.color !== "rgba(0, 0, 0, 0)";
       });
-    `),
+    `);
+    },
     { timeout: 10_000, interval: 100 },
   ).toBe(true);
 }
@@ -979,10 +987,16 @@ async function sendRemoteTerminalInput(taskId: string, data: string): Promise<vo
   `);
 }
 
-async function typeRemoteTerminalInput(data: string): Promise<void> {
+async function typeRemoteTerminalInput(taskId: string, data: string): Promise<void> {
   // Exercise the real remote viewer input path after explicit takeover. The
   // terminal buffer hook remains observation-only for this acceptance lane.
-  await sendKeysToActiveTerminal(secondary, data);
+  const selector = `.cloud-terminal-shell[data-owner-task-id="${taskId}"] .xterm-helper-textarea`;
+  const input = await secondary.waitForElement(selector, 5_000);
+  await secondary.executeSync(`
+    const input = document.querySelector(${JSON.stringify(selector)});
+    if (input instanceof HTMLElement) input.focus();
+  `);
+  await secondary.sendKeys(input, data);
 }
 
 async function assertRemoteDropRefused(taskId: string): Promise<void> {
@@ -1162,7 +1176,10 @@ async function selectRemoteTask(input: {
         );
         return {
           renderedRowCount: rows.length,
-          status: document.querySelector(".cloud-terminal-shell")
+          status: document.querySelector(
+            ".cloud-terminal-shell[data-owner-task-id=" +
+            JSON.stringify(${JSON.stringify(input.owner.ownerTaskId)}) + "]"
+          )
             ?.getAttribute("data-status") ?? null,
           error: document.querySelector(".cloud-terminal-status")
             ?.textContent?.trim() ?? null,
@@ -1656,13 +1673,13 @@ describe("remote desktop visual companion", () => {
       expect(await ownerTerminalDimensions(task.taskId)).toEqual(wideOwnerDimensions);
 
       const takeControl = await secondary.waitForText(
-        ".terminal-control-control",
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
         "Take terminal control",
         10_000,
       );
       await secondary.click(takeControl);
       await secondary.waitForText(
-        ".terminal-control-control",
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
         "Release terminal control",
         10_000,
       );
@@ -1681,8 +1698,9 @@ describe("remote desktop visual companion", () => {
         && takeoverDimensions.rows === wideOwnerDimensions.rows
       ) {
         const diagnostics = await secondary.executeSync(`
-          const shell = document.querySelector(".main-panel .cloud-terminal-cache-entry")
-            ?? document.querySelector(".main-panel .cloud-terminal-shell");
+          const shell = document.querySelector(
+            ".main-panel .cloud-terminal-shell[data-owner-task-id=\\"${task.taskId}\\"]"
+          );
           const container = shell?.querySelector(".terminal-container");
           const rect = container?.getBoundingClientRect();
           return {
@@ -1706,23 +1724,7 @@ describe("remote desktop visual companion", () => {
         ".main-panel .cloud-terminal-shell[data-status=\"live\"]",
         10_000,
       );
-      await expect.poll(
-        async () => {
-          try {
-            const rendered = await readRenderedTerminal(
-              secondary,
-              task.taskId,
-              "REMOTE_TUI_STREAM_",
-            );
-            return rendered.cols === takeoverDimensions.cols
-              && rendered.rows === takeoverDimensions.rows;
-          } catch {
-            return false;
-          }
-        },
-        { timeout: 15_000, interval: 100 },
-      ).toBe(true);
-      await typeRemoteTerminalInput("x");
+      await typeRemoteTerminalInput(task.taskId, "x");
       await waitForTerminalLine(primary, task.taskId, "INPUT:x");
       await waitForTerminalLine(secondary, task.taskId, "INPUT:x");
       const takeoverRendered = await waitForRenderedTerminalEquality(
@@ -1756,13 +1758,13 @@ describe("remote desktop visual companion", () => {
       }
 
       const releaseControl = await secondary.waitForText(
-        ".terminal-control-control",
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
         "Release terminal control",
         10_000,
       );
       await secondary.click(releaseControl);
       await secondary.waitForText(
-        ".terminal-control-control",
+        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
         "Take terminal control",
         10_000,
       );
@@ -1813,6 +1815,13 @@ describe("remote desktop visual companion", () => {
         await secondary.screenshot(`${screenshotDir}/geometry-follower-after-reconnect.png`);
       }
     } finally {
+      // The geometry journey deliberately narrows the follower. Restore the
+      // shared secondary instance before the subsequent paired-LAN journeys,
+      // whose task picker lives in the desktop sidebar.
+      await secondary.setWindowRect({ width: 3000, height: 1600, x: 80, y: 80 })
+        .catch(() => undefined);
+      await setSetupState(secondary, "maximized", false).catch(() => undefined);
+      await setSetupState(secondary, "sidebarHidden", false).catch(() => undefined);
       await tauriInvoke(primary, "kill_session", { sessionId: task.taskId }).catch(() => undefined);
     }
   }, 180_000);

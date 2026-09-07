@@ -1073,7 +1073,8 @@ describe("createLanTransport", () => {
         cols: 80,
         rows: 48,
         visible: true
-      }
+      },
+      { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
   });
 
