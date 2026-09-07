@@ -69,6 +69,9 @@ let companionOwnership: DesktopCompanionRemoteOwnership | null = null;
 const terminalControlTaken = ref(false);
 const terminalControlAvailable = ref(false);
 let currentRemoteKey: string | null = null;
+let lastRemoteViewerProposal: { cols: number; rows: number } | null = null;
+let pendingRemoteViewerProposal: { cols: number; rows: number } | null = null;
+let remoteViewerRefreshScheduled = false;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
 const {
@@ -267,13 +270,50 @@ function refreshRemoteViewer() {
   if (!props.active) return;
   const proposed = fitAddon?.proposeDimensions?.();
   if (proposed && subscription) {
-    subscription.registerViewer?.(proposed.cols, proposed.rows);
+    if (
+      lastRemoteViewerProposal?.cols !== proposed.cols ||
+      lastRemoteViewerProposal.rows !== proposed.rows
+    ) {
+      lastRemoteViewerProposal = { cols: proposed.cols, rows: proposed.rows };
+      subscription.registerViewer?.(proposed.cols, proposed.rows);
+    }
   } else {
     // Older/test FitAddon implementations may not expose measurement yet;
     // fitting remains presentation-only and never resizes the owner PTY.
     fitAddon?.fit?.();
   }
   terminal?.refresh(0, Math.max(0, terminal.rows - 1));
+}
+
+function scheduleRemoteViewerRefresh() {
+  if (!props.active) return;
+  const proposed = fitAddon?.proposeDimensions?.();
+  if (!proposed || !subscription) {
+    refreshRemoteViewer();
+    return;
+  }
+  pendingRemoteViewerProposal = { cols: proposed.cols, rows: proposed.rows };
+  if (
+    lastRemoteViewerProposal?.cols === proposed.cols &&
+    lastRemoteViewerProposal.rows === proposed.rows
+  ) {
+    pendingRemoteViewerProposal = null;
+    return;
+  }
+  if (remoteViewerRefreshScheduled) return;
+  remoteViewerRefreshScheduled = true;
+  queueMicrotask(() => {
+    remoteViewerRefreshScheduled = false;
+    const latest = pendingRemoteViewerProposal;
+    pendingRemoteViewerProposal = null;
+    if (!latest || !props.active || !subscription) return;
+    if (
+      lastRemoteViewerProposal?.cols === latest.cols &&
+      lastRemoteViewerProposal.rows === latest.rows
+    ) return;
+    lastRemoteViewerProposal = latest;
+    subscription.registerViewer?.(latest.cols, latest.rows);
+  });
 }
 
 async function fitAndResizeRemoteAfterLayout(generation: number) {
@@ -316,6 +356,9 @@ function applyRemoteSnapshot(
 
 async function start() {
   stopSubscription();
+  lastRemoteViewerProposal = null;
+  pendingRemoteViewerProposal = null;
+  remoteViewerRefreshScheduled = false;
   const generation = lifecycleGeneration;
   const desktopId = props.ownerDesktopId;
   const taskId = props.ownerTaskId;
@@ -591,7 +634,7 @@ function initializeTerminal() {
     });
     cleanupDropEvents = dropBridge.registerContainerDropHandlers();
     refreshRemoteViewer();
-    resizeObserver = new ResizeObserver(() => refreshRemoteViewer());
+    resizeObserver = new ResizeObserver(() => scheduleRemoteViewerRefresh());
     resizeObserver.observe(containerRef.value);
   }
   void start();
@@ -654,6 +697,9 @@ onUnmounted(() => {
   cancelPendingFocus();
   unmounted = true;
   lifecycleGeneration += 1;
+  pendingRemoteViewerProposal = null;
+  remoteViewerRefreshScheduled = false;
+  lastRemoteViewerProposal = null;
   stopSubscription();
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;

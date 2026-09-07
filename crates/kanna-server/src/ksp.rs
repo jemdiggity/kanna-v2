@@ -692,7 +692,15 @@ fn auth_ok_frame() -> ServerFrame {
     auth_ok_frame_for(true)
 }
 
+#[cfg(test)]
 fn auth_ok_frame_for(companion_access: bool) -> ServerFrame {
+    auth_ok_frame_with_terminal_geometry(companion_access, true)
+}
+
+fn auth_ok_frame_with_terminal_geometry(
+    companion_access: bool,
+    terminal_geometry_supported: bool,
+) -> ServerFrame {
     let mut stream_kinds = vec![
         StreamKind::Agent,
         StreamKind::Terminal,
@@ -701,17 +709,30 @@ fn auth_ok_frame_for(companion_access: bool) -> ServerFrame {
     if companion_access {
         stream_kinds.push(StreamKind::Companion);
     }
+    let mut capabilities = vec![
+        KspCapability::CompanionAttachmentEpoch,
+        KspCapability::CompanionEventEpoch,
+        KspCapability::TermInputBoundary,
+        KspCapability::TermScrollbackWindow,
+        KspCapability::AgentHistoryWindow,
+    ];
+    if terminal_geometry_supported {
+        capabilities.push(KspCapability::TerminalGeometry);
+    }
     ServerFrame::AuthOk {
         stream_kinds,
-        capabilities: vec![
-            KspCapability::CompanionAttachmentEpoch,
-            KspCapability::CompanionEventEpoch,
-            KspCapability::TermInputBoundary,
-            KspCapability::TermScrollbackWindow,
-            KspCapability::AgentHistoryWindow,
-            KspCapability::TerminalGeometry,
-        ],
+        capabilities,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn auth_capabilities_do_not_advertise_geometry_without_daemon_support() {
+    let frame = auth_ok_frame_with_terminal_geometry(true, false);
+    let ServerFrame::AuthOk { capabilities, .. } = frame else {
+        panic!("expected auth success frame");
+    };
+    assert!(!capabilities.contains(&KspCapability::TerminalGeometry));
 }
 
 #[derive(Clone)]
@@ -2010,6 +2031,11 @@ async fn run_terminal_control(
         if geometry_daemon_pid != Some(connected_pid) {
             geometry_daemon_pid = Some(connected_pid);
             geometry_supported = None;
+            // Do not advertise or forward geometry authority while the new
+            // daemon generation is still being probed. Legacy resize remains
+            // available for old peers, but viewer registration/takeover must
+            // fail closed during this window.
+            state.set_terminal_geometry_supported(false);
         }
         let (mut daemon_reader, mut daemon_writer) = client.into_split();
         retry_attempt = 0;
@@ -2035,6 +2061,7 @@ async fn run_terminal_control(
                 Ok(Ok(DaemonEvent::TerminalGeometryReady { version }))
                     if version == kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION
             ));
+            state.set_terminal_geometry_supported(geometry_supported.unwrap_or(false));
             if !geometry_supported.unwrap_or(false) {
                 // The probe consumes a connection that an old daemon cannot
                 // keep alive. Reconnect once and send only legacy commands;
@@ -2129,8 +2156,20 @@ async fn run_terminal_control(
                     }
                     let daemon_command = command.into_daemon_command(session_id.clone());
                     if !geometry_supported.unwrap_or(false)
-                        && matches!(&daemon_command, DaemonCommand::RegisterViewer { .. })
+                        && matches!(
+                            &daemon_command,
+                            DaemonCommand::RegisterViewer { .. }
+                                | DaemonCommand::TakeoverViewer { .. }
+                                | DaemonCommand::ReleaseViewer { .. }
+                        )
                     {
+                        let _ = send_task_error(
+                            &frame_tx,
+                            &task_id,
+                            "terminal_geometry_unsupported",
+                            "the daemon does not support terminal viewer geometry control".into(),
+                        )
+                        .await;
                         continue;
                     }
                     if matches!(&daemon_command, DaemonCommand::RegisterViewer { .. }) {
@@ -2504,6 +2543,18 @@ impl StreamConn {
     }
 
     async fn replace_terminal_control_route(&mut self, task_id: &str, session_id: String) {
+        // Registration is intentionally sent before Attach by clients so the
+        // first measured dimensions and the attachment are one control
+        // lifetime. The first registration creates a task-routed worker with
+        // no resolved session id; keep that worker and its queued registration
+        // when Attach later binds the same task to a session.
+        if self
+            .terminal_controls
+            .get(task_id)
+            .is_some_and(|control| control.session_id.is_none())
+        {
+            return;
+        }
         let route_matches = self
             .terminal_controls
             .get(task_id)
@@ -2827,7 +2878,11 @@ impl StreamConn {
 
         match frame {
             ClientFrame::Auth { .. } => {
-                self.send(auth_ok_frame_for(self.companion_access)).await;
+                self.send(auth_ok_frame_with_terminal_geometry(
+                    self.companion_access,
+                    self.supports_terminal_geometry,
+                ))
+                .await;
             }
             ClientFrame::Attach {
                 task_id,
@@ -3219,10 +3274,15 @@ impl StreamConn {
         self.supports_term_input_boundary =
             capabilities.contains(&KspCapability::TermInputBoundary);
         self.supports_terminal_window = capabilities.contains(&KspCapability::TermScrollbackWindow);
-        self.supports_terminal_geometry = capabilities.contains(&KspCapability::TerminalGeometry);
+        self.supports_terminal_geometry = capabilities.contains(&KspCapability::TerminalGeometry)
+            && self.state.terminal_geometry_supported();
         self.supports_agent_history_window =
             capabilities.contains(&KspCapability::AgentHistoryWindow);
-        self.send(auth_ok_frame_for(self.companion_access)).await;
+        self.send(auth_ok_frame_with_terminal_geometry(
+            self.companion_access,
+            self.supports_terminal_geometry,
+        ))
+        .await;
         true
     }
 
@@ -10508,6 +10568,7 @@ mod tests {
             supports_companion_event_epoch: false,
             supports_term_input_boundary: true,
             supports_terminal_window: false,
+            supports_terminal_geometry: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -10536,6 +10597,60 @@ mod tests {
         assert_eq!(daemon.await.expect("resize daemon failed"), 1);
         conn.shutdown().await;
         let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn registration_before_attach_survives_route_binding() {
+        let state = Arc::new(AppState::new(test_config(
+            "ksp-registration-before-attach",
+            "KSP Registration Before Attach",
+        )));
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
+        let mut conn = StreamConn {
+            state,
+            frame_tx,
+            companion_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            companion_events: None,
+            authed: true,
+            supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            supports_terminal_geometry: true,
+            supports_agent_history_window: false,
+            terminal_taps: HashMap::new(),
+            agent_histories: HashMap::new(),
+            legacy_companion_tasks_on_connection: HashSet::new(),
+            auth_mode: AuthMode::AllowEmpty,
+            companion_access: true,
+        };
+
+        conn.enqueue_terminal_control(
+            "task-before-attach".into(),
+            TerminalControlCommand::Register {
+                viewer_id: "viewer-before-attach".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 1,
+                cols: 42,
+                rows: 18,
+                visible: true,
+            },
+        );
+        conn.replace_terminal_control_route("task-before-attach", "session-bound-at-attach".into())
+            .await;
+
+        let control = conn
+            .terminal_controls
+            .get("task-before-attach")
+            .expect("pre-attach registration worker retained");
+        assert!(
+            control.session_id.is_none(),
+            "route binding must not retire the worker holding registration"
+        );
+        conn.shutdown().await;
     }
 
     #[tokio::test]

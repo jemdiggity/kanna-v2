@@ -127,6 +127,8 @@ type TerminalWebViewInspection =
       kind: "rendered";
       byteCount: number;
       cols: number | null;
+      cursorColumn?: number | null;
+      cursorRow?: number | null;
       frameCount: number;
       mentionedFiles?: {
         mentions: Array<{ line?: number; path: string; raw: string }>;

@@ -60,6 +60,7 @@ export type TaskTerminalStreamEvent =
       chunk: TerminalScrollbackChunk;
     }
   | { type: "exit"; taskId: string; code: number }
+  | { type: "connection"; taskId: string; connected: boolean }
   | { type: "error"; taskId: string; code?: string; message: string };
 
 export interface TaskTerminalSubscription {

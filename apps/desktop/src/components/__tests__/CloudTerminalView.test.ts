@@ -652,6 +652,45 @@ describe("CloudTerminalView remote visual companion links", () => {
     wrapper.unmount();
   });
 
+  it("coalesces remote ResizeObserver geometry proposals to the latest frame", async () => {
+    const client = createClient();
+    const registerViewer = vi.fn();
+    client.observeTerminal.mockImplementation(() => ({
+      close: client.terminalClose,
+      registerViewer,
+    }));
+    mocks.relayFactory.mockResolvedValue(client);
+
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-geometry",
+      },
+    });
+    await flushAsync();
+    registerViewer.mockClear();
+
+    const fitAddon = testState.terminals[0]?.loadedAddons.find(
+      (addon) => addon instanceof testState.FakeFitAddon,
+    ) as (InstanceType<typeof testState.FakeFitAddon> & {
+      proposeDimensions: ReturnType<typeof vi.fn>;
+    }) | undefined;
+    if (!fitAddon) throw new Error("terminal fit addon should be initialized");
+    fitAddon.proposeDimensions = vi.fn();
+    fitAddon.proposeDimensions
+      .mockReturnValueOnce({ cols: 100, rows: 30 })
+      .mockReturnValueOnce({ cols: 101, rows: 31 })
+      .mockReturnValueOnce({ cols: 102, rows: 32 });
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    await flushAsync();
+
+    expect(registerViewer).toHaveBeenCalledTimes(1);
+    expect(registerViewer).toHaveBeenCalledWith(102, 32);
+    wrapper.unmount();
+  });
+
   it("does not fit or resize while hidden and refits on reactivation without reconnecting", async () => {
     const client = createClient();
     let terminalListener:

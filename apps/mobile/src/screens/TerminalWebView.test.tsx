@@ -1117,6 +1117,8 @@ describe("TerminalWebView", () => {
     const inspection = {
       byteCount: 128,
       cols: 80,
+      cursorColumn: 4,
+      cursorRow: 2,
       frameCount: 2,
       rows: 24,
       text: "SCRIPT_READY"

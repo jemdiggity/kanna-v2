@@ -1369,6 +1369,12 @@ export function buildTerminalDocument({
           inspection: {
             byteCount: Number.parseInt(root.dataset.kannaByteCount || "0", 10) || 0,
             cols: Number.parseInt(root.dataset.kannaCols || "", 10) || null,
+            cursorColumn: Number.isInteger(term.buffer.active.cursorX)
+              ? term.buffer.active.cursorX
+              : null,
+            cursorRow: Number.isInteger(term.buffer.active.cursorY)
+              ? term.buffer.active.cursorY
+              : null,
             frameCount: Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0,
             mentionedFiles: {
               mentions: Array.from(terminalFileMentionHistory.values()).reverse(),

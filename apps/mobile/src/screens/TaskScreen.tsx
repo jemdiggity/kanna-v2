@@ -295,6 +295,18 @@ export function TaskScreen({
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isBackPending, setIsBackPending] = useState(false);
   const [terminalControlTaken, setTerminalControlTaken] = useState(false);
+  useEffect(() => {
+    // Takeover belongs to one live terminal attachment, not to the task row
+    // or screen component. A task switch, reconnect, background expiry, or
+    // terminal replacement must never leave the next attachment showing a
+    // stale release action.
+    setTerminalControlTaken(false);
+  }, [task.id]);
+  useEffect(() => {
+    if (terminalStatus !== "live") {
+      setTerminalControlTaken(false);
+    }
+  }, [terminalStatus]);
   const [screenViewport, setScreenViewport] = useState<{
     width: number;
     height: number;

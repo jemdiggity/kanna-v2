@@ -96,6 +96,30 @@ async fn establish_protected_input_generation(
     }
 }
 
+/// Probe geometry support before the first KSP client is authenticated. The
+/// KSP capability is a server-to-daemon contract as well as a client claim;
+/// advertising it only after a terminal control socket exists would deadlock
+/// a new client because it correctly suppresses registration against an old
+/// owner. Use a separate connection so an old daemon closing on the unknown
+/// probe command cannot poison the protected-input generation connection.
+async fn establish_terminal_geometry_capability(config: &Config) -> bool {
+    let Ok(mut daemon) = crate::daemon_client::DaemonClient::connect(&config.daemon_dir).await
+    else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            daemon.send_command(&kanna_daemon::protocol::Command::NegotiateTerminalGeometry {
+                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+            }),
+        )
+        .await,
+        Ok(Ok(kanna_daemon::protocol::Event::TerminalGeometryReady { version }))
+            if version == kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION
+    )
+}
+
 /// Re-establish the contract on every *new* daemon generation, and only on a
 /// new one.
 ///
@@ -199,6 +223,8 @@ pub(crate) async fn run_server_services(
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
     let mut protected_input_daemon =
         establish_protected_input_generation(&config, ProtectedInputWait::Startup).await;
+    http_state
+        .set_terminal_geometry_supported(establish_terminal_geometry_capability(&config).await);
     crate::task_creator::reconcile_lifecycle_operations_on_startup(
         &mut protected_input_daemon,
         &config.db_path,

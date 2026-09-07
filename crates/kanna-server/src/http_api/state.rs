@@ -50,6 +50,11 @@ pub struct AppState {
     pub(crate) companion_resources: crate::ksp::CompanionResources,
     pub(crate) terminal_taps: crate::ksp::TerminalTapRegistry,
     pub(crate) agent_histories: crate::ksp::AgentHistoryRegistry,
+    /// Whether the daemon generation serving this server understands the
+    /// viewer-controller protocol. This is deliberately independent of the
+    /// client's KSP capability claim: during a rolling upgrade the server may
+    /// be new while its daemon is still old.
+    pub(crate) terminal_geometry_supported: Arc<AtomicBool>,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     pub(super) repo_checkouts: Arc<StdMutex<HashMap<String, RepoCheckoutOperation>>>,
@@ -378,6 +383,7 @@ impl AppState {
             companion_resources: crate::ksp::CompanionResources::default(),
             terminal_taps: crate::ksp::TerminalTapRegistry::default(),
             agent_histories: crate::ksp::AgentHistoryRegistry::default(),
+            terminal_geometry_supported: Arc::new(AtomicBool::new(cfg!(test))),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             repo_checkouts: Arc::new(StdMutex::new(HashMap::new())),
@@ -425,6 +431,15 @@ impl AppState {
 
     pub fn subscribe_state_changes(&self) -> broadcast::Receiver<ServerFrame> {
         self.state_changes.subscribe()
+    }
+
+    pub(crate) fn terminal_geometry_supported(&self) -> bool {
+        self.terminal_geometry_supported.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_terminal_geometry_supported(&self, supported: bool) {
+        self.terminal_geometry_supported
+            .store(supported, Ordering::Release);
     }
 
     pub fn publish_state_changed(&self, scope: StateChangeScope) {

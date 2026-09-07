@@ -267,6 +267,9 @@ interface TerminalViewerRegistration {
   cols: number;
   rows: number;
   visible: boolean;
+  sentCols?: number;
+  sentRows?: number;
+  flushScheduled?: boolean;
 }
 
 interface CompanionAttachment {
@@ -627,15 +630,42 @@ export class StreamClient {
     registration.cols = cols;
     registration.rows = rows;
     this.terminalViewerRegistrations.set(taskId, registration);
-    this.sendFrame({
-      type: "term_viewer_register",
-      task_id: taskId,
-      viewer_id: registration.viewerId,
-      role: registration.role,
-      generation: registration.generation,
-      cols,
-      rows,
-      visible: registration.visible,
+    if (registration.sentCols === cols && registration.sentRows === rows) {
+      return;
+    }
+
+    // The first registration is sent synchronously so callers can enqueue it
+    // before Attach. Subsequent measurements are latest-value-wins and are
+    // coalesced in one microtask, keeping a resize burst out of the ordered
+    // input queue without weakening the registration-before-attach fence.
+    const send = () => {
+      registration.sentCols = registration.cols;
+      registration.sentRows = registration.rows;
+      this.sendFrame({
+        type: "term_viewer_register",
+        task_id: taskId,
+        viewer_id: registration.viewerId,
+        role: registration.role,
+        generation: registration.generation,
+        cols: registration.cols,
+        rows: registration.rows,
+        visible: registration.visible,
+      });
+    };
+    if (!current || !this.authed) {
+      send();
+      return;
+    }
+    if (registration.flushScheduled) return;
+    registration.flushScheduled = true;
+    queueMicrotask(() => {
+      registration.flushScheduled = false;
+      const latest = this.terminalViewerRegistrations.get(taskId);
+      if (latest !== registration) return;
+      if (latest.sentCols === latest.cols && latest.sentRows === latest.rows) {
+        return;
+      }
+      send();
     });
   }
 
@@ -917,6 +947,8 @@ export class StreamClient {
                 rows: registration.rows,
                 visible: registration.visible,
               });
+              registration.sentCols = registration.cols;
+              registration.sentRows = registration.rows;
             }
           }
           const sent = this.rawSend({
