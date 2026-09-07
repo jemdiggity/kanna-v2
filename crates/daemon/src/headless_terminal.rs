@@ -1006,6 +1006,35 @@ fn claude_lines_have_parked_composer(lines: &[String]) -> bool {
     let Some(composer_index) = composer_index_from_lines(lines, AgentProvider::Claude) else {
         return false;
     };
+    // The classified window must reach above the composer box, or this frame
+    // cannot answer the question at all.
+    //
+    // `visible_status` reads only [`STATUS_ROWS`] rows, and Claude's own chrome
+    // can fill nearly all of them: the two box borders and the composer are
+    // three, and the status bar beneath them has five measured rows it may
+    // draw (`/rc`, an effort badge, a `/clear` hint, an update badge, a
+    // login-expiry notice). Once the box's opening divider is the top of the
+    // window — or is not inside it at all — the row that would carry the
+    // in-flight footer was never read. An empty slice below then makes the
+    // chrome test vacuously true, which is how a turn that is running gets
+    // called `Idle`: not a stale verdict, a confidently wrong one.
+    //
+    // So require the evidence rather than assume its absence. With no row above
+    // the composer region this reports nothing and the session keeps the status
+    // it has, which is what the classifier did before the divider rule existed.
+    //
+    // The region's top is the box's opening border where Claude draws one, and
+    // the composer row itself where it does not; everything from there down is
+    // the frame's own input chrome, so a window starting at it has read none of
+    // the transcript above.
+    let composer_region_top = lines[..composer_index]
+        .iter()
+        .rposition(|line| line_is_visual_divider(line))
+        .unwrap_or(composer_index);
+    if composer_region_top == 0 {
+        return false;
+    }
+
     let below = &lines[composer_index + 1..];
     // Claude closes its composer box with a divider and draws only its status
     // bar beneath that border, so everything past the border is chrome by
@@ -2809,6 +2838,78 @@ mod tests {
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
+        );
+    }
+
+    /// A tall status bar can push the in-flight footer out of the classified
+    /// window entirely. The composer box plus five status-bar rows already
+    /// fills all eight, so the only rows left to read are Claude's own input
+    /// chrome — and "everything below the composer is chrome" is then vacuously
+    /// true. Reporting `Idle` off that window turns a running turn into a
+    /// confidently wrong verdict, which is incident 1's exact symptom; the
+    /// frame proves nothing, so the classifier must say nothing.
+    #[test]
+    fn claude_live_turn_behind_a_tall_status_bar_is_not_idle() {
+        let mut headless_terminal = HeadlessTerminal::new(171, 30, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "\u{23FA} Running 1 shell command\u{2026}\r\n",
+                "\u{273B} Tomfoolering\u{2026} (2s \u{B7} \u{2193} 50 tokens)\r\n",
+                "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n",
+                "\u{276F} \r\n",
+                "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n",
+                "  \u{23F5}\u{23F5} bypass permissions on (shift+tab to cycle) \u{B7} \u{2190} for agents\r\n",
+                "  /rc\r\n",
+                "  \u{25CF} high \u{B7} /effort\r\n",
+                "  new task? /clear to save 390.7k tokens\r\n",
+                "  \u{2714} Update installed \u{B7} Restart to update\r\n",
+                "  \u{26A0} Your login will expire soon \u{B7} /login\r\n"
+            )
+            .as_bytes(),
+        );
+
+        // Pinned so the test keeps testing what it claims: the working footer
+        // really is outside the rows the classifier reads.
+        let classified = headless_terminal.visible_footer_lines(STATUS_ROWS).unwrap();
+        assert!(
+            !classified
+                .iter()
+                .any(|line| claude_line_is_working_footer(line)),
+            "fixture should push the footer out of the window: {classified:?}"
+        );
+
+        assert_ne!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Idle),
+            "a frame that cannot see above the composer box must not claim Idle"
+        );
+    }
+
+    /// The same guard must not cost a parked session its verdict when the
+    /// window does reach above the box — which is every captured frame.
+    #[test]
+    fn claude_parked_composer_still_idle_when_the_window_reaches_above_the_box() {
+        let mut headless_terminal = HeadlessTerminal::new(171, 30, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "\u{23FA} All finished\r\n",
+                "\u{273B} Cooked for 12s \u{B7} done 2:57 PM\r\n",
+                "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n",
+                "\u{276F} \r\n",
+                "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n",
+                "  /rc\r\n",
+                "  \u{23F5}\u{23F5} bypass permissions on (shift+tab to cycle)\r\n"
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Idle)
         );
     }
 
