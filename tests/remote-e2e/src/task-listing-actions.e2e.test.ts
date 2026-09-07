@@ -15,6 +15,7 @@ import {
   waitForTerminalOutput
 } from "./terminalFlowTestUtils";
 import { BUFFY_UID } from "./firebaseAuth";
+import { localProcessFetch } from "./localProcessFetch";
 
 const execFileAsync = promisify(execFile);
 
@@ -728,7 +729,7 @@ async function invokeLanJson(
   body: unknown,
   headers: Record<string, string> = {}
 ): Promise<unknown> {
-  const response = await fetch(`${harness.lanBaseUrl}${path}`, {
+  const response = await localProcessFetch(`${harness.lanBaseUrl}${path}`, {
     method,
     headers: {
       "content-type": "application/json",
