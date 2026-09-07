@@ -5,6 +5,7 @@ import {
   type FetchLike,
   type WebSocketLike
 } from "./lanTransport";
+import { ServerRefusalError } from "./serverRefusal";
 
 describe("createLanTransport", () => {
   it("posts missing-session recovery to the task resume action", async () => {
@@ -128,6 +129,81 @@ describe("createLanTransport", () => {
     // server's own sentence names the terminal to go press Enter at.
     await expect(transport.sendTaskInput("task-1", "please rebase")).rejects.toThrow(
       /unsent line at that terminal/
+    );
+  });
+
+  it("carries a plain-text refusal from a repository command launch", async () => {
+    // The server refuses this one with axum's `(StatusCode, String)`, whose
+    // body is `text/plain`. Reading only JSON reduced the whole explanation to
+    // `LAN request failed (503)` on the phone.
+    const refusal =
+      "cannot resolve the task-manager singleton for repo ca99c7ee from the "
+      + "account directory: desktopId required for desktop-to-desktop request; "
+      + "no singleton was created";
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => refusal,
+      json: async () => {
+        throw new Error("not json");
+      }
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    const failure = await transport
+      .runRepoCommand("ca99c7ee", "custom:task-manager", "revision-1")
+      .then(
+        () => null,
+        (error: unknown) => error
+      );
+    expect(failure).toBeInstanceOf(ServerRefusalError);
+    expect((failure as ServerRefusalError).status).toBe(503);
+    // The desktop's own sentence, without the transport prefix the full
+    // message keeps for logs.
+    expect((failure as ServerRefusalError).detail).toBe(refusal);
+    expect((failure as Error).message).toContain("LAN request failed (503)");
+    expect((failure as Error).message).toContain(refusal);
+  });
+
+  it("reads a structured refusal from the same raw body", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 409,
+      text: async () =>
+        JSON.stringify({ reason: "input_held_by_draft", message: "held" }),
+      json: async () => ({ reason: "input_held_by_draft", message: "held" })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    const failure = await transport.sendTaskInput("task-1", "hi").then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ServerRefusalError);
+    expect((failure as ServerRefusalError).reason).toBe("input_held_by_draft");
+    expect((failure as ServerRefusalError).detail).toBe("held");
+  });
+
+  it("drops a proxy error page rather than rendering markup as an explanation", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => "<html><body>502 Bad Gateway</body></html>",
+      json: async () => {
+        throw new Error("not json");
+      }
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    const failure = await transport
+      .runRepoCommand("repo-1", "custom:task-manager", "revision-1")
+      .then(
+        () => null,
+        (error: unknown) => error
+      );
+    expect((failure as ServerRefusalError).detail).toBeNull();
+    expect((failure as Error).message).toBe(
+      "LAN request failed (502) for /v1/repos/repo-1/commands/custom%3Atask-manager/run"
     );
   });
 

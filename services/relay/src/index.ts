@@ -949,12 +949,16 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           return;
         }
         try {
-          const owners = await listRepoSingletonOwners({
+          // `illegible` is additive: the deployed desktop reads `owners` only.
+          // A machine whose index cannot answer this repository's question no
+          // longer fails the lookup — it is reported alongside the answer, and
+          // only the creation decision in `claim_repo_singleton` refuses.
+          const { owners, illegible } = await listRepoSingletonOwners({
             userId: userId!,
             remoteUrlHash,
             agent,
           });
-          sendDataResponse(ws, publication.id, { owners });
+          sendDataResponse(ws, publication.id, { owners, illegible });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           console.warn(`[cloud] Repository singleton lookup failed for ${userId}: ${message}`);

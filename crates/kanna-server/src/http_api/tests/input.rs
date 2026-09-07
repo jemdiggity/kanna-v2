@@ -192,7 +192,10 @@ fn singleton_directory_snapshot_clears_a_closed_offline_owner() {
         "shared-remote-hash",
         "task-manager",
         "desktop-former-owner",
-        vec!["task-former-owner".to_string()],
+        vec![crate::http_api::ObservedSingletonTask {
+            task_id: "task-former-owner".to_string(),
+            local_repo_id: Some("repo-former-owner".to_string()),
+        }],
     );
 
     state.replace_singleton_owners("shared-remote-hash", "task-manager", Vec::new());
@@ -429,6 +432,156 @@ async fn signal_agent_discovers_and_routes_to_sibling_repo_singleton() {
             "coordinate this repo".to_string()
         )]
     );
+    relay.abort();
+}
+
+/// The route the phone's More tab calls. It reaches the same account-wide
+/// arbitration the direct signal route does, so a singleton the account
+/// already owns on another machine is reused rather than duplicated here.
+#[tokio::test]
+async fn run_repo_command_routes_to_sibling_repo_singleton() {
+    let source = test_state_with_seed("desktop-command-source", "Source Mac", |db| {
+        seed_remote_repo(db, "repo-source")
+    });
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let delivered_for_sender = Arc::clone(&delivered);
+    let peer = test_state_with_seed_and_task_input_sender(
+        "desktop-command-owner",
+        "Owner Mac",
+        |db| seed_remote_singleton(db, "repo-owner", "task-manager-owner", "task-manager"),
+        Arc::new(move |task_id, input| {
+            delivered_for_sender.lock().unwrap().push((task_id, input));
+            Ok(())
+        }),
+    );
+    let relay = connect_singleton_relay_peer(&source, peer, false);
+
+    let catalog = super::router(Arc::clone(&source))
+        .oneshot(
+            Request::get("/v1/repos/repo-source/commands")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(catalog.status(), StatusCode::OK);
+    let catalog: serde_json::Value = from_slice(
+        &axum::body::to_bytes(catalog.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let revision = catalog["revision"].as_str().unwrap().to_string();
+
+    let response = super::router(Arc::clone(&source))
+        .oneshot(
+            Request::post("/v1/repos/repo-source/commands/custom%3Atask-manager/run")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "catalogRevision": revision }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["taskId"], "task-manager-owner");
+    assert_eq!(body["reused"], true);
+    assert_eq!(body["ownerDesktopId"], "desktop-command-owner");
+    assert_eq!(body["ownerLocalTaskId"], "task-manager-owner");
+    // The owner's own repository id, learned from the owner. Answering with
+    // this machine's "repo-source" would name a task that exists nowhere.
+    assert_eq!(body["ownerLocalRepoId"], "repo-owner");
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    relay.abort();
+}
+
+/// An account directory that cannot answer is uncertainty, not permission to
+/// create a rival singleton. The refusal must say so in the body: this is
+/// exactly the 503 the phone reported as a bare `LAN request failed (503)`.
+#[tokio::test]
+async fn run_repo_command_refuses_when_the_account_directory_cannot_answer() {
+    let source = test_state_with_seed("desktop-command-stranded", "Source Mac", |db| {
+        seed_remote_repo(db, "repo-source")
+    });
+    let mut requests = source
+        .take_desktop_relay_requests()
+        .expect("take source relay queue");
+    source.set_desktop_routing_available(true);
+    let relay = tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            match request {
+                crate::http_api::DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
+                crate::http_api::DesktopRelayRequest::ListRepoSingletons { response, .. } => {
+                    let _ = response.send(Err(
+                        "repository singleton directory is unavailable".to_string()
+                    ));
+                }
+                crate::http_api::DesktopRelayRequest::ClaimRepoSingleton { .. } => {
+                    panic!("an unanswerable directory must never reach a claim")
+                }
+                crate::http_api::DesktopRelayRequest::ListActive { response, .. } => {
+                    let _ = response.send(Ok(Vec::new()));
+                }
+                _ => panic!("unexpected relay request during an unanswerable directory lookup"),
+            }
+        }
+    });
+
+    let catalog = super::router(Arc::clone(&source))
+        .oneshot(
+            Request::get("/v1/repos/repo-source/commands")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let catalog: serde_json::Value = from_slice(
+        &axum::body::to_bytes(catalog.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let revision = catalog["revision"].as_str().unwrap().to_string();
+
+    let response = super::router(Arc::clone(&source))
+        .oneshot(
+            Request::post("/v1/repos/repo-source/commands/custom%3Atask-manager/run")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "catalogRevision": revision }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let message = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(message.contains("task-manager"), "{message}");
+    assert!(message.contains("from the account directory"), "{message}");
+    assert!(message.contains("no singleton was created"), "{message}");
+
+    let db = Db::open(&source.config().db_path).unwrap();
+    assert!(db
+        .find_open_agent_tasks_by_remote_url_hash("shared-remote-hash", "task-manager")
+        .unwrap()
+        .is_empty());
     relay.abort();
 }
 

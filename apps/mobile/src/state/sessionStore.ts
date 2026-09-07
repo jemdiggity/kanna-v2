@@ -90,6 +90,16 @@ export interface PendingRepoCommandTask {
   taskId: string;
 }
 
+/**
+ * A launch the desktop refused. The catalog it came from is still good, so this
+ * is carried beside the catalog rather than as a catalog-level error: a refused
+ * launch must not read as "commands unavailable" or hide the commands.
+ */
+export interface RepoCommandRunFailure {
+  commandId: string;
+  message: string;
+}
+
 export interface PendingTaskCreation {
   slotId: string;
   taskId: string;
@@ -165,6 +175,7 @@ export interface SessionState {
   repoCommandCatalog: RepoCommandCatalog | null;
   repoCommandStatus: RepoCommandStatus;
   repoCommandErrorMessage: string | null;
+  repoCommandRunError: RepoCommandRunFailure | null;
   runningRepoCommandId: string | null;
   pendingRepoCommandTask: PendingRepoCommandTask | null;
   unavailableRepoCommandIds: string[];
@@ -477,6 +488,7 @@ export function createSessionStore(): SessionStore {
     repoCommandCatalog: null,
     repoCommandStatus: "idle",
     repoCommandErrorMessage: null,
+    repoCommandRunError: null,
     runningRepoCommandId: null,
     pendingRepoCommandTask: null,
     unavailableRepoCommandIds: [],
@@ -964,6 +976,7 @@ export function createSessionStore(): SessionStore {
         repoCommandCatalog: null,
         repoCommandStatus: "idle",
         repoCommandErrorMessage: null,
+        repoCommandRunError: null,
         pendingRepoCommandTask: null
       };
       publish();
@@ -991,6 +1004,7 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         repoCommandCatalog: null,
+        repoCommandRunError: null,
         ...(state.pendingRepoCommandTask
           ? {}
           : {
@@ -1040,17 +1054,30 @@ export function createSessionStore(): SessionStore {
     },
     beginRepoCommandRun(runningRepoCommandId) {
       if (state.runningRepoCommandId || state.pendingRepoCommandTask) return false;
-      state = { ...state, runningRepoCommandId };
+      state = { ...state, runningRepoCommandId, repoCommandRunError: null };
       publish();
       return true;
     },
+    // A refused launch says nothing about the catalog it was launched from, so
+    // the catalog stays loaded and `repoCommandStatus` stays `ready`. Marking
+    // the whole screen `error` hid every command behind "Commands unavailable"
+    // and offered a Try Again that reloaded the catalog — neither of which is
+    // what failed.
     setRepoCommandRunError(commandId, repoCommandErrorMessage) {
       if (state.runningRepoCommandId !== commandId) return;
-      state = {
-        ...state,
-        repoCommandStatus: "error",
-        repoCommandErrorMessage
-      };
+      state = state.repoCommandCatalog
+        ? {
+            ...state,
+            repoCommandRunError: {
+              commandId,
+              message: repoCommandErrorMessage
+            }
+          }
+        : {
+            ...state,
+            repoCommandStatus: "error",
+            repoCommandErrorMessage
+          };
       publish();
     },
     setRepoCommandTaskLoadError(pendingRepoCommandTask, repoCommandErrorMessage) {

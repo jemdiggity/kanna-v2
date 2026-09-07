@@ -489,6 +489,10 @@ pub struct NewStageRun<'a> {
 pub struct OpenAgentTask {
     pub task_id: String,
     pub session_id: String,
+    /// The task's repository id on *this* installation. Repository ids are
+    /// installation-local, so a sibling desktop asking about this singleton
+    /// can only learn the owner's id by being told it.
+    pub repo_id: String,
 }
 
 #[derive(Debug)]

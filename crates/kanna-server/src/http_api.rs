@@ -48,7 +48,8 @@ mod tests;
 
 pub use state::{AppState, HttpInvokeResponse};
 pub(crate) use state::{
-    DesktopRelayRequest, MobileNotificationRequest, RemoteSingletonClaim, RemoteSingletonOwner,
+    DesktopRelayRequest, MobileNotificationRequest, ObservedSingletonTask, RemoteSingletonClaim,
+    RemoteSingletonOwner,
 };
 
 #[allow(dead_code)]

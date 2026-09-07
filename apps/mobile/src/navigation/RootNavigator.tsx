@@ -536,6 +536,7 @@ function MoreRouteContent({
         void controller.selectRepo(repoId);
       }}
       repos={commandRepos}
+      runError={state.repoCommandRunError}
       runningCommandId={state.runningRepoCommandId}
       scrollViewRef={scrollViewRef}
       selectedRepoId={state.selectedRepoId}

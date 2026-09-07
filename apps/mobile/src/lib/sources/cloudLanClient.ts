@@ -1443,20 +1443,37 @@ export function createCloudLanClient(
         return response;
       }
       const ownerDesktopId = response.ownerDesktopId ?? route.desktopId;
-      const ownerLocalRepoId = response.ownerLocalRepoId ?? route.repoId;
       const ownerLocalTaskId = response.ownerLocalTaskId ?? response.taskId;
+      // A repository command can reuse a singleton the account already owns on
+      // another desktop. That task lives under the owner's own repository id,
+      // and repository ids are installation-local — so this desktop's id may
+      // only stand in when this desktop is the owner.
+      const ownedHere = ownerDesktopId === route.desktopId;
+      const ownerLocalRepoId =
+        response.ownerLocalRepoId ?? (ownedHere ? route.repoId : undefined);
+      if (ownerLocalRepoId === undefined) {
+        // Naming the task would mean guessing the owner's repository id, and a
+        // guess resolves to no task anywhere. Report what the desktop said and
+        // let the ordinary task listing find it.
+        return { ...response, ownerDesktopId, ownerLocalTaskId };
+      }
       const canonicalTaskId = buildCloudTaskId({
         ownerDesktopId,
         localRepoId: ownerLocalRepoId,
         ownerLocalTaskId
       });
-      provisionalTaskRoutes.set(canonicalTaskId, {
-        source: "lan",
-        taskId: ownerLocalTaskId,
-        desktopId: ownerDesktopId,
-        localRepoId: ownerLocalRepoId,
-        displayRepoId: repoId
-      });
+      if (ownedHere) {
+        // Only the machine this request just reached is known to be on this
+        // LAN. A sibling owner may be reachable through the cloud alone, so it
+        // resolves the way every other sibling-owned task does.
+        provisionalTaskRoutes.set(canonicalTaskId, {
+          source: "lan",
+          taskId: ownerLocalTaskId,
+          desktopId: ownerDesktopId,
+          localRepoId: ownerLocalRepoId,
+          displayRepoId: repoId
+        });
+      }
       return {
         ...response,
         taskId: canonicalTaskId,

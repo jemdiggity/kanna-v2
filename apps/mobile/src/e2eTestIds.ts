@@ -201,6 +201,11 @@ export const MOBILE_E2E_IDS = {
   moreCommand(actionId: string): string {
     return `mobile.more.command.${actionId}`;
   },
+  // Deliberately not under the `mobile.more.command.` prefix: selectors that
+  // enumerate commands match that prefix, and this is a sibling of one.
+  moreCommandError(actionId: string): string {
+    return `mobile.more.command-error.${actionId}`;
+  },
   moreRepo(repoId: string): string {
     return `mobile.more.repo.${repoId}`;
   },

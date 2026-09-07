@@ -23,7 +23,13 @@ pub(crate) struct RunRepoCommandResponse {
     pub(crate) task_id: String,
     pub(crate) reused: bool,
     pub(crate) owner_desktop_id: String,
-    pub(crate) owner_local_repo_id: String,
+    /// The owner's own repository id, which is what names this task the way
+    /// its owner publishes it. A singleton the account already owns on another
+    /// desktop is reused where it lives, and repository ids are
+    /// installation-local, so this is the owner's id and not the one the
+    /// request came in under. Absent only when the owner could not be asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_local_repo_id: Option<String>,
     pub(crate) owner_local_task_id: String,
 }
 
@@ -72,11 +78,20 @@ pub(super) async fn run_repo_command(
         )
         .await?;
         let task_id = response.task_id;
+        // The reused singleton may live on a sibling desktop, under that
+        // machine's own repository id. Answering with this machine's identity
+        // hands the caller a task name that resolves to nothing anywhere.
+        let owner_desktop_id = response
+            .owner_desktop_id
+            .unwrap_or_else(|| state.config.desktop_id.clone());
+        let owner_local_repo_id = response
+            .owner_local_repo_id
+            .or_else(|| (owner_desktop_id == state.config.desktop_id).then_some(repo_id));
         return Ok(Json(RunRepoCommandResponse {
             task_id: task_id.clone(),
             reused: !response.created,
-            owner_desktop_id: state.config.desktop_id.clone(),
-            owner_local_repo_id: repo_id,
+            owner_desktop_id,
+            owner_local_repo_id,
             owner_local_task_id: task_id,
         }));
     }
@@ -121,7 +136,7 @@ pub(super) async fn run_repo_command(
         task_id: task_id.clone(),
         reused: false,
         owner_desktop_id: state.config.desktop_id.clone(),
-        owner_local_repo_id: repo_id,
+        owner_local_repo_id: Some(repo_id),
         owner_local_task_id: task_id,
     }))
 }

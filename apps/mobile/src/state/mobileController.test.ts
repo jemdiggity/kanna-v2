@@ -1352,14 +1352,80 @@ describe("createMobileController", () => {
 
     await controller.runRepoCommand("factory:create-agent");
 
+    // The catalog it was launched from is still good, so the refusal lands
+    // beside its command instead of replacing the whole screen.
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
-      repoCommandStatus: "error",
-      repoCommandErrorMessage:
-        "kanji-kongbu is not registered on Mac Studio. Choose a machine that has this repo and try again.",
+      repoCommandStatus: "ready",
+      repoCommandErrorMessage: null,
+      repoCommandRunError: {
+        commandId: "factory:create-agent",
+        message:
+          "kanji-kongbu is not registered on Mac Studio. Choose a machine that has this repo and try again."
+      },
       pendingRepoCommandTask: null,
       runningRepoCommandId: null
     });
+    expect(store.getState().repoCommandCatalog).not.toBeNull();
+  });
+
+  it("keeps the catalog and stays connected when the desktop refuses a launch", async () => {
+    // The incident this covers: the desktop's own singleton arbitration
+    // refused the task-manager launch with 503 because its account directory
+    // was unreachable. That is a healthy, connected session refusing one
+    // launch — not a broken link, and not a reason to hide every command.
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    const refusal =
+      "cannot resolve the task-manager singleton for repo ca99c7ee from the "
+      + "account directory: repository singleton directory is unavailable; "
+      + "no singleton was created";
+    client.runRepoCommand.mockRejectedValueOnce(
+      new ServerRefusalError(
+        `LAN request failed (503) for /v1/repos/repo-1/commands/factory%3Acreate-agent/run: ${refusal}`,
+        null,
+        503,
+        refusal
+      )
+    );
+
+    await controller.runRepoCommand("factory:create-agent");
+
+    const state = store.getState();
+    expect(state.connectionState).toBe("connected");
+    expect(state.repoCommandStatus).toBe("ready");
+    expect(state.repoCommandCatalog).not.toBeNull();
+    expect(state.repoCommandRunError).toEqual({
+      commandId: "factory:create-agent",
+      message: refusal
+    });
+    expect(state.runningRepoCommandId).toBeNull();
+    // The refused launch created nothing, so nothing is pending and no
+    // second launch was attempted on the phone's behalf.
+    expect(state.pendingRepoCommandTask).toBeNull();
+    expect(client.runRepoCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a refused launch when the next attempt starts", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    await controller.bootstrap();
+    controller.setNavigationView("more");
+    await flushMicrotasks();
+    client.runRepoCommand.mockRejectedValueOnce(
+      new ServerRefusalError("refused", null, 503, "the directory is unavailable")
+    );
+
+    await controller.runRepoCommand("factory:create-agent");
+    expect(store.getState().repoCommandRunError).not.toBeNull();
+
+    await controller.runRepoCommand("factory:create-agent");
+    expect(store.getState().repoCommandRunError).toBeNull();
   });
 
   it("dismisses a created-task load failure so another command can run", async () => {

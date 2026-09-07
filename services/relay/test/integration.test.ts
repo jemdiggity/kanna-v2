@@ -25,7 +25,9 @@ import {
   claimRepoSingleton,
   createFirestoreCloudTaskPublicationStore,
   handleCloudTaskPublication,
+  listRepoSingletonOwners,
   releaseRepoSingletonReservation,
+  RepoSingletonDirectoryIncomplete,
 } from "../src/cloudTaskPublication.js";
 import {
   anonymousDesktopId,
@@ -1395,6 +1397,117 @@ describe("Relay integration", () => {
     }
   });
 
+  it("answers account-directory invokes that name no desktop, and never routes them", async () => {
+    // The account-wide singleton directory is asked of the relay itself, so
+    // `list_repo_singletons` / `claim_repo_singleton` carry no `desktopId` —
+    // there is no target desktop to name. A relay that does not recognize
+    // them falls through to desktop-to-desktop routing and refuses with
+    // "desktopId required for desktop-to-desktop request", which the asking
+    // desktop reports as `cannot resolve the <agent> singleton ... from the
+    // account directory` and a 503 that reaches the phone. That is exactly
+    // what a relay deployment predating these commands did, so the contract
+    // is pinned here: the command is answered, not routed.
+    const ownerDesktopId = "directory-owner-desktop";
+    const userRef = testFirestore.doc(`users/${TEST_USER_ID}`);
+    const desktopRef = userRef.collection("desktops").doc(ownerDesktopId);
+    // Every canonical desktop on the account must have published a complete
+    // directory, the asking machine included — an incomplete one is an honest
+    // failure, covered at the end of this case.
+    const requesterDesktopRef = userRef.collection("desktops").doc(SECRET_DESKTOP_ID);
+    const requesterBefore = await requesterDesktopRef.get();
+    await requesterDesktopRef.set({
+      desktopId: SECRET_DESKTOP_ID,
+      singletonDirectoryVersion: 1,
+    });
+    await desktopRef.set({ desktopId: ownerDesktopId, singletonDirectoryVersion: 1 });
+    await desktopRef.collection("tasks").doc("task-directory-manager").set({
+      ...publishedTask("idle", {
+        ownerDesktopId,
+        ownerLocalTaskId: "task-directory-manager",
+        singletonAgent: "task-manager",
+      }),
+      closedAt: null,
+    });
+
+    const { ws: requester } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+
+    try {
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "directory-lookup",
+        command: "list_repo_singletons",
+        args: { remoteUrlHash: "remote-hash", agent: "task-manager" },
+      }));
+      const lookup = await waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "directory-lookup",
+      );
+      expect(lookup.error).toBeUndefined();
+      expect(lookup.data).toEqual({
+        owners: [{ machineId: ownerDesktopId, taskId: "task-directory-manager" }],
+        illegible: [],
+      });
+
+      // The same lookup from a second machine on the account reuses that
+      // owner rather than electing a rival, and a claim behind it is refused
+      // as already owned — no duplicate singleton is created.
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "directory-claim",
+        command: "claim_repo_singleton",
+        args: {
+          remoteUrlHash: "remote-hash",
+          agent: "task-manager",
+          taskId: "rival-task",
+          creatorFence: "rival-creator",
+        },
+      }));
+      const claim = await waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "directory-claim",
+      );
+      expect(claim.error).toBeUndefined();
+      expect(claim.data).toMatchObject({
+        claim: {
+          status: "owned",
+          machineId: ownerDesktopId,
+          taskId: "task-directory-manager",
+        },
+      });
+
+      // A machine whose index cannot be read for this repository no longer
+      // fails the lookup. It is reported beside the answer, so the caller can
+      // still reuse what is known while creation stays fail-closed.
+      await desktopRef.set({ desktopId: ownerDesktopId, singletonDirectoryVersion: 0 });
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "directory-illegible",
+        command: "list_repo_singletons",
+        args: { remoteUrlHash: "remote-hash", agent: "task-manager" },
+      }));
+      const illegible = await waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "directory-illegible",
+      );
+      expect(illegible.error).toBeUndefined();
+      expect(illegible.data).toEqual({ owners: [], illegible: [ownerDesktopId] });
+
+      // A genuine infrastructure failure is still an honest error, and never
+      // the "desktopId required" misrouting a stale relay answered with.
+      expect(JSON.stringify(illegible.data)).not.toContain("desktopId required");
+    } finally {
+      await closeAndWait(requester);
+      await testFirestore.recursiveDelete(desktopRef);
+      await testFirestore.recursiveDelete(userRef.collection("repoSingletonClaims"));
+      const restored = requesterBefore.data();
+      if (restored) await requesterDesktopRef.set(restored);
+      else await requesterDesktopRef.delete();
+    }
+  });
+
   it("stops routing sibling invokes after the requester desktop secret is revoked", async () => {
     const requesterCredentialRef = testFirestore.doc(
       `desktopCredentials/${SECRET_DESKTOP_ID}`,
@@ -2473,7 +2586,7 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
-  it.each(["absent", "unowned", "closed-owner"])("atomically elects one owner for a %s singleton record", async (recordState) => {
+  it.each(["absent", "unowned", "closed-owner", "illegible-excluded-peer"])("atomically elects one owner for a %s singleton record", async (recordState) => {
     const userId = `singleton-race-${Date.now()}`;
     const userRef = testFirestore.doc(`users/${userId}`);
     await Promise.all(["desktop-a", "desktop-b"].map(async (desktopId) => {
@@ -2482,7 +2595,22 @@ describe("Relay integration", () => {
         singletonDirectoryVersion: 1,
       });
     }));
-    if (recordState !== "absent") {
+    if (recordState === "illegible-excluded-peer") {
+      // A third machine that cannot mark its singletons, but whose own index
+      // proves it holds nothing for this repository. It must not weaken the
+      // election between the two live machines, nor block it.
+      const peerRef = userRef.collection("desktops").doc("desktop-legacy");
+      await peerRef.set({ desktopId: "desktop-legacy" });
+      await peerRef.collection("tasks").doc("legacy-elsewhere").set({
+        ...publishedTask("idle", {
+          ownerDesktopId: "desktop-legacy",
+          ownerLocalTaskId: "legacy-elsewhere",
+        }),
+        closedAt: null,
+        repo: { remoteUrlHash: "unrelated-remote-hash" },
+      });
+    }
+    if (recordState !== "absent" && recordState !== "illegible-excluded-peer") {
       const key = sha256Hex("shared-remote-hash\0task-manager");
       await userRef.collection("repoSingletonClaims").doc(key).set({
         remoteUrlHash: "shared-remote-hash", agent: "task-manager", state: "owned",
@@ -2543,6 +2671,135 @@ describe("Relay integration", () => {
     }
   });
 
+  it("scopes an unreadable legacy directory to the repositories it cannot answer for", async () => {
+    // A machine that published before per-task `singletonAgent` existed cannot
+    // say which of its tasks are singletons. Refusing the whole account for it
+    // turned one stale record into a permanent outage with no recovery that
+    // did not require physical access to that machine. Legibility is therefore
+    // decided per machine and per repository, from that machine's own index.
+    const userId = `singleton-legacy-${Date.now()}`;
+    const userRef = testFirestore.doc(`users/${userId}`);
+    const legacyId = "legacy-offline-desktop";
+    const liveId = "live-desktop";
+    const REPO_R = "repo-r-hash";
+    const REPO_S = "repo-s-hash";
+    const legacyRef = userRef.collection("desktops").doc(legacyId);
+    const liveRef = userRef.collection("desktops").doc(liveId);
+    const claimsRef = userRef.collection("repoSingletonClaims");
+    const legacyTask = (id: string, fields: Record<string, unknown>) =>
+      legacyRef.collection("tasks").doc(id).set({
+        ...publishedTask("idle", { ownerDesktopId: legacyId, ownerLocalTaskId: id }),
+        closedAt: null,
+        ...fields,
+      });
+    const claim = (agent: string, remoteUrlHash: string, machineId: string, taskId: string) =>
+      claimRepoSingleton({
+        userId, remoteUrlHash, agent, machineId, taskId,
+        creatorFence: `${machineId}-fence`, db: testFirestore,
+      });
+
+    try {
+      // The legacy machine is offline and keeps its data. It published one
+      // open task, for repository S only.
+      await legacyRef.set({ desktopId: legacyId });
+      await legacyTask("legacy-task-s", { repo: { remoteUrlHash: REPO_S } });
+      await liveRef.set({ desktopId: liveId, singletonDirectoryVersion: 1 });
+      await liveRef.collection("tasks").doc("live-manager").set({
+        ...publishedTask("idle", {
+          ownerDesktopId: liveId,
+          ownerLocalTaskId: "live-manager",
+          singletonAgent: "task-manager",
+        }),
+        closedAt: null,
+        repo: { remoteUrlHash: REPO_R },
+      });
+
+      // (a) The known owner is returned for repository R, and the legacy
+      // machine is not reported illegible there — its own index proves it
+      // holds nothing for R. Nothing is created.
+      await expect(listRepoSingletonOwners({
+        userId, remoteUrlHash: REPO_R, agent: "task-manager", db: testFirestore,
+      })).resolves.toEqual({
+        owners: [{ machineId: liveId, taskId: "live-manager" }],
+        illegible: [],
+      });
+      expect((await claimsRef.get()).empty).toBe(true);
+
+      // (b) With no owner anywhere for that agent, creation is permitted and
+      // acquires exactly once.
+      await expect(claim("merge", REPO_R, liveId, "new-merge")).resolves.toMatchObject({
+        status: "acquired", machineId: liveId, taskId: "new-merge",
+      });
+
+      // (c) For repository S the legacy machine holds an open task, so it
+      // could be that repository's singleton. Creation refuses with the typed
+      // error naming the machine, and writes no reservation.
+      const refused = await claim("task-manager", REPO_S, liveId, "rival-s").then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(refused).toBeInstanceOf(RepoSingletonDirectoryIncomplete);
+      expect((refused as RepoSingletonDirectoryIncomplete).machineIds).toEqual([legacyId]);
+      expect((refused as Error).message).toContain(legacyId);
+      expect((refused as Error).message).toContain(REPO_S);
+      const afterRefusal = await claimsRef.get();
+      expect(afterRefusal.docs.map((document) => document.data().remoteUrlHash))
+        .toEqual([REPO_R]);
+
+      // (e) Account and repository separation: R is unaffected by S's
+      // uncertainty, and reuse there still resolves.
+      await expect(listRepoSingletonOwners({
+        userId, remoteUrlHash: REPO_S, agent: "task-manager", db: testFirestore,
+      })).resolves.toEqual({ owners: [], illegible: [legacyId] });
+      await expect(listRepoSingletonOwners({
+        userId, remoteUrlHash: REPO_R, agent: "task-manager", db: testFirestore,
+      })).resolves.toMatchObject({ illegible: [] });
+
+      // (d) An open task that names no repository is unattributable, so it
+      // could belong to any of them: every repository turns illegible.
+      await legacyTask("legacy-task-unattributed", { repo: {} });
+      await expect(listRepoSingletonOwners({
+        userId, remoteUrlHash: REPO_R, agent: "task-manager", db: testFirestore,
+      })).resolves.toEqual({
+        owners: [{ machineId: liveId, taskId: "live-manager" }],
+        illegible: [legacyId],
+      });
+      // Reuse of the known owner still works even then — only creation stops.
+      await expect(claim("task-manager", REPO_R, liveId, "rival-r")).resolves.toMatchObject({
+        status: "owned", machineId: liveId, taskId: "live-manager",
+      });
+      await legacyRef.collection("tasks").doc("legacy-task-unattributed").delete();
+
+      // (h) A stored claim naming the legacy machine is preserved while its
+      // index still shows an open task for that repository...
+      await claimsRef.doc(sha256Hex(`${REPO_S}\0merge`)).set({
+        remoteUrlHash: REPO_S, agent: "merge", state: "owned",
+        machineId: legacyId, taskId: "legacy-task-s", creatorFence: null,
+      });
+      await expect(claim("merge", REPO_S, liveId, "steal-s")).resolves.toMatchObject({
+        status: "owned", machineId: legacyId, taskId: "legacy-task-s",
+      });
+      // ...and released only once that machine's own index disproves it.
+      await legacyRef.collection("tasks").doc("legacy-task-s").set({
+        ...publishedTask("idle", { ownerDesktopId: legacyId, ownerLocalTaskId: "legacy-task-s" }),
+        closedAt: "2026-09-01T00:00:00Z",
+        repo: { remoteUrlHash: REPO_S },
+      });
+      await expect(claim("merge", REPO_S, liveId, "reelected-s")).resolves.toMatchObject({
+        status: "acquired", machineId: liveId, taskId: "reelected-s",
+      });
+
+      // (g) A version-1 machine that is merely offline is untouched by any of
+      // this: its published open singleton is still the owner, never released.
+      await expect(claim("task-manager", REPO_R, legacyId, "offline-rival"))
+        .resolves.toMatchObject({
+          status: "owned", machineId: liveId, taskId: "live-manager",
+        });
+    } finally {
+      await testFirestore.recursiveDelete(userRef);
+    }
+  });
+
   it("keeps a paused creator exclusive across reconnect and recovers after restart", async () => {
     const userId = `singleton-reservation-recovery-${Date.now()}`;
     const userRef = testFirestore.doc(`users/${userId}`);
@@ -2557,6 +2814,19 @@ describe("Relay integration", () => {
       singletonReservationFence: liveCreatorFence,
     };
     try {
+      // A machine that cannot mark its singletons, excluded for this
+      // repository by its own index. Tolerating it must not become a way to
+      // release a reservation a live creator fence still holds.
+      const legacyPeerRef = userRef.collection("desktops").doc("singleton-recovery-legacy");
+      await legacyPeerRef.set({ desktopId: "singleton-recovery-legacy" });
+      await legacyPeerRef.collection("tasks").doc("legacy-elsewhere").set({
+        ...publishedTask("idle", {
+          ownerDesktopId: "singleton-recovery-legacy",
+          ownerLocalTaskId: "legacy-elsewhere",
+        }),
+        closedAt: null,
+        repo: { remoteUrlHash: "unrelated-remote-hash" },
+      });
       const claimingSession = await beginCloudTaskPublicationSession({
         userId,
         desktopId: claimingDesktopId,

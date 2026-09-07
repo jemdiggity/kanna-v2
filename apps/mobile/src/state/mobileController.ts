@@ -2813,7 +2813,11 @@ export function createMobileController(
             commandId
           );
         }
-        if (!(error instanceof RepoNotRegisteredError)) {
+        // A desktop that answered with a reason is a healthy, connected
+        // session refusing one launch. Only a transport that failed puts the
+        // app into its connection-error state.
+        const refusal = nestedServerRefusal(error);
+        if (!(error instanceof RepoNotRegisteredError) && !refusal) {
           fail(error);
         }
         reloadCatalog = isStaleRepoCommandError(error);
@@ -2821,9 +2825,11 @@ export function createMobileController(
           const message =
             error instanceof RepoNotRegisteredError
               ? `${error.repoName} is not registered on ${error.desktopName}. Choose a machine that has this repo and try again.`
-              : error instanceof Error
-                ? error.message
-                : "Repository command failed";
+              : refusal?.detail
+                ? refusal.detail
+                : error instanceof Error
+                  ? error.message
+                  : "Repository command failed";
           store.setRepoCommandRunError(
             commandId,
             message

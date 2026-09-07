@@ -28,12 +28,29 @@ pub(super) struct SignalAgentRequest {
 pub(super) struct SignalAgentResponse {
     pub(super) task_id: String,
     pub(super) created: bool,
+    /// The machine whose lifecycle owns `task_id`. A singleton the account
+    /// already owns on another desktop is reused where it lives, so this is
+    /// not always the desktop that answered the request — and a caller that
+    /// assumed it was named the wrong machine for the task it was handed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) owner_desktop_id: Option<String>,
+    /// The owner's own repository id for `task_id`, which is what a caller
+    /// needs to name the task the way its owner publishes it. Repository ids
+    /// are installation-local, so this is the owner's id, not the id the
+    /// request came in under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) owner_local_repo_id: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SingletonCandidate {
     task_id: String,
+    /// The owner's own repository id for this task. Repository ids are
+    /// installation-local, so a sibling can only learn it here; absent from an
+    /// older desktop that did not report it.
+    #[serde(default)]
+    local_repo_id: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -69,6 +86,7 @@ pub(super) async fn find_local_singletons(
             .into_iter()
             .map(|task| SingletonCandidate {
                 task_id: task.task_id,
+                local_repo_id: Some(task.repo_id),
             })
             .collect(),
     }))
@@ -483,6 +501,7 @@ pub(super) async fn signal_agent_request(
         Some(SingletonOwner::Remote {
             machine_id,
             task_id,
+            local_repo_id,
         }) => {
             let path = format!("/v1/tasks/{}/input", encode_path_segment(&task_id));
             let response = state
@@ -510,6 +529,8 @@ pub(super) async fn signal_agent_request(
             return Ok(SignalAgentResponse {
                 task_id,
                 created: false,
+                owner_desktop_id: Some(machine_id),
+                owner_local_repo_id: local_repo_id,
             });
         }
         Some(SingletonOwner::Local(running)) => {
@@ -640,9 +661,23 @@ pub(super) async fn signal_agent_request(
                         remote_singleton_unreachable(&claim.machine_id, &claim.task_id, error)
                     })?;
                 if response.status == axum::http::StatusCode::NO_CONTENT.as_u16() {
+                    // The owner's repository id was never observed on this
+                    // path — the claim record names a machine and a task, not
+                    // a repository — so ask the owner for it rather than
+                    // answering with a local id that names nothing there.
+                    let owner_local_repo_id = observed_owner_repo_id(
+                        &state,
+                        Some(remote_url_hash),
+                        &agent,
+                        &claim.machine_id,
+                        &claim.task_id,
+                    )
+                    .await;
                     return Ok(SignalAgentResponse {
                         task_id: claim.task_id,
                         created: false,
+                        owner_desktop_id: Some(claim.machine_id),
+                        owner_local_repo_id,
                     });
                 }
                 return Err(remote_singleton_unreachable(
@@ -728,12 +763,18 @@ pub(super) async fn signal_agent_request(
     Ok(SignalAgentResponse {
         task_id,
         created: true,
+        owner_desktop_id: Some(state.config.desktop_id.clone()),
+        owner_local_repo_id: Some(repo_id),
     })
 }
 
 enum SingletonOwner {
     Local(crate::db::OpenAgentTask),
-    Remote { machine_id: String, task_id: String },
+    Remote {
+        machine_id: String,
+        task_id: String,
+        local_repo_id: Option<String>,
+    },
 }
 
 async fn resolve_singleton_owner(
@@ -858,12 +899,15 @@ async fn resolve_singleton_owner(
                     )
                 })
             })?;
-        let task_ids = lookup
+        let tasks = lookup
             .tasks
             .into_iter()
-            .map(|task| task.task_id)
+            .map(|task| crate::http_api::ObservedSingletonTask {
+                task_id: task.task_id,
+                local_repo_id: task.local_repo_id,
+            })
             .collect::<Vec<_>>();
-        state.observe_singleton_owners(&remote_url_hash, agent, &machine_id, task_ids.clone());
+        state.observe_singleton_owners(&remote_url_hash, agent, &machine_id, tasks);
     }
     let remote_tasks = state.known_singleton_owners(&remote_url_hash, agent);
     unique_singleton_owner(state, repo_id, agent, local_tasks, remote_tasks)
@@ -875,7 +919,7 @@ fn unique_singleton_owner(
     repo_id: &str,
     agent: &str,
     mut local_tasks: Vec<crate::db::OpenAgentTask>,
-    remote_tasks: Vec<(String, String)>,
+    remote_tasks: Vec<(String, crate::http_api::ObservedSingletonTask)>,
 ) -> Result<Option<SingletonOwner>, (axum::http::StatusCode, String)> {
     let count = local_tasks.len() + remote_tasks.len();
     if count > 1 {
@@ -885,7 +929,7 @@ fn unique_singleton_owner(
             .chain(
                 remote_tasks
                     .iter()
-                    .map(|(machine_id, task_id)| format!("{machine_id}:{task_id}")),
+                    .map(|(machine_id, task)| format!("{machine_id}:{}", task.task_id)),
             )
             .collect::<Vec<_>>();
         owners.sort();
@@ -902,10 +946,50 @@ fn unique_singleton_owner(
     Ok(remote_tasks
         .into_iter()
         .next()
-        .map(|(machine_id, task_id)| SingletonOwner::Remote {
+        .map(|(machine_id, task)| SingletonOwner::Remote {
             machine_id,
-            task_id,
+            task_id: task.task_id,
+            local_repo_id: task.local_repo_id,
         }))
+}
+
+/// Ask a sibling for its own repository id for a singleton it owns.
+///
+/// The relay's claim record names a machine and a task, never a repository,
+/// and repository ids are installation-local. This reuses the authenticated
+/// singleton lookup the owner already serves; a machine that cannot answer
+/// leaves the id absent rather than substituting a local one.
+async fn observed_owner_repo_id(
+    state: &Arc<AppState>,
+    remote_url_hash: Option<&str>,
+    agent: &str,
+    machine_id: &str,
+    task_id: &str,
+) -> Option<String> {
+    let remote_url_hash = remote_url_hash?;
+    let path = format!(
+        "/v1/repo-singletons/{}/{}",
+        encode_path_segment(remote_url_hash),
+        encode_path_segment(agent)
+    );
+    let response = state
+        .invoke_relay_desktop(
+            machine_id.to_string(),
+            "GET".to_string(),
+            path,
+            serde_json::Value::Null,
+        )
+        .await
+        .ok()?;
+    if response.status != axum::http::StatusCode::OK.as_u16() {
+        return None;
+    }
+    serde_json::from_value::<SingletonLookupResponse>(response.body?)
+        .ok()?
+        .tasks
+        .into_iter()
+        .find(|task| task.task_id == task_id)
+        .and_then(|task| task.local_repo_id)
 }
 
 fn singleton_lookup_uncertain(
@@ -983,6 +1067,11 @@ async fn signal_local_singleton(
     Ok(SignalAgentResponse {
         task_id: running.task_id,
         created: false,
+        owner_desktop_id: Some(state.config.desktop_id.clone()),
+        // The task's own repository, not the one the request named: a
+        // singleton is shared across every local repository with the same
+        // remote, and those rows have different ids.
+        owner_local_repo_id: Some(running.repo_id),
     })
 }
 
