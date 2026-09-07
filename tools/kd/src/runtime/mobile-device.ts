@@ -222,6 +222,12 @@ function simulatorPreference(
   left: AvailableSimulatorDevice,
   right: AvailableSimulatorDevice
 ): number {
+  // Preserve the historical default of choosing an iPhone while allowing an
+  // explicitly named iPad for tablet workspace development.
+  const leftIsIPhone = left.deviceTypeIdentifier.includes(".SimDeviceType.iPhone-");
+  const rightIsIPhone = right.deviceTypeIdentifier.includes(".SimDeviceType.iPhone-");
+  const familyDifference = Number(rightIsIPhone) - Number(leftIsIPhone);
+  if (familyDifference !== 0) return familyDifference;
   const bootDifference = Number(right.state === "Booted") - Number(left.state === "Booted");
   if (bootDifference !== 0) return bootDifference;
   const runtimeDifference = compareSimulatorRuntime(left.runtime, right.runtime);
@@ -244,7 +250,9 @@ export function parseSimctlDeviceList(stdout: string): AvailableSimulatorDevice[
     for (const device of runtimeDevices) {
       if (
         device.isAvailable !== true ||
-        !device.deviceTypeIdentifier?.includes(".SimDeviceType.iPhone-") ||
+        !device.deviceTypeIdentifier ||
+        (!device.deviceTypeIdentifier.includes(".SimDeviceType.iPhone-") &&
+          !device.deviceTypeIdentifier.includes(".SimDeviceType.iPad-")) ||
         !device.name ||
         !device.state ||
         !device.udid
@@ -270,7 +278,7 @@ export function selectSimulatorDevice(
 ): AvailableSimulatorDevice {
   if (!devices.length) {
     throw new Error(
-      "No available iPhone simulators were found. Install an iOS Simulator runtime in Xcode Settings > Components."
+      "No available iPhone or iPad simulators were found. Install an iOS Simulator runtime in Xcode Settings > Components."
     );
   }
   const ordered = [...devices].sort(simulatorPreference);

@@ -118,6 +118,7 @@ interface ExpoConfig {
   ios: {
     bundleIdentifier: string;
     appleTeamId: string;
+    supportsTablet: boolean;
     googleServicesFile?: string;
     entitlements: {
       "aps-environment": "development" | "production";
@@ -318,6 +319,9 @@ export function createExpoConfig(
     ios: {
       bundleIdentifier: appEnvironment.iosBundleId,
       appleTeamId: "EA4J68749Z",
+      // The bounded iPad workspace spike ships only in the dev native shell.
+      // Staging and production remain unchanged until the owner evaluates it.
+      supportsTablet: appEnvironment.name === "dev",
       // Dev has no matching Firebase Apple app. Keep the production and
       // staging plist wiring intact without copying either plist into dev.
       ...(appEnvironment.name === "dev"

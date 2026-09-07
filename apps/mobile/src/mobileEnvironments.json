@@ -1,6 +1,6 @@
 {
   "dev": {
-    "runtimeVersion": "2.2.3",
+    "runtimeVersion": "2.2.4",
     "name": "dev",
     "displayName": "Kanna Dev",
     "scheme": "kanna-dev",

@@ -52,6 +52,8 @@ interface TaskCardProps {
   shortId?: string | null;
   /** This phone's own pin state for the row. */
   pinned?: boolean;
+  compact?: boolean;
+  selected?: boolean;
   pinAction?: TaskCardPinAction;
   dismissAction?: TaskCardDismissAction;
   onPress(): void;
@@ -64,6 +66,8 @@ export function TaskCard({
   repoLabel = null,
   shortId = null,
   pinned = false,
+  compact = false,
+  selected = false,
   pinAction,
   dismissAction,
   onPress
@@ -122,11 +126,14 @@ export function TaskCard({
       accessible
       style={[
         styles.card,
+        compact ? styles.cardCompact : null,
         {
           backgroundColor: stageTheme.surface,
-          borderColor: pinned ? stageTheme.pinnedBorder : stageTheme.border,
+          borderColor:
+            selected || pinned ? stageTheme.pinnedBorder : stageTheme.border,
           borderLeftColor: stageTheme.accent
-        }
+        },
+        selected ? styles.cardSelected : null
       ]}
       testID={MOBILE_E2E_IDS.taskListItem(uiId)}
       onAccessibilityAction={handleAccessibilityAction}
@@ -141,7 +148,10 @@ export function TaskCard({
         </Text>
       ) : null}
       <View style={styles.row}>
-        <Text numberOfLines={2} style={[styles.title, titleActivityStyle]}>
+        <Text
+          numberOfLines={compact ? 1 : 2}
+          style={[styles.title, compact ? styles.titleCompact : null, titleActivityStyle]}
+        >
           {model.title}
         </Text>
         <View style={styles.pillColumn}>
@@ -187,7 +197,7 @@ export function TaskCard({
       </View>
       {model.waitingPromptSnippet ? (
         <Text
-          numberOfLines={3}
+          numberOfLines={compact ? 1 : 3}
           style={[
             styles.preview,
             model.isWaitingPromptPlaceholder
@@ -240,6 +250,16 @@ const styles = StyleSheet.create({
     padding: 16,
     paddingLeft: 16 - (TASK_STAGE_STRIPE_WIDTH - 1)
   },
+  cardCompact: {
+    borderRadius: 8,
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    paddingLeft: 10 - (TASK_STAGE_STRIPE_WIDTH - 1)
+  },
+  cardSelected: {
+    borderWidth: 2
+  },
   row: {
     flexDirection: "row",
     gap: 10,
@@ -257,6 +277,9 @@ const styles = StyleSheet.create({
     color: "#F3F7FF",
     flex: 1,
     fontSize: 17
+  },
+  titleCompact: {
+    fontSize: 14
   },
   titleIdle: {
     fontStyle: "normal",

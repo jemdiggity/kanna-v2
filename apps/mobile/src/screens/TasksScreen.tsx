@@ -25,6 +25,8 @@ interface TasksScreenProps {
   /** This phone's own pinned/dismissed rows. */
   taskListPreferences?: LocalTaskListPreferences;
   taskSlots: TaskUiSlot[];
+  sidebarMode?: boolean;
+  selectedTaskId?: string | null;
   scrollViewRef?: React.RefObject<ScrollView | null>;
   onOpenMachines?(): void;
   onRetryRepoCommand?(): void;
@@ -45,6 +47,8 @@ export function TasksScreen({
   repoSelectionDisabled = false,
   taskListPreferences = emptyLocalTaskListPreferences(),
   taskSlots,
+  sidebarMode = false,
+  selectedTaskId = null,
   scrollViewRef,
   onOpenMachines,
   onRetryRepoCommand,
@@ -86,7 +90,10 @@ export function TasksScreen({
   return (
     <ScrollView
       ref={scrollViewRef}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[
+        styles.content,
+        sidebarMode ? styles.sidebarContent : null
+      ]}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
       testID={
@@ -172,6 +179,7 @@ export function TasksScreen({
           <DesktopSetupEmptyState onOpenMachines={onOpenMachines} />
         ) : (
           <TaskList
+            compact={sidebarMode}
             emptyLabel={isRecentView ? "You're all caught up." : "No tasks yet."}
             errorLabel={
               taskCollectionStatus === "error" ? "Could not load tasks." : null
@@ -181,6 +189,7 @@ export function TasksScreen({
             }
             nestSubtasks
             pinnedTaskIds={pinnedTaskIds}
+            selectedTaskId={selectedTaskId}
             repoLabelForTask={isRecentView ? recentTaskRepoLabel : undefined}
             taskSlots={displayedTaskSlots}
             onOpenTask={onOpenTask}
@@ -226,6 +235,9 @@ function DesktopSetupEmptyState({
 const styles = StyleSheet.create({
   content: {
     paddingBottom: 140
+  },
+  sidebarContent: {
+    paddingBottom: 24
   },
   wrap: {
     gap: 14

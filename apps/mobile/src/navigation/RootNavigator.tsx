@@ -27,10 +27,13 @@ import {
 } from "@react-navigation/native-stack";
 import {
   type LayoutChangeEvent,
+  Pressable,
   StyleSheet,
   Text,
-  View
+  View,
+  useWindowDimensions
 } from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { ScrollView as NativeScrollView } from "react-native";
 import { AccountBadge } from "../components/AccountBadge";
 import { CreateTaskComposer } from "../components/CreateTaskComposer";
@@ -80,6 +83,7 @@ import {
   resolveTaskCleanupIdentity
 } from "./taskNavigation";
 import { useTabReselectionScrollToTop } from "./useTabReselectionScrollToTop";
+import { resolveTabletWorkspaceLayout } from "./tabletWorkspaceLayout";
 
 export type {
   RootNavigatorModel,
@@ -141,6 +145,7 @@ interface NavigationContent {
     width: number;
     height: number;
   } | null>;
+  isTabletWorkspace: boolean;
 }
 
 const NavigationContentContext = createContext<NavigationContent | null>(null);
@@ -160,6 +165,8 @@ export default function RootNavigator({
   terminalOutputSource
 }: RootNavigatorProps) {
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
+  const { width: windowWidth } = useWindowDimensions();
+  const tabletLayout = resolveTabletWorkspaceLayout(windowWidth);
   const taskDetailViewportRef = useRef<{
     width: number;
     height: number;
@@ -243,7 +250,8 @@ export default function RootNavigator({
     quickRepliesHydrated,
     state,
     terminalOutputSource,
-    taskDetailViewportRef
+    taskDetailViewportRef,
+    isTabletWorkspace: tabletLayout.isWide
   }), [
     controller,
     e2eTaskSnapshotMarker,
@@ -257,37 +265,52 @@ export default function RootNavigator({
     quickReplies,
     quickRepliesHydrated,
     state,
-    terminalOutputSource
+    terminalOutputSource,
+    tabletLayout.isWide
   ]);
 
   return (
     <NavigationContentContext.Provider value={content}>
       <View
         style={styles.navigatorHost}
-        onLayout={(event: LayoutChangeEvent) => {
-          const { width, height } = event.nativeEvent.layout;
-          taskDetailViewportRef.current = { width, height };
-        }}
+        testID={tabletLayout.isWide ? MOBILE_E2E_IDS.tabletWorkspaceShell : undefined}
       >
-        <NavigationContainer
-          initialState={initialState}
-          ref={navigationRef}
-          theme={KANNA_NAVIGATION_THEME}
-          onStateChange={(navigationState?: NavigationState) => {
-            pendingTaskRouteRef.current = null;
-            controller.setNavigationView(projectActiveView(navigationState));
-          }}
-        >
-          <RootStack.Navigator
-            screenOptions={{
-              contentStyle: styles.stackContent,
-              headerBackTitle: "Back",
-              headerStyle: styles.header,
-              headerTintColor: "#F5F7FB",
-              headerTitleStyle: styles.headerTitle
+        <View style={styles.workspaceRow}>
+          {tabletLayout.isWide ? (
+            <View
+              style={[styles.tabletSidebar, { width: tabletLayout.sidebarWidth }]}
+              testID={MOBILE_E2E_IDS.tabletWorkspaceSidebar}
+            >
+              <TabletTaskSidebar />
+            </View>
+          ) : null}
+          <View
+            style={styles.workspacePane}
+            testID={tabletLayout.isWide ? MOBILE_E2E_IDS.tabletWorkspacePane : undefined}
+            onLayout={(event: LayoutChangeEvent) => {
+              const { width, height } = event.nativeEvent.layout;
+              taskDetailViewportRef.current = { width, height };
             }}
           >
-            <RootStack.Screen
+            <NavigationContainer
+              initialState={initialState}
+              ref={navigationRef}
+              theme={KANNA_NAVIGATION_THEME}
+              onStateChange={(navigationState?: NavigationState) => {
+                pendingTaskRouteRef.current = null;
+                controller.setNavigationView(projectActiveView(navigationState));
+              }}
+            >
+              <RootStack.Navigator
+                screenOptions={{
+                  contentStyle: styles.stackContent,
+                  headerBackTitle: "Back",
+                  headerStyle: styles.header,
+                  headerTintColor: "#F5F7FB",
+                  headerTitleStyle: styles.headerTitle
+                }}
+              >
+                <RootStack.Screen
               component={MainTabsRoute}
               name="MainTabs"
               options={{ headerShown: false }}
@@ -312,8 +335,10 @@ export default function RootNavigator({
               name="Desktops"
               options={{ headerShown: false }}
             />
-          </RootStack.Navigator>
-        </NavigationContainer>
+              </RootStack.Navigator>
+            </NavigationContainer>
+          </View>
+        </View>
         <ComposerOverlay />
       </View>
     </NavigationContentContext.Provider>
@@ -321,6 +346,10 @@ export default function RootNavigator({
 }
 
 function MainTabsRoute() {
+  const { isTabletWorkspace } = useNavigationContent();
+  if (isTabletWorkspace) {
+    return <TabletWorkspaceEmptyState />;
+  }
   return (
     <MainTabs.Navigator
       screenOptions={{ headerShown: false }}
@@ -330,6 +359,94 @@ function MainTabsRoute() {
       <MainTabs.Screen component={ActivityTabRoute} name="Activity" />
       <MainTabs.Screen component={MoreTabRoute} name="More" />
     </MainTabs.Navigator>
+  );
+}
+
+function TabletTaskSidebar() {
+  const {
+    controller,
+    onOpenAccount,
+    pushDesktops,
+    pushPreparedTask,
+    pushSearch,
+    pushTask,
+    state
+  } = useNavigationContent();
+  const needsDesktopSetup =
+    state.auth.status === "signedOut" &&
+    state.accountDesktops.length === 0 &&
+    state.liveLanDesktops.length === 0 &&
+    state.trustedDesktops.length === 0;
+
+  return (
+    <View style={styles.tabletSidebarContent}>
+      <View style={styles.tabletBrand}>
+        <View style={styles.tabletBrandMark}>
+          <Text style={styles.tabletBrandMarkText}>K</Text>
+        </View>
+        <View style={styles.tabletBrandCopy}>
+          <Text style={styles.tabletBrandName}>Kanna</Text>
+          <Text style={styles.tabletBrandEyebrow}>TASK WORKSPACE</Text>
+        </View>
+      </View>
+      <View style={styles.tabletSidebarHeader}>
+        <Text style={styles.tabletSidebarTitle}>Tasks</Text>
+        <AccountBadge auth={state.auth} onPress={onOpenAccount} />
+      </View>
+      <View style={styles.tabletSidebarActions}>
+        <Pressable
+          accessibilityRole="button"
+          style={styles.tabletSidebarAction}
+          onPress={() => controller.openComposer()}
+        >
+          <Text style={styles.tabletSidebarActionText}>New task</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          style={styles.tabletSidebarAction}
+          onPress={pushSearch}
+        >
+          <Text style={styles.tabletSidebarActionText}>Search</Text>
+        </Pressable>
+      </View>
+      <View style={styles.tabletTaskList}>
+        <TasksScreen
+          sidebarMode
+          needsDesktopSetup={needsDesktopSetup}
+          repos={state.repos}
+          selectedRepoId={state.selectedRepoId}
+          selectedTaskId={state.selectedTaskId}
+          taskCollectionStatus={state.taskCollectionStatus}
+          repoCommandErrorMessage={
+            state.pendingRepoCommandTask ? state.repoCommandErrorMessage : null
+          }
+          repoSelectionDisabled={state.runningRepoCommandId !== null}
+          taskListPreferences={state.localTaskListPreferences}
+          taskSlots={projectTaskUiSlots(state.repoTasks, state.taskUiSlots)}
+          onOpenMachines={pushDesktops}
+          onRetryRepoCommand={() => {
+            void controller.retryRepoCommand().then((taskId) => {
+              if (taskId) pushPreparedTask(taskId);
+            });
+          }}
+          onDismissRepoCommandError={() => controller.dismissRepoCommandTaskLoadError()}
+          onSelectRepo={(repoId) => void controller.selectRepo(repoId)}
+          onOpenTask={pushTask}
+          onSetTaskPinned={(taskId, pinned) => controller.setTaskPinned(taskId, pinned)}
+        />
+      </View>
+    </View>
+  );
+}
+
+function TabletWorkspaceEmptyState() {
+  return (
+    <View style={styles.tabletEmptyState} testID={MOBILE_E2E_IDS.tabletWorkspaceEmpty}>
+      <Text style={styles.tabletEmptyTitle}>Choose a task</Text>
+      <Text style={styles.tabletEmptyDetail}>
+        Select a task from the sidebar to open its terminal workspace.
+      </Text>
+    </View>
   );
 }
 
@@ -552,6 +669,7 @@ function TaskDetailRoute({
   const {
     controller,
     e2eTaskSnapshotMarker,
+    isTabletWorkspace,
     quickReplies,
     quickRepliesHydrated,
     state,
@@ -648,6 +766,7 @@ function TaskDetailRoute({
   return (
     <TaskScreen
       blockerTasks={resolveBlockerTasks(task, visibleTasks(state))}
+      desktopWorkspace={isTabletWorkspace}
       e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
       task={task}
       terminalErrorMessage={state.taskTerminalErrorMessage}
@@ -984,6 +1103,117 @@ function useNavigationContent(): NavigationContent {
 const styles = StyleSheet.create({
   navigatorHost: {
     flex: 1
+  },
+  workspaceRow: {
+    flex: 1,
+    flexDirection: "row"
+  },
+  workspacePane: {
+    flex: 1,
+    minWidth: 0
+  },
+  tabletSidebar: {
+    backgroundColor: "#0B1525",
+    borderRightColor: "#22304D",
+    borderRightWidth: 1
+  },
+  tabletSidebarContent: {
+    flex: 1,
+    paddingHorizontal: 10,
+    paddingTop: 12
+  },
+  tabletBrand: {
+    alignItems: "center",
+    borderBottomColor: "#22304D",
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 14,
+    paddingBottom: 12,
+    paddingHorizontal: 4
+  },
+  tabletBrandMark: {
+    alignItems: "center",
+    backgroundColor: "#E8F1FF",
+    borderRadius: 9,
+    height: 34,
+    justifyContent: "center",
+    width: 34
+  },
+  tabletBrandMarkText: {
+    color: "#0B1220",
+    fontSize: 18,
+    fontWeight: "900"
+  },
+  tabletBrandCopy: {
+    flex: 1
+  },
+  tabletBrandName: {
+    color: "#F5F7FB",
+    fontSize: 17,
+    fontWeight: "800"
+  },
+  tabletBrandEyebrow: {
+    color: "#7186A7",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    marginTop: 1
+  },
+  tabletSidebarHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 12
+  },
+  tabletSidebarTitle: {
+    color: "#F5F7FB",
+    fontSize: 16,
+    fontWeight: "800"
+  },
+  tabletSidebarActions: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 12
+  },
+  tabletSidebarAction: {
+    alignItems: "center",
+    backgroundColor: "#17243A",
+    borderColor: "#2B3C5C",
+    borderRadius: 7,
+    borderWidth: 1,
+    flex: 1,
+    minHeight: 44,
+    justifyContent: "center",
+    paddingHorizontal: 10
+  },
+  tabletSidebarActionText: {
+    color: "#DCE7F8",
+    fontSize: 13,
+    fontWeight: "700"
+  },
+  tabletTaskList: {
+    flex: 1
+  },
+  tabletEmptyState: {
+    alignItems: "center",
+    backgroundColor: "#08111E",
+    flex: 1,
+    justifyContent: "center",
+    padding: 32
+  },
+  tabletEmptyTitle: {
+    color: "#F5F7FB",
+    fontSize: 28,
+    fontWeight: "800"
+  },
+  tabletEmptyDetail: {
+    color: "#93A7C8",
+    fontSize: 16,
+    lineHeight: 24,
+    marginTop: 8,
+    maxWidth: 420,
+    textAlign: "center"
   },
   stackContent: {
     backgroundColor: "#08111E"

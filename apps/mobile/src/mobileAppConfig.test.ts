@@ -16,6 +16,7 @@ describe("mobile app config", () => {
     expect(config.name).toBe("Kanna");
     expect(config.scheme).toBe("kanna");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app");
+    expect(config.ios?.supportsTablet).toBe(false);
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.production.plist"
     );
@@ -83,6 +84,7 @@ describe("mobile app config", () => {
       "./plugins/withKannaFirebaseMessaging"
     );
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.dev");
+    expect(config.ios?.supportsTablet).toBe(true);
     expect(config.ios?.googleServicesFile).toBeUndefined();
     expect(config.ios?.entitlements).toEqual({
       "aps-environment": "development"
@@ -95,9 +97,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "2.2.3"
+      runtimeVersion: "2.2.4"
     });
-    expect(config.runtimeVersion).toBe("2.2.3");
+    expect(config.runtimeVersion).toBe("2.2.4");
     expect(config.updates).toBeUndefined();
   });
 
@@ -336,7 +338,7 @@ describe("mobile app config", () => {
         recordAudioAndroid: false
       }
     ]);
-    expect(config.runtimeVersion).toBe("2.2.3");
+    expect(config.runtimeVersion).toBe("2.2.4");
   });
 
   it("declares the composer attachment permissions and captures no audio", () => {

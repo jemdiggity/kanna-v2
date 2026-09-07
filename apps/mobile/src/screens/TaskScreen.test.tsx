@@ -196,6 +196,7 @@ interface ElementNode {
 }
 
 interface RenderTaskScreenOptions {
+  desktopWorkspace?: boolean;
   agentType?: "agent" | "pty";
   blockedByTaskIds?: string[];
   blockerTasks?: Array<{
@@ -276,6 +277,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
 
   const {
     agentType = "pty",
+    desktopWorkspace = false,
     blockedByTaskIds,
     blockerTasks,
     terminalOutputEpoch = 1,
@@ -334,6 +336,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
   hookHarness.refIndex = 0;
   hookHarness.stateValues[0] = draftInput;
   return TaskScreen({
+    desktopWorkspace,
     task: {
       id: taskId,
       ownerLocalTaskId,
@@ -745,6 +748,17 @@ describe("TaskScreen", () => {
     pressByTestId(tree, "mobile.task-more-button");
 
     expect(componentMocks.showTaskActionMenu).toHaveBeenCalledOnce();
+  });
+
+  it("uses desktop workspace tabs without a redundant back control", () => {
+    const tree = renderTaskScreen({ desktopWorkspace: true });
+
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskBackButton)).toBeNull();
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskWorkspaceTerminalTab)?.props
+    ).toMatchObject({ accessibilityRole: "tab" });
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskWorkspaceFilesTab)).not.toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskWorkspaceDiffTab)).not.toBeNull();
   });
 
   it("offers preview only for a task with declared ports and opens its modal", () => {

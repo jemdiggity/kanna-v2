@@ -23,7 +23,7 @@ describe("mobile relay harness helpers", () => {
     expect(fixture?.sentinel).toMatch(/MOBILE.*SNAPSHOT/);
   });
 
-  it("does not compare encoded snapshots across terminal geometries", () => {
+  it("captures retained content without assuming one adaptive geometry", () => {
     expect(relayHarness.mobileRelayTerminalGeometryExpectation({
       taskId: "task-1",
       sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL",
@@ -31,9 +31,7 @@ describe("mobile relay harness helpers", () => {
       expectedRows: 48,
       minDecodedBytes: 5_517,
     })).toEqual({
-      cols: 80,
       minEncodedChars: relayHarness.MOBILE_RELAY_PTY_HISTORY_FIXTURE.minEncodedChars,
-      rows: 48,
       sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL",
     });
   });
