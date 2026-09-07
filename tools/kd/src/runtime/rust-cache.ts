@@ -5,11 +5,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync
 } from "node:fs";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { CommandRunner } from "./process";
 import {
@@ -72,6 +74,83 @@ export function repositoryDirectory(repoRoot: string): string {
 
 export function repositoryIdentity(repoRoot: string): string {
   return createHash("sha256").update(repositoryDirectory(repoRoot)).digest("hex").slice(0, 16);
+}
+
+/**
+ * Identifies the source snapshot Cargo can see in this checkout.
+ *
+ * Kache's own key models individual rustc invocations, but a shared local
+ * store also has mutable index state. Giving every complete checkout snapshot
+ * a key salt prevents divergent worktrees from racing through the same logical
+ * entries while retaining sharing between worktrees whose sources are byte-for-
+ * byte identical. The repository store remains shared, so blobs are still
+ * deduplicated and one 10 GiB GC cap applies to the repository as a whole.
+ *
+ * Hash every tracked and non-ignored untracked file, rather than HEAD or the
+ * index: agents routinely build dirty worktrees, and Cargo reads working-tree
+ * bytes. Ignored build products and dependencies are deliberately absent.
+ */
+export function sourceIdentity(repoRoot: string): string {
+  const hash = createHash("sha256");
+  let paths: string[];
+  try {
+    const listed = execFileSync(
+      "git",
+      ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+      {
+        cwd: repoRoot,
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"]
+      }
+    );
+    paths = listed
+      .toString("utf8")
+      .split("\0")
+      .filter(Boolean)
+      .sort();
+  } catch {
+    // A malformed or not-yet-initialized fixture must never fall back to the
+    // repository-wide salt. Checkout-path scope is conservative and safe.
+    return createHash("sha256").update(canonicalPath(repoRoot)).digest("hex");
+  }
+
+  for (const relativePath of paths) {
+    hash.update(relativePath);
+    hash.update("\0");
+    const path = join(repoRoot, relativePath);
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) {
+        hash.update("symlink\0");
+        hash.update(readlinkSync(path));
+      } else if (stat.isFile()) {
+        hash.update(stat.mode & 0o111 ? "executable\0" : "file\0");
+        hash.update(readFileSync(path));
+      } else {
+        // Gitlinks (submodules) are directories in the worktree. Their checked
+        // out revision is source state even though their contents are not in
+        // the parent repository's ls-files result.
+        hash.update("directory\0");
+        try {
+          hash.update(
+            execFileSync("git", ["rev-parse", "HEAD"], {
+              cwd: path,
+              encoding: "utf8",
+              maxBuffer: 1024 * 1024,
+              stdio: ["ignore", "pipe", "ignore"]
+            }).trim()
+          );
+        } catch {
+          hash.update("unresolved");
+        }
+      }
+    } catch {
+      hash.update("missing");
+    }
+    hash.update("\0");
+  }
+  return hash.digest("hex");
 }
 
 export function rustCacheEligibility(input: RustCacheRuntimeInput): RustCacheEligibility {
@@ -146,7 +225,14 @@ export function applyRustCacheEnvironment(
 
   const store = resolveRustCacheStorePath(input);
   return {
-    env: { ...base, ...buildRustCacheEnvironment({ binary: paths.binary, store }) },
+    env: {
+      ...base,
+      ...buildRustCacheEnvironment({
+        binary: paths.binary,
+        store,
+        sourceIdentity: sourceIdentity(input.repoRoot)
+      })
+    },
     state: { active: true, store, binary: paths.binary }
   };
 }

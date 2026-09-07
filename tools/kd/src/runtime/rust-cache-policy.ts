@@ -132,13 +132,13 @@ export type RustCacheEligibility =
  * resolves to `enabled` and the only configured way to be off is an explicit
  * `off`, so the two collapse into `disabled`.
  *
- * On kache's key selection: an `E0432` failure originally blamed on it was
- * traced to two of Kanna's own test fixtures compiling into the repository's
- * Cargo build directory, and it reproduces with the cache disabled. Both are
- * fixed, and the cross-revision selection boundary is now exercised against the
- * real pinned binary — see "pinned kache selects cache keys per source revision" in
- * `tests/rust-cache.integration.test.ts` and
- * docs/2026-08-02-kache-cache-key-e2e-gap.md.
+ * Kache's per-invocation key is not the whole isolation boundary. Divergent
+ * worktrees used to share the same repository store without a source-snapshot
+ * salt, allowing concurrent index activity to restore an artifact selected for
+ * another checkout. `applyRustCacheEnvironment` now adds that salt while
+ * retaining one content-addressed store, and the cross-worktree publication and
+ * restore paths are exercised against the real pinned binary in
+ * `tests/rust-cache.integration.test.ts`.
  */
 export function resolveRustCacheEligibility(input: {
   mode: string | undefined;
@@ -163,6 +163,7 @@ export function resolveRustCacheEligibility(input: {
 export interface RustCacheEnvironmentInput {
   binary: string;
   store: string;
+  sourceIdentity: string;
 }
 
 /**
@@ -172,8 +173,8 @@ export interface RustCacheEnvironmentInput {
  *
  * `KACHE_VERIFY_RESTORES=always` verifies that a restored blob matches the
  * digest recorded for the key kache selected. It does NOT verify that the
- * selected key corresponds to the current sources — that boundary is covered by
- * test, not by this setting. It stays on as defence in depth against a corrupt
+ * selected key corresponds to the current sources. Kanna's source-snapshot salt
+ * supplies that outer boundary. This stays on as defence in depth against a corrupt
  * or truncated store entry, and must not be relaxed for speed: it is the only
  * thing standing between a damaged blob and the compiler's input.
  */
@@ -182,6 +183,7 @@ export function buildRustCacheEnvironment(input: RustCacheEnvironmentInput): Rec
     RUSTC_WRAPPER: input.binary,
     CARGO_INCREMENTAL: "0",
     KACHE_CACHE_DIR: input.store,
+    KACHE_KEY_SALT: `kanna-source-v1:${input.sourceIdentity}`,
     KACHE_LOCAL_ONLY: "1",
     KACHE_CACHE_EXECUTABLES: "0",
     KACHE_VERIFY_RESTORES: "always",

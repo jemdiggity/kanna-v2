@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,7 +10,8 @@ import {
   getRustCacheStatus,
   installRustCache,
   repositoryIdentity,
-  resolveRustCacheStorePath
+  resolveRustCacheStorePath,
+  sourceIdentity
 } from "../src/runtime/rust-cache";
 import {
   KACHE_ARTIFACTS,
@@ -195,6 +197,23 @@ describe("repository identity", () => {
   });
 });
 
+describe("source identity", () => {
+  it("changes with working-tree bytes and returns when the bytes return", () => {
+    const root = scratch("kd-kache-source-");
+    const repoRoot = join(root, "repo");
+    mkdirSync(repoRoot, { recursive: true });
+    execFileSync("git", ["init", "--quiet", repoRoot]);
+    writeFileSync(join(repoRoot, "Cargo.toml"), "one\n");
+    const first = sourceIdentity(repoRoot);
+    writeFileSync(join(repoRoot, "Cargo.toml"), "two\n");
+    const second = sourceIdentity(repoRoot);
+    writeFileSync(join(repoRoot, "Cargo.toml"), "one\n");
+
+    expect(second).not.toBe(first);
+    expect(sourceIdentity(repoRoot)).toBe(first);
+  });
+});
+
 describe("rust cache environment application", () => {
   function fixture(): { repoRoot: string; homeDir: string } {
     const root = scratch("kd-kache-env-");
@@ -229,6 +248,7 @@ describe("rust cache environment application", () => {
     expect(result.env.KACHE_CACHE_DIR).toBe(
       resolveRustCacheStorePath({ repoRoot, homeDir, env: {} })
     );
+    expect(result.env.KACHE_KEY_SALT).toMatch(/^kanna-source-v1:[0-9a-f]{64}$/);
     expect(result.env.KACHE_LOCAL_ONLY).toBe("1");
     expect(result.env.KACHE_CACHE_EXECUTABLES).toBe("0");
     expect(result.env.CARGO_INCREMENTAL).toBe("0");

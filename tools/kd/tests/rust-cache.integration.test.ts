@@ -72,6 +72,7 @@ const { spawnSync } = require("node:child_process");
 const [rustc, ...args] = process.argv.slice(2);
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({
   cacheDir: process.env.KACHE_CACHE_DIR,
+  keySalt: process.env.KACHE_KEY_SALT,
   localOnly: process.env.KACHE_LOCAL_ONLY,
   cacheExecutables: process.env.KACHE_CACHE_EXECUTABLES,
   verifyRestores: process.env.KACHE_VERIFY_RESTORES,
@@ -144,6 +145,7 @@ describeMac("kache Cargo wiring", () => {
         join(homeDir, "Library", "Caches", "kanna", "rust-kache", repositoryIdentity(repoRoot))
       );
       expect(invocation.localOnly).toBe("1");
+      expect(invocation.keySalt).toMatch(/^kanna-source-v1:[0-9a-f]{64}$/);
       expect(invocation.cacheExecutables).toBe("0");
       expect(invocation.verifyRestores).toBe("always");
       expect(invocation.maxSize).toBe("10GiB");
@@ -527,6 +529,64 @@ function totalHits(entries: CacheEntry[]): number {
 }
 
 describeRealKache("pinned kache selects cache keys per source revision", () => {
+  it("isolates divergent concurrent worktrees inside the shared repository store", async () => {
+    const { root, repoRoot, homeDir } = await twoRevisionFixture();
+    linkPinnedKache(homeDir);
+
+    writeRevision(repoRoot, 1);
+    await run("git", ["add", "."], { cwd: repoRoot });
+    await run("git", ["-c", "user.name=Kanna", "-c", "user.email=kanna@example.invalid", "commit", "-qm", "revision 1"], {
+      cwd: repoRoot
+    });
+    writeRevision(repoRoot, 2);
+    await run("git", ["add", "."], { cwd: repoRoot });
+    await run("git", ["-c", "user.name=Kanna", "-c", "user.email=kanna@example.invalid", "commit", "-qm", "revision 2"], {
+      cwd: repoRoot
+    });
+
+    const firstRoot = join(root, "worktree-1");
+    const secondRoot = join(root, "worktree-2");
+    await run("git", ["worktree", "add", "--quiet", "--detach", firstRoot, "HEAD~1"], {
+      cwd: repoRoot
+    });
+    await run("git", ["worktree", "add", "--quiet", "--detach", secondRoot, "HEAD"], {
+      cwd: repoRoot
+    });
+
+    const cacheFor = (worktree: string) =>
+      applyRustCacheEnvironment({
+        repoRoot: worktree,
+        homeDir,
+        env: { ...isolatedCargoEnv(), CI: "" },
+        platform: "darwin",
+        arch: process.arch
+      });
+    const firstCache = cacheFor(firstRoot);
+    const secondCache = cacheFor(secondRoot);
+    if (!firstCache.state.active || !secondCache.state.active) {
+      throw new Error("pinned cache unexpectedly inactive");
+    }
+
+    // Sharing remains intact at the blob/index layer, but the full source
+    // snapshot participates in every logical key. This is the boundary the old
+    // repository-only configuration lacked.
+    expect(firstCache.state.store).toBe(secondCache.state.store);
+    expect(firstCache.env.KACHE_KEY_SALT).not.toBe(secondCache.env.KACHE_KEY_SALT);
+
+    const build = (worktree: string, env: NodeJS.ProcessEnv) =>
+      run("cargo", ["build"], { cwd: worktree, env });
+    await Promise.all([build(firstRoot, firstCache.env), build(secondRoot, secondCache.env)]);
+    expect(await run(join(firstRoot, ".build", "debug", "probe"), [])).toBe("1");
+    expect(await run(join(secondRoot, ".build", "debug", "probe"), [])).toBe("2");
+
+    // Exercise concurrent restores too, not only concurrent publication.
+    rmSync(join(firstRoot, ".build"), { recursive: true, force: true });
+    rmSync(join(secondRoot, ".build"), { recursive: true, force: true });
+    await Promise.all([build(firstRoot, firstCache.env), build(secondRoot, secondCache.env)]);
+    expect(await run(join(firstRoot, ".build", "debug", "probe"), [])).toBe("1");
+    expect(await run(join(secondRoot, ".build", "debug", "probe"), [])).toBe("2");
+  }, 300_000);
+
   it("never serves an artifact compiled from a different revision", async () => {
     const { repoRoot, homeDir } = await twoRevisionFixture();
     linkPinnedKache(homeDir);
