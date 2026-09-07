@@ -1025,6 +1025,12 @@ async function setPublishedTaskActivity(input: {
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "busy");
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "idle");
   } else {
+    // `mark-read` changes only the read/display dimension. It cannot turn a
+    // busy task idle, and a correctly functioning daemon watcher is free to
+    // restore `working` while the runtime dimension remains busy. Drive both
+    // dimensions explicitly so this fixture asks the product for a coherent
+    // idle state instead of relying on an earlier journey's runtime status.
+    await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "idle");
     await postLocalTaskAction(input.harness, input.task.taskId, "mark-read");
   }
   await waitForLocalTaskActivity(
