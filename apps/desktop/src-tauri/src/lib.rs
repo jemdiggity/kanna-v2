@@ -149,6 +149,13 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             {
+                // Must run before the event loop starts: tao reads the policy in
+                // `applicationDidFinishLaunching`, right before it activates the app.
+                if let Some(policy) = macos::requested_activation_policy(
+                    std::env::var(macos::NO_ACTIVATE_ENV).ok().as_deref(),
+                ) {
+                    app.set_activation_policy(policy);
+                }
                 macos::fix_path_from_shell();
                 macos::setup_fn_f_fullscreen(app.handle().clone());
             }

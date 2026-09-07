@@ -81,6 +81,35 @@ import, keyboard shortcuts, preferences. Real suites cover the process
 boundaries listed above. Tests reach Vue internals via
 `__vue_app__._instance.setupState`, which only exists in dev builds.
 
+### E2E app instances never take focus
+
+Every desktop E2E lane launches real macOS app instances — one for the whole
+mock run, a fresh one (or pair) per real test file, plus the installed bundle in
+`scripts/app-update-full-bundle-e2e.sh` — and a real macOS app activates itself
+at launch. That took the operator's keyboard focus mid-sentence, repeatedly, for
+the length of a run.
+
+The harness therefore sets `KANNA_E2E_NO_ACTIVATE=1` on every instance it
+launches. The app reads it in its Tauri setup (`src-tauri/src/macos.rs`) and
+adopts `NSApplicationActivationPolicyProhibited`, which tao applies just before
+its launch-time `activateIgnoringOtherApps:` — so that call becomes a no-op and
+the instance never comes to the front. `Accessory` is not enough: an accessory
+app has no Dock icon but is still activatable, so it still steals focus.
+
+Nothing else sets the variable, so `kd dev up` and shipped builds launch
+normally. Windows still render and WebDriver still drives them —
+`tauri-plugin-webdriver` reaches the WKWebView through `evaluateJavaScript:` and
+screenshots it with `takeSnapshotWithConfiguration:`, neither of which needs an
+active app. To watch a run in the foreground the old way:
+
+```sh
+KANNA_E2E_NO_ACTIVATE=0 pnpm --dir apps/desktop test:e2e mock/app-launch.test.ts
+```
+
+`./kd test remote-e2e` is unaffected: its two-instance harness runs
+`kanna-server`, `kanna-daemon` and the relay as headless binaries and never
+launches the desktop app.
+
 ### Live suites cost real quota
 
 `pnpm test:agent-cli-compat`, `pnpm test:remote-e2e`, `pnpm test:tui-fidelity`,

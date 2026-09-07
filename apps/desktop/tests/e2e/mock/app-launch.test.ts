@@ -32,6 +32,18 @@ describe("app launch", () => {
     expect(origin).toBe(`http://localhost:${devPort}`);
   });
 
+  it("renders and screenshots without pulling the app into the foreground", async () => {
+    // E2E runs launch real macOS apps. `KANNA_E2E_NO_ACTIVATE=1` — set for every
+    // harness-launched instance — gives them a non-activating activation policy so a
+    // run cannot take the operator's keyboard focus. An app that never activates is
+    // only useful here if WebKit still paints it, so assert both halves.
+    const screenshot = await client.screenshot();
+    expect(Buffer.from(screenshot, "base64").byteLength).toBeGreaterThan(1024);
+    if (process.env.KANNA_E2E_NO_ACTIVATE === "0") return;
+    const hasFocus = await client.executeSync<boolean>("return document.hasFocus();");
+    expect(hasFocus).toBe(false);
+  });
+
   it("renders with title Kanna", async () => {
     await pauseForSlowMode("before title assertion");
     const title = await client.getTitle();
