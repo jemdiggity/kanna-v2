@@ -147,13 +147,11 @@ enum AggregateMachineWaitError {
 }
 
 struct AggregateWaitSession {
-    /// Forwarded verbatim to every machine leg; each leg resolves the ids
+    /// Forwarded verbatim to every machine leg; each leg resolves the task ids
     /// against its own database. Not part of the cursor, so a resumed session
-    /// whose exclusions changed simply restarts its pending legs.
-    exclude_task_ids: Vec<String>,
-    /// Forwarded the same way, and compared the same way when a resumed
-    /// session's filters changed.
-    exclude_event_types: Vec<String>,
+    /// whose filters changed simply restarts its pending legs — one value, so
+    /// that restart decision is one comparison.
+    filters: TaskEventFilters,
     cursor: AggregateCursor,
     pending: tokio::task::JoinSet<AggregateWaitCompletion>,
     pending_machines: HashSet<String>,
@@ -1443,8 +1441,7 @@ fn resolve_aggregate_scope(
 
 fn local_query_for_aggregate(
     scope: &AggregateScope,
-    exclude_task_ids: &[String],
-    exclude_event_types: &[String],
+    filters: &TaskEventFilters,
     cursor: Option<String>,
     timeout_secs: u64,
     limit: i64,
@@ -1458,9 +1455,10 @@ fn local_query_for_aggregate(
         local_only: true,
         include_current_activity,
         from: from_now.then(|| "now".to_string()),
-        exclude_task_ids: (!exclude_task_ids.is_empty()).then(|| exclude_task_ids.join(",")),
-        exclude_event_types: (!exclude_event_types.is_empty())
-            .then(|| exclude_event_types.join(",")),
+        exclude_task_ids: (!filters.exclude_task_ids.is_empty())
+            .then(|| filters.exclude_task_ids.join(",")),
+        exclude_event_types: (!filters.exclude_event_types.is_empty())
+            .then(|| filters.exclude_event_types.join(",")),
         ..TaskEventsQuery::default()
     };
     match scope {
@@ -1544,8 +1542,7 @@ fn spawn_aggregate_wait(
 ) -> Result<(), (axum::http::StatusCode, String)> {
     let query = local_query_for_aggregate(
         &session.cursor.scope,
-        &session.exclude_task_ids,
-        &session.exclude_event_types,
+        &session.filters,
         session
             .cursor
             .cursors_by_machine
@@ -1792,8 +1789,10 @@ async fn wait_aggregate_task_events(
         .clamp(1, MAX_EVENT_LIMIT);
     let db = Db::open(&state.config().db_path).map_err(db_error)?;
     let requested_scope = resolve_aggregate_scope(&db, &query)?;
-    let exclude_task_ids = normalized_values(query.exclude_task_ids.as_deref());
-    let exclude_event_types = normalized_values(query.exclude_event_types.as_deref());
+    let filters = TaskEventFilters {
+        exclude_task_ids: normalized_values(query.exclude_task_ids.as_deref()),
+        exclude_event_types: normalized_values(query.exclude_event_types.as_deref()),
+    };
     let supplied_cursor = query.cursor.as_deref();
     let decoded = supplied_cursor
         .filter(|cursor| cursor.starts_with(AGGREGATE_CURSOR_PREFIX))
@@ -1853,8 +1852,7 @@ async fn wait_aggregate_task_events(
             .as_ref()
             .and_then(|key| registry.sessions.remove(key))
             .unwrap_or_else(|| AggregateWaitSession {
-                exclude_task_ids: exclude_task_ids.clone(),
-                exclude_event_types: exclude_event_types.clone(),
+                filters: filters.clone(),
                 cursor,
                 pending: tokio::task::JoinSet::new(),
                 pending_machines: HashSet::new(),
@@ -1864,8 +1862,7 @@ async fn wait_aggregate_task_events(
             })
     };
     if session.include_current_activity != query.include_current_activity
-        || session.exclude_task_ids != exclude_task_ids
-        || session.exclude_event_types != exclude_event_types
+        || session.filters != filters
     {
         // Inherited legs were started under the old filter. A fresh JoinSet
         // aborts them on drop; joining them here would surface their
@@ -1873,8 +1870,7 @@ async fn wait_aggregate_task_events(
         session.pending = tokio::task::JoinSet::new();
         session.pending_machines.clear();
         session.include_current_activity = query.include_current_activity;
-        session.exclude_task_ids = exclude_task_ids;
-        session.exclude_event_types = exclude_event_types;
+        session.filters = filters;
     }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
@@ -2117,8 +2113,7 @@ mod aggregate_wait_registry_tests {
         });
         tokio::task::yield_now().await;
         AggregateWaitSession {
-            exclude_task_ids: Vec::new(),
-            exclude_event_types: Vec::new(),
+            filters: TaskEventFilters::default(),
             cursor: AggregateCursor {
                 local_machine_id: machine_id.clone(),
                 scope: AggregateScope::Tasks {
