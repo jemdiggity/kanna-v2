@@ -64,20 +64,6 @@ const SELF = "tools/kd/tests/kanna-test-fetch.contract.test.ts";
 const EXEMPTION_MARKER = "local-fetch-exempt:";
 
 /**
- * Files whose migration is already in flight in another task, so this task must
- * not also edit them. Each entry is a promise to delete the entry, not a
- * permanent carve-out: the assertion below fails when a listed file has stopped
- * violating the contract, which is what makes these expire on merge rather than
- * quietly becoming precedent.
- */
-const PENDING_MIGRATIONS: Record<string, string> = {
-  "apps/desktop/tests/e2e/real/local-transfer-headless-engine.test.ts":
-    "task b08e50ff (transfer-suite serverSql/waitForSql migration, in revision)",
-  "apps/desktop/tests/e2e/real/pty-runtime-status.test.ts":
-    "task ef8edab4 (runtime-status helper migration, in review)",
-};
-
-/**
  * Base-URL identifiers that only ever name a Kanna server. Deliberately not
  * the bare word `baseUrl`: WebDriver clients spell theirs `getBaseUrl()` and
  * `this.baseUrl`, and flagging those would train people to add exemptions.
@@ -278,35 +264,20 @@ describe("Kanna server calls from test code", () => {
     expect(findBareKannaFetches("sample.test.ts", source, routeSegments)).toHaveLength(1);
   });
 
-  const allFindings = SCANNED_DIRECTORIES.flatMap((directory) =>
-    sourceFilesUnder(resolve(repoRoot, directory), SCANNED_EXTENSIONS).flatMap((path) => {
-      const file = relative(repoRoot, path);
-      if (file === SELF) return [];
-      return findBareKannaFetches(file, readFileSync(path, "utf8"), routeSegments);
-    }),
-  );
-
   it("routes every Kanna server call through @kanna/local-process-fetch", () => {
-    const findings = allFindings.filter((finding) => !(finding.file in PENDING_MIGRATIONS));
+    const findings = SCANNED_DIRECTORIES.flatMap((directory) =>
+      sourceFilesUnder(resolve(repoRoot, directory), SCANNED_EXTENSIONS).flatMap((path) => {
+        const file = relative(repoRoot, path);
+        if (file === SELF) return [];
+        return findBareKannaFetches(file, readFileSync(path, "utf8"), routeSegments);
+      }),
+    );
 
     expect(
       findings.map((finding) => `${finding.file}:${finding.line} ${finding.reason} — ${finding.snippet}`),
       "Node's global fetch sends Sec-Fetch-* headers, which kanna-server refuses with 403. " +
         "Import { localProcessFetch } from \"@kanna/local-process-fetch\", or declare a " +
         "`local-fetch-exempt: <reason>` comment if the call must stay a browser fetch.",
-    ).toEqual([]);
-  });
-
-  it("expires each pending migration as soon as its owner lands", () => {
-    const violating = new Set(allFindings.map((finding) => finding.file));
-    const settled = Object.entries(PENDING_MIGRATIONS)
-      .filter(([file]) => !violating.has(file))
-      .map(([file, owner]) => `${file} — ${owner}`);
-
-    expect(
-      settled,
-      "These files no longer call a Kanna server through the global fetch. Delete their " +
-        "PENDING_MIGRATIONS entries so the contract covers them.",
     ).toEqual([]);
   });
 });

@@ -98,6 +98,7 @@ describe("localProcessFetch", () => {
         { method: "POST" },
       );
       expect(response.status).toBe(204);
+      expect(response.body).toBeNull();
       await expect(response.text()).resolves.toBe("");
     } finally {
       await new Promise<void>((resolve, reject) => {

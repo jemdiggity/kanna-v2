@@ -33,12 +33,14 @@ The fix is therefore not only the migration but the *placement* of the guard:
 in `pnpm test` — the lane that actually runs every time — and fails on a new
 bare `fetch` at a Kanna URL without needing an app, a daemon, or a simulator.
 
-**A bug both copies carried.** Consolidating the two implementations surfaced
+**A bug every copy carried, fixed twice independently.** Consolidating surfaced
 one: `new Response(body, { status: 204 })` throws `Invalid response status
-code`, because 204 is a null-body status. `kanna-server` answers 204 from
-several action routes, so every duplicated copy would have crashed there — it
-had simply never been called on one. One implementation means one place to fix
-it, and a test that pins it.
+code`, because 204 is a null-body status, and `kanna-server` answers 204 from
+several action routes. This task hit it when the LAN transport started using the
+client; PR #1324 hit it separately and patched its own copy the same week. Two
+people paying for the same bug in two files is the argument for one
+implementation, which is now `packages/local-process-fetch` with a test that
+pins the behaviour (and covers 101/103 as well as 204/205/304).
 
 ## Still broken, with owners
 
@@ -47,12 +49,12 @@ it, and a test that pins it.
 | Real-E2E startup fails at `about:blank` | task 039fe10a | Open, reproduces on the MBP |
 | E2E steals window focus during a run | task 9040ad7d | Open, this machine (Mac Studio) |
 | Relay-lane geometry harness fix | task b8b561d5 | Written, awaiting review |
-| `local-transfer-headless-engine.test.ts` fetch migration | task b08e50ff | In revision |
-| `pty-runtime-status.test.ts` fetch migration | task ef8edab4 | In review |
 
-The last two are listed in `PENDING_MIGRATIONS` in the guard, which fails once
-they land — the entry expires itself rather than becoming a permanent
-carve-out.
+The two migrations this task had to route around — `local-transfer-headless-engine.test.ts`
+(b08e50ff, PR #1324) and `pty-runtime-status.test.ts` (ef8edab4, PR #1322) —
+landed on 2026-09-07 and are folded in here. Both reached the shared client by
+relative path (`../../../../../tests/remote-e2e/src/localProcessFetch`); those
+imports now name the package.
 
 ## The desktop mock lane is red for reasons that are not this class
 
@@ -87,12 +89,21 @@ Each of these is real and out of this task's scope. None is urgent.
    type-checked is a harness where a rename lands as a runtime failure two
    hours into a suite.
 
-2. **`startTestKannaServer` (`apps/desktop/tests/e2e/helpers/kannaServer.ts`)
+2. **A third hand-rolled copy survives.** PR #1322 landed
+   `localProcessRequest` in `apps/desktop/tests/e2e/real/pty-runtime-status.test.ts`
+   — the same `node:http` idea with a different interface (`{ status, body }`
+   rather than a `Response`). The guard does not flag it, because it is not a
+   bare `fetch`; it is correct as written. Folding it into the shared client
+   means rewriting its two callsites, and that suite is a real-E2E lane this
+   run could not exercise, so it is left for its own change rather than done
+   blind.
+
+3. **`startTestKannaServer` (`apps/desktop/tests/e2e/helpers/kannaServer.ts`)
    has no callers.** Its readiness probe was one of the 403 casualties and
    nothing noticed, because nothing runs it. It is migrated here rather than
    deleted; deleting dead harness code is its own decision.
 
-3. **Three `xcrun` wrappers replace the tool's error with advice**:
+4. **Three `xcrun` wrappers replace the tool's error with advice**:
    `apps/mobile/e2e/helpers/device.ts:183`, `simulator.ts:105`,
    `release-install.ts:76`. Each catches an `execFileAsync` rejection and
    throws a hand-written "confirm Developer Mode is enabled" message, dropping
@@ -100,7 +111,7 @@ Each of these is real and out of this task's scope. None is urgent.
    you need when the advice does not apply. They are not retry loops, so they
    were left alone here.
 
-4. **The guard cannot see a fully dynamic URL inside a wrapper.** It has two
+5. **The guard cannot see a fully dynamic URL inside a wrapper.** It has two
    detectors: a Kanna route path or Kanna-only base identifier in the call's
    argument text, and the global handed to another client as its transport
    (`createLanTransport(baseUrl, fetch)` — the shape that hid a 403 in
