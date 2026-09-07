@@ -12,7 +12,7 @@ import {
   resolveDesktopServerUrlForTarget
 } from "./helpers/desktop";
 import { resolveRequiredMobileE2eEnv } from "./helpers/env";
-import { localProcessFetch } from "./helpers/local-process-fetch";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 import {
   assertSimulatorAppInstalled,
   bootSimulator,

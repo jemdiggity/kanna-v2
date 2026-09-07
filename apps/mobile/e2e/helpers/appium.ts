@@ -135,11 +135,14 @@ export function startLocalAppiumServer(
 export async function waitForLocalAppiumServer(port: number): Promise<void> {
   await waitFor(
     `Appium server on port ${port}`,
-    async () => {
+    async (recordReason) => {
       try {
         const response = await fetch(`http://127.0.0.1:${port}/status`);
-        return response.ok ? true : null;
-      } catch {
+        if (response.ok) return true;
+        recordReason(`GET /status answered ${response.status} ${response.statusText}`);
+        return null;
+      } catch (error) {
+        recordReason(error instanceof Error ? error.message : String(error));
         return null;
       }
     },

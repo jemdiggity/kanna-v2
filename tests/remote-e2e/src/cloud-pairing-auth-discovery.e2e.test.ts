@@ -402,8 +402,10 @@ function createEmulatorAuthSession(harness: RemoteHarness): MobileAuthSession {
         email,
         password
       });
-      if (!signIn?.idToken) {
-        throw new Error("Firebase Auth emulator rejected the phone's sign-in");
+      if (!signIn.idToken) {
+        throw new Error(
+          `Firebase Auth emulator rejected the phone's sign-in: ${signIn.failure ?? "no reason given"}`
+        );
       }
       idToken = signIn.idToken;
       user = { uid: signIn.localId ?? BUFFY_UID, email, displayName: null };

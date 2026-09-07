@@ -9,6 +9,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { importTestRepo, resetDatabase } from "../helpers/reset";
 import { execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const execFileAsync = promisify(execFile);
 
@@ -258,7 +259,7 @@ describe("external task creation", () => {
     await client.waitForText(".task-header", visiblePrompt);
 
     const baseUrl = await desktopServerBaseUrl(client);
-    const response = await fetch(`${baseUrl}/v1/tasks`, {
+    const response = await localProcessFetch(`${baseUrl}/v1/tasks`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -334,7 +335,7 @@ describe("external task creation", () => {
     await client.waitForText(".sidebar", parentPrompt);
 
     const baseUrl = await desktopServerBaseUrl(client);
-    const response = await fetch(`${baseUrl}/v1/tasks`, {
+    const response = await localProcessFetch(`${baseUrl}/v1/tasks`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -416,7 +417,7 @@ describe("external task creation", () => {
     await client.waitForText(".sidebar", originalPrompt);
 
     const baseUrl = await desktopServerBaseUrl(client);
-    const response = await fetch(`${baseUrl}/v1/tasks/${taskId}`, {
+    const response = await localProcessFetch(`${baseUrl}/v1/tasks/${taskId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ displayName: renamedTitle }),

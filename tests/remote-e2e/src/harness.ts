@@ -528,7 +528,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
           env: buildFirebaseCommandEnv(repoRoot, process.env)
         }
       ));
-      idToken = await waitForBuffyIdToken(ports.auth, timeoutMs);
+      idToken = await waitForBuffyIdToken(ports.auth, timeoutMs, { logDirectory: repoRoot });
     } else if (staging) {
       idToken = await fetchStagingBuffyIdToken({
         repoRoot,

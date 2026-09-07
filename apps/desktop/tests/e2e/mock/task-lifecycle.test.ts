@@ -6,6 +6,7 @@ import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../hel
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 async function waitForPipelineItem<T>(
   client: WebDriverClient,
@@ -1020,7 +1021,7 @@ describe("task lifecycle", () => {
     );
 
     const { baseUrl } = await resolveAppKannaServer(client);
-    const response = await fetch(`${baseUrl}/v1/snapshot`);
+    const response = await localProcessFetch(`${baseUrl}/v1/snapshot`);
     expect(response.status).toBe(200);
     const snapshot = await response.json() as {
       entries: Array<{ items: Array<{ id: string }> }>;

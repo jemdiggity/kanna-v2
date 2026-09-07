@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 type KspFrame = Record<string, unknown> & { type?: unknown };
 
@@ -111,7 +112,7 @@ describe("app kanna-server KSP capabilities", () => {
     if (typeof pairing.code !== "string") {
       throw new Error(`pairing session did not return a code: ${JSON.stringify(pairing)}`);
     }
-    const claimResponse = await fetch(`${server.baseUrl}/v1/pairing/sessions/claim`, {
+    const claimResponse = await localProcessFetch(`${server.baseUrl}/v1/pairing/sessions/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

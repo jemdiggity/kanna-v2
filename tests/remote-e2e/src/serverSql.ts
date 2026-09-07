@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { localProcessFetch, type LocalProcessFetch } from "./localProcessFetch";
+import { localProcessFetch, type LocalProcessFetch } from "@kanna/local-process-fetch";
 
 export interface SqlRow {
   [column: string]: unknown;

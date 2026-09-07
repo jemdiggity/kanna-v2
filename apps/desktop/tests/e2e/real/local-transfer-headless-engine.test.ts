@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { localProcessFetch } from "../../../../../tests/remote-e2e/src/localProcessFetch";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 import { serverSql, waitForSql } from "../../../../../tests/remote-e2e/src/serverSql";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { resolveAppKannaServer } from "../helpers/kannaServer";

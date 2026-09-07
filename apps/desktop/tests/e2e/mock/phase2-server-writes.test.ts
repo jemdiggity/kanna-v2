@@ -129,14 +129,23 @@ async function postDesktopTaskAction(
   taskId: string,
   action: string,
 ): Promise<{ status: number; body: string }> {
+  // This call is made from inside the desktop webview, which is a real browser:
+  // `kanna-server` classifies it as browser-originated and requires the local
+  // control credential, exactly as it does for the app's own requests. So it
+  // goes out through the same credential the app uses rather than through
+  // `localProcessFetch`, which cannot run in a page.
   const result = await client.executeAsync<{ status?: number; body?: string; __error?: string }>(
     `const cb = arguments[arguments.length - 1];
-     import("/src/utils/invokeHelpers.ts")
-       .then(async ({ readEnvVarOptional }) => {
+     Promise.all([
+       import("/src/utils/invokeHelpers.ts"),
+       import("/src/services/localControlCredential.ts"),
+     ])
+       .then(async ([{ readEnvVarOptional }, { localControlAuthHeaders }]) => {
          const port = (await readEnvVarOptional("KANNA_MOBILE_SERVER_PORT")) || "48120";
+         // local-fetch-exempt: a webview page cannot use node:http; it presents the credential instead
          const response = await fetch(
            "http://127.0.0.1:" + port + "/v1/tasks/" + encodeURIComponent(${JSON.stringify(taskId)}) + "/actions/" + ${JSON.stringify(action)},
-           { method: "POST" }
+           { method: "POST", headers: await localControlAuthHeaders() }
          );
          const body = await response.text();
          cb({ status: response.status, body });

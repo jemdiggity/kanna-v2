@@ -297,6 +297,7 @@ describe("shared vitest timeouts", () => {
     "apps/web-portal",
     "packages/core",
     "packages/db",
+    "packages/local-process-fetch",
     "packages/stream-client",
     "packages/visual-companion",
     "services/firebase-functions",

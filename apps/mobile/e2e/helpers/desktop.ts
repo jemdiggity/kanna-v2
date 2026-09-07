@@ -1,5 +1,5 @@
 import { networkInterfaces } from "node:os";
-import { localProcessFetch, type LocalProcessFetch } from "./local-process-fetch";
+import { localProcessFetch, type LocalProcessFetch } from "@kanna/local-process-fetch";
 
 type FetchLike = LocalProcessFetch;
 

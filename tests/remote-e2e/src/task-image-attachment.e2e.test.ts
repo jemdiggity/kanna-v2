@@ -14,7 +14,7 @@ import {
 } from "../../../apps/mobile/src/lib/transports/lanTransport";
 import type { TaskInputAttachment } from "../../../apps/mobile/src/lib/api/types";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
-import { localProcessFetch } from "./localProcessFetch";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 import {
   collectTerminalEvents,
   createScriptedTask,

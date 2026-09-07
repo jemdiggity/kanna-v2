@@ -119,6 +119,9 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0(vue@3.5.32(typescript@5.6.3))
     devDependencies:
+      '@kanna/local-process-fetch':
+        specifier: workspace:*
+        version: link:../../packages/local-process-fetch
       '@tauri-apps/cli':
         specifier: ^2
         version: 2.10.1
@@ -267,6 +270,9 @@ importers:
       '@expo/config-plugins':
         specifier: ~57.0.6
         version: 57.0.6(typescript@5.8.3)
+      '@kanna/local-process-fetch':
+        specifier: workspace:*
+        version: link:../../packages/local-process-fetch
       '@types/markdown-it':
         specifier: 14.1.2
         version: 14.1.2
@@ -376,6 +382,18 @@ importers:
         specifier: ^3
         version: 3.2.4(@types/node@25.6.0)(happy-dom@20.8.9)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3)
 
+  packages/local-process-fetch:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.4
+        version: 4.1.4(@opentelemetry/api@1.9.1)(@types/node@24.12.2)(happy-dom@20.8.9)(vite@6.4.2(@types/node@24.12.2)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3))
+
   packages/stream-client:
     dependencies:
       '@kanna/agent-protocol':
@@ -469,6 +487,9 @@ importers:
       '@kanna/kd':
         specifier: workspace:*
         version: link:../../tools/kd
+      '@kanna/local-process-fetch':
+        specifier: workspace:*
+        version: link:../../packages/local-process-fetch
       '@kanna/mobile':
         specifier: workspace:*
         version: link:../../apps/mobile

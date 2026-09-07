@@ -16,6 +16,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { execDb, tauriInvoke } from "../helpers/vue";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const { primary } = createPrimaryAndSecondaryClients();
 const TASK_ID = "mobile-index-activity-task";
@@ -183,7 +184,7 @@ describe("server-owned publication through the mobile task index", () => {
     expect(waitingTask.title).toBe(TASK_TITLE);
     expect(waitingTask.waitingPromptSnippet).not.toBe(ORIGINAL_PROMPT);
 
-    const response = await fetch(
+    const response = await localProcessFetch(
       `http://127.0.0.1:${lanPort}/v1/tasks/${TASK_ID}/actions/runtime-status`,
       {
         method: "POST",

@@ -10,8 +10,9 @@
     "smoke": "vitest run --maxWorkers=2 src/remote-harness.smoke.test.ts"
   },
   "dependencies": {
-    "@kanna/mobile": "workspace:*",
     "@kanna/kd": "workspace:*",
+    "@kanna/local-process-fetch": "workspace:*",
+    "@kanna/mobile": "workspace:*",
     "ws": "^8.18.0"
   },
   "devDependencies": {

@@ -70,6 +70,7 @@
   "devDependencies": {
     "@babel/parser": "^7.29.3",
     "@expo/config-plugins": "~57.0.6",
+    "@kanna/local-process-fetch": "workspace:*",
     "@types/markdown-it": "14.1.2",
     "@types/node": "^24.0.0",
     "@types/pngjs": "6.0.5",

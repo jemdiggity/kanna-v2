@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import type { PtyTerminalFixture } from "../specs/smoke/list-detail-back.e2e";
 import type { TaskActivity } from "../../src/lib/api/types";
 import { DEFAULT_MOBILE_TERMINAL_GEOMETRY } from "../../src/mobileTerminalGeometry";
-import { localProcessFetch, type LocalProcessFetch } from "./local-process-fetch";
+import { localProcessFetch, type LocalProcessFetch } from "@kanna/local-process-fetch";
 
 const RELAY_TASK_TITLE = "Relay card current title";
 const RELAY_ORIGINAL_PROMPT = "Original relay request must stay hidden";

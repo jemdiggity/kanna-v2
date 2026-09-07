@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../tools/kd/src/runtime/process-inventory";
-import { localProcessFetch } from "./localProcessFetch";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 export interface ManagedProcess {
   readonly name: string;
