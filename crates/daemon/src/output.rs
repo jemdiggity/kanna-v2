@@ -1148,7 +1148,9 @@ pub(crate) fn format_status_observation_log(
     session_id: &str,
     source: &str,
     provider: Option<protocol::AgentProvider>,
+    cli_version: Option<&str>,
     detected_status: Option<SessionStatus>,
+    matched_rule: Option<&str>,
     lines: &[String],
 ) -> String {
     let provider = match provider {
@@ -1167,8 +1169,15 @@ pub(crate) fn format_status_observation_log(
     };
 
     format!(
-        "[headless-terminal-debug] session={} source={} provider={} detected={} lines={:?}",
-        session_id, source, provider, detected, lines
+        "[headless-terminal-debug] session={} source={} provider={} cli_version={} \
+         detected={} rule={} lines={:?}",
+        session_id,
+        source,
+        provider,
+        cli_version.unwrap_or("unknown"),
+        detected,
+        matched_rule.unwrap_or("none"),
+        lines
     )
 }
 
@@ -1187,7 +1196,9 @@ async fn log_status_observation(session: &Arc<SessionHandle>, session_id: &str, 
                     session_id,
                     source,
                     observation.provider,
+                    observation.cli_version.as_deref(),
                     observation.detected_status,
+                    observation.matched_rule.as_deref(),
                     &observation.lines,
                 )
             );

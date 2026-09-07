@@ -13,12 +13,16 @@ import { sleep, startPtySession, type PtySession } from "../../helpers/pty";
 // before it dares type a quit command at the source agent.
 //
 // The daemon reads status off rendered terminal rows, so it can only ever know
-// what OpenCode draws. `opencode_status_from_lines`
-// (crates/daemon/src/headless_terminal.rs) pins three strings:
+// what OpenCode draws. Its OpenCode rules (crates/daemon/src/detection/rules.json)
+// pin three strings, each in a version-ranged vocabulary entry:
 //
-//   OPENCODE_INTERRUPT_MARKERS      the working footer  -> Busy
-//   opencode_line_is_composer_status the composer's mode/model line -> Idle
-//   OPENCODE_PERMISSION_ACTIONS     the permission dialog's action row -> Waiting
+//   inFlightMarkers           the working footer  -> Busy
+//   composerStatusSeparators  the composer's mode/model line -> Idle
+//   permissionActionMarkers   the permission dialog's action row -> Waiting
+//
+// Those entries carry the CLI versions they were measured against, so a new
+// spelling is *added* beside the old one rather than replacing it — someone on
+// the team is still running the older release.
 //
 // Those are pinned at the unit layer against captured frames
 // (crates/daemon/tests/fixtures/opencode/), which proves the matcher reads the
@@ -43,10 +47,10 @@ const LIVE_MODEL = "opencode/big-pickle";
 
 // Whitespace-free: the TUI places text with cursor escapes (PtySession.compactOutput).
 const READY = /Askanything|Build·/;
-/** OPENCODE_INTERRUPT_MARKERS, minus the whitespace the TUI does not emit. */
+/** The `inFlightMarkers` spellings, minus the whitespace the TUI does not emit. */
 const WORKING_FOOTER = /escapeinterrupt|escinterrupt|esctointerrupt/;
 /**
- * opencode_line_is_composer_status: "┃  Build · Big Pickle OpenCode Zen", or
+ * The `opencode-composer-status` rule: "┃  Build · Big Pickle OpenCode Zen", or
  * "┃  Build · Model default" when no model is pinned. Matched against the
  * spaced output rather than the compact form, which has no line boundaries.
  *
@@ -59,7 +63,7 @@ const WORKING_FOOTER = /escapeinterrupt|escinterrupt|esctointerrupt/;
  * guards is a false alarm waiting to happen.
  */
 const COMPOSER_STATUS = /┃ {1,4}\S[^\n]* · \S/;
-/** OPENCODE_PERMISSION_ACTIONS, compacted the same way as READY. */
+/** The `permissionActionMarkers` set, compacted the same way as READY. */
 const PERMISSION_ACTIONS = /Allowonce.*Allowalways/s;
 /**
  * The elapsed time OpenCode paints onto its summary line when a turn ends
@@ -142,8 +146,8 @@ describe("TUI status markers the daemon reads (opencode)", () => {
       expect(
         COMPOSER_STATUS.test(session.output),
         `the composer's mode/model line is gone, so the daemon has no positive Idle marker ` +
-        `for OpenCode. Update opencode_line_is_composer_status in ` +
-        `crates/daemon/src/headless_terminal.rs and re-capture the fixtures. TUI tail:\n` +
+        `for OpenCode. Update composerStatusSeparators in ` +
+        `crates/daemon/src/detection/rules.json and re-capture the fixtures. TUI tail:\n` +
         session.output.slice(-1200),
       ).toBe(true);
 
@@ -160,8 +164,8 @@ describe("TUI status markers the daemon reads (opencode)", () => {
       expect(
         wentBusy,
         `opencode never drew a working footer this test recognises, so the daemon can no longer ` +
-        `see an OpenCode session as Busy. Update OPENCODE_INTERRUPT_MARKERS in ` +
-        `crates/daemon/src/headless_terminal.rs. TUI tail:\n${session.output.slice(-1200)}`,
+        `see an OpenCode session as Busy. Add the new spelling to inFlightMarkers in ` +
+        `crates/daemon/src/detection/rules.json. TUI tail:\n${session.output.slice(-1200)}`,
       ).toBe(true);
 
       await waitUntilQuiet(session, 6_000, 240_000);
@@ -238,7 +242,7 @@ describe("TUI status markers the daemon reads (opencode)", () => {
         `opencode's permission dialog no longer draws an "Allow once / Allow always" action row. ` +
         `That row is the only part of the dialog inside the daemon's status window, so without it ` +
         `a task parked on a permission prompt is never reported as Waiting. Update ` +
-        `OPENCODE_PERMISSION_ACTIONS in crates/daemon/src/headless_terminal.rs. TUI tail:\n` +
+        `permissionActionMarkers in crates/daemon/src/detection/rules.json. TUI tail:\n` +
         session.output.slice(-1200),
       ).toBe(true);
     } finally {

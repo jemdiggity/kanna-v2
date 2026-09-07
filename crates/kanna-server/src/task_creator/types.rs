@@ -121,6 +121,12 @@ pub(crate) enum PreparedSessionSpawn {
         cols: u16,
         rows: u16,
         agent_provider: DaemonAgentProvider,
+        /// The provider CLI this shell command line runs, resolved here to an
+        /// absolute path. `executable` is the login shell that runs repo setup
+        /// first, so the daemon cannot find the CLI by inspecting its own
+        /// child; it probes this path for the version its detection rules are
+        /// selected by.
+        agent_executable: Option<String>,
     },
     Agent {
         agent_provider: DaemonAgentProvider,

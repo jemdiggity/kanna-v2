@@ -1114,6 +1114,7 @@ pub(crate) async fn handle_handoff(
                     cols,
                     snapshot,
                     agent_provider: parts.agent_provider,
+                    cli_version: parts.cli_version.as_ref().map(ToString::to_string),
                     status: parts.status,
                     kind: protocol::SessionKind::Pty,
                     provider_session_id: None,
@@ -1210,6 +1211,9 @@ pub(crate) async fn handle_handoff(
             cols: 0,
             snapshot: None,
             agent_provider: Some(record.provider),
+            // Headless agent sessions classify from provider events, not from
+            // rendered chrome, so no rule set is selected for them.
+            cli_version: None,
             status: record.status,
             kind: protocol::SessionKind::Agent,
             provider_session_id: record.provider_session_id.clone(),

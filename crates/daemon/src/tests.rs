@@ -60,6 +60,7 @@ fn parse_handoff_response_accepts_v2_payload() {
             cols: 80,
             snapshot: None,
             agent_provider: None,
+            cli_version: None,
             status: SessionStatus::Idle,
             kind: protocol::SessionKind::Pty,
             provider_session_id: None,
@@ -111,15 +112,40 @@ fn format_status_observation_log_includes_session_source_status_and_lines() {
         "dbaa5b9d",
         "mirror_output",
         Some(protocol::AgentProvider::Copilot),
+        Some("0.0.354"),
         Some(SessionStatus::Busy),
+        Some("copilot/busy/cancel-marker"),
         &lines,
     );
 
     assert!(log_line.contains("session=dbaa5b9d"));
     assert!(log_line.contains("source=mirror_output"));
     assert!(log_line.contains("provider=copilot"));
+    assert!(log_line.contains("cli_version=0.0.354"));
     assert!(log_line.contains("detected=busy"));
+    // Which rule decided it, not just what it decided: a frame that lands on
+    // the right status through the wrong rule is rule selection drifting, and
+    // the status alone cannot say so.
+    assert!(log_line.contains("rule=copilot/busy/cancel-marker"));
     assert!(log_line.contains("Esc to cancel"));
+}
+
+/// An unversioned session and an unclassified frame still read cleanly.
+#[test]
+fn format_status_observation_log_names_unknown_version_and_rule() {
+    let log_line = format_status_observation_log(
+        "dbaa5b9d",
+        "quiet_refresh",
+        Some(protocol::AgentProvider::Claude),
+        None,
+        None,
+        None,
+        &[],
+    );
+
+    assert!(log_line.contains("cli_version=unknown"));
+    assert!(log_line.contains("detected=none"));
+    assert!(log_line.contains("rule=none"));
 }
 
 #[test]
@@ -655,6 +681,7 @@ fn handoff_session(kind: protocol::SessionKind, agent_fd_count: u8) -> protocol:
         cols: 80,
         snapshot: None,
         agent_provider: None,
+        cli_version: None,
         status: SessionStatus::Idle,
         kind,
         provider_session_id: None,
@@ -1453,6 +1480,7 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         cols: 0,
         snapshot: None,
         agent_provider: Some(protocol::AgentProvider::Claude),
+        cli_version: None,
         status: SessionStatus::Busy,
         kind: protocol::SessionKind::Agent,
         provider_session_id: Some("prov-forged".to_string()),
@@ -1531,6 +1559,7 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         cols: 0,
         snapshot: None,
         agent_provider: Some(protocol::AgentProvider::Claude),
+        cli_version: None,
         status: SessionStatus::Busy,
         kind: protocol::SessionKind::Agent,
         provider_session_id: Some("prov-legacy".to_string()),

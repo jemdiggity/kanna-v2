@@ -1,0 +1,587 @@
+{
+  "schemaVersion": 1,
+
+  "common": {
+    "vocabulary": {
+      "composerPrompts": [
+        {
+          "id": "common/vocab/composer-prompts",
+          "versions": "*",
+          "glyphs": ["❯", "›"]
+        }
+      ],
+      "menuCaretGlyphs": [
+        {
+          "id": "common/vocab/menu-caret",
+          "versions": "*",
+          "glyphs": ["❯"]
+        }
+      ],
+      "dividerGlyphs": [
+        {
+          "id": "common/vocab/divider",
+          "versions": "*",
+          "glyphs": ["─", "━", "—", "-"]
+        }
+      ],
+      "waitingMarkers": [
+        {
+          "id": "common/vocab/permission-question",
+          "versions": "*",
+          "values": ["do you want to allow"]
+        }
+      ],
+      "worktreePathMarkers": [
+        {
+          "id": "common/vocab/worktree-path",
+          "versions": "*",
+          "values": [".kanna-worktrees/", "[⎇ "]
+        }
+      ]
+    },
+
+    "chrome": [
+      {
+        "id": "common/chrome/divider",
+        "versions": "*",
+        "match": { "allCharactersIn": "dividerGlyphs" }
+      },
+      {
+        "id": "common/chrome/composer",
+        "versions": "*",
+        "match": { "startsWithGlyph": "composerPrompts" }
+      },
+      {
+        "id": "common/chrome/worktree-path",
+        "versions": "*",
+        "match": { "containsAny": "worktreePathMarkers" }
+      },
+      {
+        "id": "common/chrome/interrupt-hint",
+        "versions": "*",
+        "match": { "contains": "esc to interrupt" }
+      },
+      {
+        "id": "common/chrome/cancel-hint",
+        "versions": "*",
+        "match": { "contains": "esc to cancel" }
+      },
+      {
+        "id": "common/chrome/permission-mode",
+        "versions": "*",
+        "match": { "contains": "bypass permissions" }
+      },
+      {
+        "id": "common/chrome/slash-commands",
+        "versions": "*",
+        "match": { "contains": "/ commands" }
+      }
+    ],
+
+    "rules": [
+      {
+        "id": "common/waiting/permission-prompt",
+        "status": "waiting",
+        "channel": "grid",
+        "versions": "*",
+        "priority": 10,
+        "when": { "anyLineWrapped": { "containsAny": "waitingMarkers" } }
+      }
+    ]
+  },
+
+  "providers": [
+    {
+      "provider": "claude",
+      "versionProbe": { "args": ["--version"] },
+
+      "vocabulary": {
+        "composerPrompts": [
+          {
+            "id": "claude/vocab/composer-prompt",
+            "versions": "*",
+            "glyphs": ["❯"]
+          }
+        ],
+        "dividerGlyphs": [
+          {
+            "id": "claude/vocab/composer-box-border",
+            "versions": "*",
+            "glyphs": ["─", "━", "—", "-"]
+          }
+        ],
+        "spinnerGlyphs": [
+          {
+            "id": "claude/vocab/spinner",
+            "versions": "*",
+            "glyphs": [
+              "✻",
+              "✽",
+              "✶",
+              "✳",
+              "✢",
+              "✣",
+              "✤",
+              "✥"
+            ]
+          }
+        ],
+        "workingFooterGlyphs": [
+          {
+            "id": "claude/vocab/working-footer-first-paint",
+            "versions": "*",
+            "glyphs": ["·"]
+          }
+        ],
+        "inFlightMarkers": [
+          {
+            "id": "claude/vocab/in-flight-ellipsis",
+            "versions": "*",
+            "values": ["…"]
+          }
+        ],
+        "doneFooterMarkers": [
+          {
+            "id": "claude/vocab/done-footer",
+            "versions": "*",
+            "values": ["· done "]
+          }
+        ],
+        "subagentParentPrefixes": [
+          {
+            "id": "claude/vocab/subagent-parent",
+            "versions": "*",
+            "values": ["⏺ "]
+          }
+        ],
+        "subagentTaskPrefixes": [
+          {
+            "id": "claude/vocab/subagent-task",
+            "versions": "*",
+            "values": ["◯ "]
+          }
+        ],
+        "titleBusyGlyphs": [
+          {
+            "id": "claude/vocab/title-busy",
+            "versions": ">=2.1.263",
+            "glyphs": ["◐", "◑"]
+          }
+        ]
+      },
+
+      "chrome": [
+        {
+          "id": "claude/chrome/banner",
+          "versions": "*",
+          "match": { "equals": "Claude Code" }
+        },
+        {
+          "id": "claude/chrome/spinner-row",
+          "versions": "*",
+          "match": { "startsWithGlyphWord": "spinnerGlyphs" }
+        },
+        {
+          "id": "claude/chrome/model-line",
+          "versions": "*",
+          "match": {
+            "allOf": [
+              {
+                "anyOf": [
+                  { "startsWith": "Sonnet" },
+                  { "startsWith": "Opus" },
+                  { "startsWith": "Haiku" }
+                ]
+              },
+              { "contains": " with " }
+            ]
+          }
+        }
+      ],
+
+      "rules": [
+        {
+          "id": "claude/busy/interrupt-marker",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "<2.1.263",
+          "priority": 20,
+          "when": { "anyLineWrapped": { "contains": "esc to interrupt" } }
+        },
+        {
+          "id": "claude/busy/working-footer",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 30,
+          "when": { "structural": "claude-working-footer" }
+        },
+        {
+          "id": "claude/busy/active-subagent",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 40,
+          "when": { "structural": "claude-active-subagent" }
+        },
+        {
+          "id": "claude/waiting/selected-menu-option",
+          "status": "waiting",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 50,
+          "when": { "structural": "claude-selected-menu-option" }
+        },
+        {
+          "id": "claude/idle/parked-composer",
+          "status": "idle",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 60,
+          "when": { "structural": "claude-parked-composer" }
+        },
+        {
+          "id": "claude/idle/done-footer",
+          "status": "idle",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 70,
+          "when": { "anyLine": { "containsAny": "doneFooterMarkers" } }
+        },
+        {
+          "id": "claude/busy/title-spinner",
+          "status": "busy",
+          "channel": "title",
+          "versions": ">=2.1.263",
+          "priority": 10,
+          "when": { "text": { "startsWithGlyphWord": "titleBusyGlyphs" } }
+        }
+      ]
+    },
+
+    {
+      "provider": "codex",
+      "versionProbe": { "args": ["--version"] },
+
+      "vocabulary": {
+        "composerPrompts": [
+          {
+            "id": "codex/vocab/composer-prompt",
+            "versions": "*",
+            "glyphs": ["›"]
+          }
+        ],
+        "idlePromptGlyphs": [
+          {
+            "id": "codex/vocab/idle-prompt",
+            "versions": "*",
+            "glyphs": ["›"]
+          }
+        ]
+      },
+
+      "chrome": [
+        {
+          "id": "codex/chrome/banner",
+          "versions": "*",
+          "match": { "equals": "OpenAI Codex" }
+        },
+        {
+          "id": "codex/chrome/working-row",
+          "versions": "*",
+          "match": { "startsWith": "◦ Working" }
+        },
+        {
+          "id": "codex/chrome/model-line",
+          "versions": "*",
+          "match": {
+            "allOf": [
+              { "contains": " · " },
+              {
+                "anyOf": [
+                  { "startsWith": "gpt-" },
+                  { "startsWith": "o1" },
+                  { "startsWith": "o3" },
+                  { "startsWith": "o4" }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+
+      "rules": [
+        {
+          "id": "codex/busy/interrupt-marker",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 20,
+          "when": { "anyLineWrapped": { "contains": "esc to interrupt" } }
+        },
+        {
+          "id": "codex/idle/composer",
+          "status": "idle",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 60,
+          "when": { "lastNonEmptyLine": { "startsWithGlyph": "idlePromptGlyphs" } }
+        }
+      ]
+    },
+
+    {
+      "provider": "opencode",
+      "versionProbe": { "args": ["--version"] },
+      "waitingPromptRows": 24,
+
+      "vocabulary": {
+        "boxBorderGlyphs": [
+          {
+            "id": "opencode/vocab/box-border",
+            "versions": "*",
+            "glyphs": ["┃"]
+          }
+        ],
+        "blockArtGlyphs": [
+          {
+            "id": "opencode/vocab/block-art",
+            "versions": "*",
+            "glyphs": [
+              "╹",
+              "▀",
+              "▄",
+              "█",
+              "▌",
+              "▐"
+            ]
+          }
+        ],
+        "inFlightMarkers": [
+          {
+            "id": "opencode/vocab/interrupt-1.16",
+            "versions": "<1.17",
+            "values": ["escape interrupt"]
+          },
+          {
+            "id": "opencode/vocab/interrupt-1.18",
+            "versions": ">=1.17",
+            "values": ["esc interrupt"]
+          },
+          {
+            "id": "opencode/vocab/interrupt-shared",
+            "versions": "*",
+            "values": ["esc to interrupt"]
+          }
+        ],
+        "permissionActionMarkers": [
+          {
+            "id": "opencode/vocab/permission-actions",
+            "versions": "*",
+            "values": ["allow once", "allow always"]
+          }
+        ],
+        "turnSummaryGlyphs": [
+          {
+            "id": "opencode/vocab/turn-summary",
+            "versions": "*",
+            "glyphs": ["▣"]
+          }
+        ],
+        "footerProgressGlyphs": [
+          {
+            "id": "opencode/vocab/footer-progress",
+            "versions": "*",
+            "glyphs": ["⬝", "■"]
+          }
+        ],
+        "composerStatusSeparators": [
+          {
+            "id": "opencode/vocab/composer-status-separator",
+            "versions": "*",
+            "values": [" · "]
+          }
+        ]
+      },
+
+      "chrome": [
+        {
+          "id": "opencode/chrome/banner",
+          "versions": "*",
+          "match": { "equals": "OpenCode" }
+        },
+        {
+          "id": "opencode/chrome/box-border",
+          "versions": "*",
+          "match": { "startsWithGlyph": "boxBorderGlyphs" }
+        },
+        {
+          "id": "opencode/chrome/block-art",
+          "versions": "*",
+          "match": { "allCharactersIn": "blockArtGlyphs" }
+        },
+        {
+          "id": "opencode/chrome/hint-bar",
+          "versions": "*",
+          "match": { "contains": "ctrl+p commands" }
+        },
+        {
+          "id": "opencode/chrome/working-footer",
+          "versions": "*",
+          "match": { "containsAny": "inFlightMarkers" }
+        },
+        {
+          "id": "opencode/chrome/turn-summary",
+          "versions": "*",
+          "match": { "startsWithGlyph": "turnSummaryGlyphs" }
+        },
+        {
+          "id": "opencode/chrome/footer-progress",
+          "versions": "*",
+          "match": { "startsWithGlyph": "footerProgressGlyphs" }
+        }
+      ],
+
+      "rules": [
+        {
+          "id": "opencode/waiting/permission-action",
+          "status": "waiting",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 15,
+          "when": { "anyLine": { "containsAllOf": "permissionActionMarkers" } }
+        },
+        {
+          "id": "opencode/busy/interrupt-marker",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 20,
+          "when": { "anyLine": { "containsAny": "inFlightMarkers" } }
+        },
+        {
+          "id": "opencode/idle/composer-status",
+          "status": "idle",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 60,
+          "when": { "structural": "opencode-composer-status" }
+        }
+      ]
+    },
+
+    {
+      "provider": "antigravity",
+      "versionProbe": { "args": ["--version"] },
+
+      "vocabulary": {
+        "idlePromptGlyphs": [
+          {
+            "id": "antigravity/vocab/idle-prompt",
+            "versions": "*",
+            "glyphs": ["›"]
+          }
+        ],
+        "busyMarkers": [
+          {
+            "id": "antigravity/vocab/busy",
+            "versions": "*",
+            "values": ["esc to cancel"]
+          }
+        ]
+      },
+
+      "chrome": [
+        {
+          "id": "antigravity/chrome/banner",
+          "versions": "*",
+          "match": { "equals": "Antigravity" }
+        }
+      ],
+
+      "rules": [
+        {
+          "id": "antigravity/busy/cancel-marker",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 20,
+          "when": { "anyLineWrapped": { "containsAny": "busyMarkers" } }
+        },
+        {
+          "id": "antigravity/idle/composer",
+          "status": "idle",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 60,
+          "when": { "lastNonEmptyLine": { "startsWithGlyph": "idlePromptGlyphs" } }
+        }
+      ]
+    },
+
+    {
+      "provider": "copilot",
+      "versionProbe": { "args": ["--version"] },
+
+      "vocabulary": {
+        "idlePromptGlyphs": [
+          {
+            "id": "copilot/vocab/idle-prompt",
+            "versions": "*",
+            "glyphs": ["❯"]
+          }
+        ],
+        "busyMarkers": [
+          {
+            "id": "copilot/vocab/busy",
+            "versions": "*",
+            "values": ["esc to cancel", "thinking "]
+          }
+        ]
+      },
+
+      "chrome": [
+        {
+          "id": "copilot/chrome/banner",
+          "versions": "*",
+          "match": { "equals": "GitHub Copilot" }
+        }
+      ],
+
+      "rules": [
+        {
+          "id": "copilot/busy/above-path",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 30,
+          "when": { "structural": "copilot-busy-above-path" }
+        },
+        {
+          "id": "copilot/idle/below-path",
+          "status": "idle",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 35,
+          "when": { "structural": "copilot-idle-composer-below-path" }
+        },
+        {
+          "id": "copilot/busy/cancel-marker",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 40,
+          "when": { "anyLineWrapped": { "contains": "esc to cancel" } }
+        },
+        {
+          "id": "copilot/idle/last-line-composer",
+          "status": "idle",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 60,
+          "when": { "lastNonEmptyLine": { "startsWithGlyph": "idlePromptGlyphs" } }
+        }
+      ]
+    }
+  ]
+}

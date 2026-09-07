@@ -6,7 +6,12 @@ reconstructs the exact frame the daemon would have seen, which is what
 `crates/daemon/src/headless_terminal.rs` pins its OpenCode status matcher
 against.
 
-**Captured from OpenCode CLI 1.18.15**, model `opencode/big-pickle`.
+**Captured from OpenCode CLI 1.18.15**, model `opencode/big-pickle`. That
+version is named in `OPENCODE_FIXTURE_CLI_VERSION` in
+`crates/daemon/src/headless_terminal.rs`, and the classification tests resolve
+the detection rules against it — so these frames are checked under the rules
+measured for the release they came from, not under whatever the newest rules
+happen to be.
 
 | File | State | What the bottom of the screen shows |
 |---|---|---|
@@ -54,3 +59,19 @@ It needs `opencode` installed and authenticated, spends a few free-tier turns,
 and prints the CLI version it captured from. Update that version here and in the
 `OPENCODE_FIXTURES` doc comment in `headless_terminal.rs`, then re-run
 `cargo test -p kanna-daemon --lib headless_terminal`.
+
+## What the tests assert
+
+Beyond the final status, the tests name the **rule** that decided each frame:
+`opencode/busy/interrupt-marker`, `opencode/idle/composer-status`,
+`opencode/waiting/permission-action`. A frame that reaches the right status
+through a rule written for a different release is rule selection drifting, and
+the status alone cannot see it.
+
+The two footer spellings this directory's history produced —
+`escape interrupt` (1.16.2) and `esc interrupt` (1.18.15) — are now version-
+tagged entries in `crates/daemon/src/detection/rules.json` rather than one
+undifferentiated list, so a session on either release matches only the spelling
+its own CLI draws. Re-capturing against a newer CLI means adding an entry with
+its range, not replacing the one that is there: someone is still running the
+old release.

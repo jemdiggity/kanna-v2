@@ -673,6 +673,7 @@ mod tests {
         std::fs::write(&pid_path, "41\n").unwrap();
         let old_listener = UnixListener::bind(&socket_path).unwrap();
         let command = Command::Spawn {
+            agent_executable: None,
             session_id: "ordinary-pty".to_string(),
             executable: "/bin/cat".to_string(),
             args: Vec::new(),
@@ -779,6 +780,7 @@ mod tests {
             command
         });
         let command = Command::Spawn {
+            agent_executable: None,
             session_id: "never-submitted".to_string(),
             executable: "/bin/cat".to_string(),
             args: Vec::new(),

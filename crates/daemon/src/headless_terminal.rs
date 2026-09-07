@@ -1,3 +1,13 @@
+//! The daemon's headless terminal: a VT emulator that renders a session's PTY
+//! output with no window attached.
+//!
+//! This file renders. It deliberately does **not** decide what a frame means:
+//! the patterns that answer "is this session busy, waiting or parked?" live in
+//! [`crate::detection`], as version-resolved data rather than constants in the
+//! binary. What is left here is the rendering the classifier reads — the
+//! grid, the terminal title, and the progress reports the session emitted —
+//! plus the snapshot machinery reconnection and handoff are built on.
+
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use ghostty_xterm_compat_serialize::serialize_terminal;
@@ -8,117 +18,21 @@ use libghostty_vt::{
     Terminal, TerminalOptions,
 };
 
+use crate::detection::progress::ProgressScanner;
+use crate::detection::schema::ProgressState;
+use crate::detection::{Classifier, Evidence, Verdict};
 use crate::protocol::{AgentProvider, SessionStatus, TerminalSnapshot};
+
+#[allow(unused_imports)]
+pub use crate::detection::classify::{bound_waiting_prompt, ComposerState};
+
+use crate::detection::classify::starts_with_glyph;
 
 type HeadlessTerminalResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 // Ghostty's C API names this "max_scrollback", but it is a byte budget, not a
 // row count. Budget against the full grid so 10K logical rows survive snapshot.
 const GHOSTTY_SCROLLBACK_BYTES_PER_CELL: usize = 20;
-const STATUS_ROWS: usize = 8;
-const WAITING_PROMPT_MAX_CHARS: usize = 240;
-const WAITING_PROMPT_MAX_LINES: usize = 3;
-const WAITING_MARKER: &str = "do you want to allow";
-const INTERRUPT_MARKER: &str = "esc to interrupt";
-const COPILOT_BUSY_MARKER: &str = "esc to cancel";
-const ANTIGRAVITY_BUSY_MARKER: &str = "esc to cancel";
-const CLAUDE_IDLE_PROMPT: char = '\u{276F}';
-/// The dim glyph Claude paints the first frame of a turn with, before its
-/// animation reaches the star glyphs [`line_is_claude_spinner`] already knows.
-/// Captured, like those, off real frames rather than assumed from the set.
-const CLAUDE_WORKING_FOOTER_GLYPH: char = '\u{B7}';
-/// What a *finished* turn's footer carries in place of the ellipsis.
-const CLAUDE_DONE_FOOTER_MARKER: &str = "\u{B7} done ";
-const ELLIPSIS: char = '\u{2026}';
-const CODEX_IDLE_PROMPT: char = '\u{203A}';
-/// Every prompt glyph a measured composer is drawn with. One list, because a
-/// line that opens with one of these is the same thing everywhere it is read:
-/// the input line, not something the session said.
-const COMPOSER_PROMPTS: &[char] = &[CLAUDE_IDLE_PROMPT, CODEX_IDLE_PROMPT];
-
-// OpenCode's TUI, pinned against CLI 1.18.15. Every constant below was read off
-// real captured frames — `crates/daemon/tests/fixtures/opencode/*.ansi`, which
-// the tests at the bottom of this file replay — rather than written from the
-// shape the matcher happened to expect. OpenCode draws none of the markers the
-// other providers use: before this was measured, `opencode_status_from_lines`
-// matched nothing at all and every live session sat at its initial `Busy`
-// forever (docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md).
-
-/// The left border OpenCode draws down its composer box, and down every dialog
-/// it renders inside that box.
-const OPENCODE_BOX_BORDER: char = '\u{2503}';
-/// The working footer, drawn only while a turn is in flight.
-///
-/// Three spellings, because OpenCode used two of them inside a single day:
-/// 1.16.2 rendered "escape interrupt" and 1.18.15 renders "esc interrupt".
-/// Pinning every spelling seen — including the one the other providers use — is
-/// what keeps a CLI upgrade from silently costing `Busy` detection.
-const OPENCODE_INTERRUPT_MARKERS: &[&str] =
-    &["escape interrupt", "esc interrupt", INTERRUPT_MARKER];
-/// The permission dialog's action row, which is what makes the dialog
-/// *detectable*: its "△ Permission required" header sits several rows above the
-/// bottom — outside the status window on a tall terminal — while this row is
-/// always the second-to-last line on screen.
-const OPENCODE_PERMISSION_ACTIONS: &[&str] = &["allow once", "allow always"];
-/// The turn-summary glyph that replaces the working footer once a turn ends
-/// ("▣ Build · Big Pickle · 3.0s").
-const OPENCODE_TURN_SUMMARY_GLYPH: char = '\u{25A3}';
-/// The progress cells the working footer is drawn from ("⬝⬝⬝⬝⬝⬝⬝⬝", "⬝⬝⬝⬝⬝⬝■■").
-const OPENCODE_PROGRESS_GLYPHS: &[char] = &['\u{2B1D}', '\u{25A0}'];
-/// The half-block glyphs OpenCode's splash banner, composer rule and scrollbar
-/// gutter are drawn from. Text-free, so none of it belongs in a snippet.
-const OPENCODE_BLOCK_GLYPHS: &[char] = &[
-    '\u{2579}', '\u{2580}', '\u{2584}', '\u{2588}', '\u{258C}', '\u{2590}',
-];
-/// The bottom hint bar. Dropped on a narrow terminal and wrapped on a narrower
-/// one still, so it is usable as chrome to skip but useless as a state marker.
-const OPENCODE_HINT_BAR_MARKER: &str = "ctrl+p commands";
-/// OpenCode's permission dialog is taller than the status window: reading *what*
-/// it is asking needs the rows above the action row, while deciding *that* it is
-/// asking does not.
-const OPENCODE_WAITING_PROMPT_ROWS: usize = 24;
-
-/// What the rendered terminal proves about a session's composer.
-///
-/// There is no "a draft is present" answer on purpose. This exists to resolve
-/// inherited draft state — whether a session the daemon did not watch being
-/// typed into is holding an unsubmitted line — and only one of the two answers
-/// can be proven from a frame: an empty composer holds nothing. Everything
-/// else, including a line the daemon cannot explain, is `Unknown` and stays
-/// the operator's call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposerState {
-    /// The provider's own idle composer chrome is on screen with nothing typed
-    /// into it. A positive match on rendered chrome, never an inference from a
-    /// quiet session.
-    Empty,
-    /// The composer line holds nothing but the provider's own dim suggestion
-    /// chrome — Claude Code's tab-to-accept ghost of the last thing submitted.
-    ///
-    /// A positive match on two rendered facts at once, never an inference from
-    /// text alone: every cell of that line is painted faint (SGR 2), which
-    /// Claude never paints a typed draft with, *and* the cursor sits at the
-    /// start of the composer rather than after the text, which is where it sits
-    /// only when nothing on that line was typed. Both together, because being
-    /// wrong here means appending a delivered message to a real unsent line.
-    ///
-    /// Proof of the same thing [`ComposerState::Empty`] proves — nobody has an
-    /// unsent line here — from a frame that is not textually empty. Without it
-    /// a session whose ledger was armed once can never recover: the ghost keeps
-    /// the composer permanently non-empty, so an empty-text frame never comes.
-    SuggestionOnly,
-    /// Not provably empty: a draft, a suggestion the daemon cannot tell from a
-    /// draft, a dialog, a busy frame, a provider whose empty composer has not
-    /// been measured, or a screen that has not drawn a composer yet.
-    Unknown,
-}
-
-impl ComposerState {
-    /// Whether this frame proves nobody has an unsent line at the composer.
-    pub fn proves_nothing_typed(self) -> bool {
-        matches!(self, Self::Empty | Self::SuggestionOnly)
-    }
-}
 
 /// One reading of the composer row's *cells*, with the styling and cursor the
 /// provider painted them with.
@@ -160,12 +74,16 @@ pub struct HeadlessTerminal {
     row_iterator: RowIterator<'static>,
     cell_iterator: CellIterator<'static>,
     pty_writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    /// Out-of-band progress the session reported with OSC 9. Scanned from the
+    /// byte stream rather than read off the grid, because that is the point of
+    /// the channel: it survives a repaint that leaves the grid unreadable.
+    progress: ProgressScanner,
     rows: u16,
     cols: u16,
-    /// Whether this session has already reported a Claude footer it could not
-    /// classify. The warning is the canary for the next vocabulary change and
-    /// is worth exactly one line per session, not one per rendered frame.
-    warned_unclassified_claude_footer: bool,
+    /// Whether this session has already reported a provider footer its rules
+    /// cannot classify. The warning is the canary for the next vocabulary
+    /// change and is worth exactly one line per session, not one per frame.
+    warned_unclassified_footer: bool,
 }
 
 unsafe impl Send for HeadlessTerminal {}
@@ -220,14 +138,16 @@ impl HeadlessTerminal {
             row_iterator,
             cell_iterator,
             pty_writes,
+            progress: ProgressScanner::new(),
             rows,
             cols,
-            warned_unclassified_claude_footer: false,
+            warned_unclassified_footer: false,
         })
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+        self.progress.write(bytes);
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -379,70 +299,105 @@ impl HeadlessTerminal {
         self.visible_footer_lines(rows)
     }
 
-    pub fn visible_status(
-        &mut self,
-        provider: Option<AgentProvider>,
-    ) -> HeadlessTerminalResult<Option<SessionStatus>> {
-        let Some(provider) = provider else {
-            return Ok(None);
-        };
+    /// The terminal title the session last set with OSC 0/2.
+    ///
+    /// Provider-emitted state that survives a full-screen repaint, which is
+    /// what makes it usable evidence for the frames the grid cannot read.
+    pub fn title(&self) -> String {
+        self.terminal.title().unwrap_or("").to_string()
+    }
 
-        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
-        if provider == AgentProvider::Claude && !self.warned_unclassified_claude_footer {
-            if let Some(footer) = claude_unclassified_footer(&footer_lines) {
+    /// The last OSC 9 progress report the session emitted, if any.
+    pub fn progress_state(&self) -> Option<ProgressState> {
+        self.progress.latest_state()
+    }
+
+    /// Classify this frame, naming the rule that decided it.
+    pub fn visible_verdict(
+        &mut self,
+        classifier: &mut Classifier,
+    ) -> HeadlessTerminalResult<Option<Verdict>> {
+        if classifier.provider().is_none() {
+            return Ok(None);
+        }
+        let rows = classifier.status_rows();
+        let lines = self.visible_footer_lines(rows)?;
+
+        if !self.warned_unclassified_footer {
+            if let Some(footer) = classifier.unclassified_footer(&lines) {
                 log::warn!(
-                    "[status] Claude drew a footer this daemon cannot classify, so its runtime \
-                     status may be stale; re-measure the constants in headless_terminal.rs \
-                     against the installed CLI: {footer:?}"
+                    "[status] {:?} drew a footer these rules cannot classify, so its runtime \
+                     status may be stale; re-measure the vocabulary in \
+                     crates/daemon/src/detection/rules.json against CLI version {}: {footer:?}",
+                    classifier.provider(),
+                    classifier
+                        .version()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "unknown".to_string()),
                 );
-                self.warned_unclassified_claude_footer = true;
+                self.warned_unclassified_footer = true;
             }
         }
-        let status = match provider {
-            AgentProvider::Claude => claude_status_from_lines(&footer_lines),
-            AgentProvider::Codex => codex_status_from_lines(&footer_lines),
-            AgentProvider::Opencode => opencode_status_from_lines(&footer_lines),
-            AgentProvider::Antigravity => antigravity_status_from_lines(&footer_lines),
-            AgentProvider::Copilot => copilot_status_from_lines(&footer_lines),
-        };
 
-        Ok(status)
+        let title = self.title();
+        let progress = self.progress_state();
+        Ok(classifier.classify(&Evidence {
+            lines: &lines,
+            title: &title,
+            progress,
+        }))
+    }
+
+    pub fn visible_status(
+        &mut self,
+        classifier: &mut Classifier,
+    ) -> HeadlessTerminalResult<Option<SessionStatus>> {
+        Ok(self
+            .visible_verdict(classifier)?
+            .map(|verdict| verdict.status))
     }
 
     /// Whether the provider has finished publishing its current terminal
     /// frame.
     ///
-    /// Codex brackets TUI redraws with DEC synchronized-output mode. While
-    /// that mode is active the rendered grid is an intermediate frame: the
-    /// old composer and a newly painted working line can coexist even though
-    /// neither is the frame Codex will expose when the bracket closes. Status
-    /// classification must wait for that boundary instead of turning a paint
-    /// operation into agent activity.
+    /// A TUI redraw bracketed with DEC synchronized-output mode is an
+    /// intermediate frame while that mode is active: the old composer and a
+    /// newly painted working line can coexist even though neither is the frame
+    /// the provider will expose when the bracket closes. Status classification
+    /// must wait for that boundary instead of turning a paint operation into
+    /// agent activity.
     pub fn status_frame_complete(&self) -> bool {
         !self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false)
     }
 
     pub fn composer_state(
         &mut self,
-        provider: Option<AgentProvider>,
+        classifier: &mut Classifier,
     ) -> HeadlessTerminalResult<ComposerState> {
-        let Some(provider) = provider else {
+        if classifier.provider().is_none() {
             return Ok(ComposerState::Unknown);
-        };
-        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
-        let composer_line = match composer_reading_from_lines(&footer_lines, provider) {
+        }
+        let rows = classifier.status_rows();
+        let lines = self.visible_footer_lines(rows)?;
+        // The text-level reading is the classifier's: which row is the
+        // composer, and whether the frame draws a readable one at all, are
+        // rule questions. An empty composer is already the whole proof.
+        let composer_line = match classifier.composer_reading(&lines) {
             None => return Ok(ComposerState::Unknown),
-            Some((_, "")) => return Ok(ComposerState::Empty),
-            Some((index, _)) => footer_lines[index].clone(),
+            Some((_, text)) if text.is_empty() => return Ok(ComposerState::Empty),
+            Some((index, _)) => lines[index].clone(),
         };
         // The line is not textually empty, so the only remaining question is
         // whether the provider painted it as its own suggestion. Answered from
         // the cells, and only for a provider whose suggestion styling has
         // actually been measured off real frames.
+        let Some(provider) = classifier.provider() else {
+            return Ok(ComposerState::Unknown);
+        };
         if !paints_faint_suggestions(provider) {
             return Ok(ComposerState::Unknown);
         }
-        let Some(row) = self.composer_row_for_line(&composer_line, provider)? else {
+        let Some(row) = self.composer_row_for_line(&composer_line, classifier)? else {
             return Ok(ComposerState::Unknown);
         };
         if row.all_faint && row.cursor_at_start && !row.text.is_empty() {
@@ -461,12 +416,9 @@ impl HeadlessTerminal {
     /// lift text off that line is in the returned row; nothing here decides it.
     pub fn plain_composer_row(
         &mut self,
-        provider: Option<AgentProvider>,
+        classifier: &mut Classifier,
     ) -> HeadlessTerminalResult<Option<ComposerRow>> {
-        let Some(provider) = provider else {
-            return Ok(None);
-        };
-        if composer_prompt(provider).is_none() {
+        if classifier.composer_prompts().is_empty() {
             return Ok(None);
         }
         // Deliberately no alternate-screen guard. Claude Code draws its whole
@@ -479,28 +431,33 @@ impl HeadlessTerminal {
         if !self.status_frame_complete() {
             return Ok(None);
         }
-        let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
-        let Some((index, _)) = composer_reading_from_lines(&footer_lines, provider) else {
+        let rows = classifier.status_rows();
+        let lines = self.visible_footer_lines(rows)?;
+        let Some((index, _)) = classifier.composer_reading(&lines) else {
             return Ok(None);
         };
-        let composer_line = footer_lines[index].clone();
-        self.composer_row_for_line(&composer_line, provider)
+        let composer_line = lines[index].clone();
+        self.composer_row_for_line(&composer_line, classifier)
     }
 
     /// Find the cell row that rendered `normalized_line` and read its styling.
     ///
-    /// The line is located by the same text the rest of this file classifies,
-    /// so there is one answer to *which* row is the composer; this only adds
-    /// what normalisation threw away. The last matching row wins, matching
-    /// [`composer_index_from_lines`].
+    /// The line is located by the same text the classifier reads, so there is
+    /// one answer to *which* row is the composer; this only adds what
+    /// normalisation threw away. Cell attributes are the one thing the rule
+    /// file deliberately does not describe — styling and cursor position are
+    /// read off the grid, not matched against measured patterns — so this
+    /// stays here, in the file that renders. The last matching row wins,
+    /// matching the classifier's own last-prompt-line reading.
     fn composer_row_for_line(
         &mut self,
         normalized_line: &str,
-        provider: AgentProvider,
+        classifier: &mut Classifier,
     ) -> HeadlessTerminalResult<Option<ComposerRow>> {
-        let Some(prompt) = composer_prompt(provider) else {
+        let prompts = classifier.composer_prompts();
+        if prompts.is_empty() {
             return Ok(None);
-        };
+        }
         let cursor_x = self.terminal.cursor_x().unwrap_or(0);
         let cursor_y = self.terminal.cursor_y().unwrap_or(0);
         let snapshot = self.render_state.update(&self.terminal)?;
@@ -525,7 +482,7 @@ impl HeadlessTerminal {
             }
             let rendered: String = cells.iter().map(|cell| cell.text.as_str()).collect();
             if normalize_row_text(&rendered) == normalized_line
-                && line_starts_with_prompt(&rendered, &[prompt])
+                && starts_with_glyph(&rendered, &prompts)
             {
                 matched = Some((y, cells));
             }
@@ -536,7 +493,7 @@ impl HeadlessTerminal {
         };
         Ok(Some(composer_row_from_cells(
             &cells,
-            prompt,
+            &prompts,
             (cursor_y == row_y).then_some(cursor_x),
         )))
     }
@@ -547,41 +504,31 @@ impl HeadlessTerminal {
     /// CLI's own suggestion; the frame alone cannot.
     pub fn composer_line(
         &mut self,
-        provider: Option<AgentProvider>,
+        classifier: &mut Classifier,
     ) -> HeadlessTerminalResult<Option<String>> {
-        let Some(provider) = provider else {
+        if classifier.provider().is_none() {
             return Ok(None);
-        };
-        let status_lines = self.visible_footer_lines(STATUS_ROWS)?;
-        let frame_lines = self.visible_footer_lines(usize::from(self.rows).max(STATUS_ROWS))?;
-        Ok(composer_line_from_lines(
-            &frame_lines,
-            &status_lines,
-            provider,
-        ))
+        }
+        let status_rows = classifier.status_rows();
+        let status_lines = self.visible_footer_lines(status_rows)?;
+        let frame_lines = self.visible_footer_lines(usize::from(self.rows).max(status_rows))?;
+        Ok(classifier.composer_line(&frame_lines, &status_lines))
     }
 
     pub fn waiting_prompt_snippet(
         &mut self,
-        provider: Option<AgentProvider>,
+        classifier: &mut Classifier,
     ) -> HeadlessTerminalResult<Option<String>> {
-        let Some(provider) = provider else {
+        if classifier.provider().is_none() {
             return Ok(None);
-        };
-        let classification_rows = match provider {
-            AgentProvider::Opencode => OPENCODE_WAITING_PROMPT_ROWS,
-            _ => STATUS_ROWS,
-        };
+        }
+        let classification_rows = classifier.waiting_prompt_rows();
         let classification_lines =
             self.visible_footer_lines_with_blank_boundaries(classification_rows)?;
         let frame_lines = self.visible_footer_lines_with_blank_boundaries(
             usize::from(self.rows).max(classification_rows),
         )?;
-        Ok(waiting_prompt_from_lines(
-            &classification_lines,
-            &frame_lines,
-            provider,
-        ))
+        Ok(classifier.waiting_prompt(&classification_lines, &frame_lines))
     }
 
     pub fn codex_resume_session_id(&mut self) -> HeadlessTerminalResult<Option<String>> {
@@ -632,12 +579,108 @@ impl HeadlessTerminal {
 /// reading it cannot be left to guess which line is the prompt. One rule, one
 /// place, so the tail and the snippet agree on what the composer is.
 pub fn line_is_composer(line: &str) -> bool {
-    line_starts_with_prompt(line, COMPOSER_PROMPTS)
+    crate::detection::classify::starts_with_glyph(
+        line,
+        &crate::detection::global_composer_prompts(),
+    )
 }
 
 /// The text a composer line carries, without its prompt glyph.
-pub fn composer_line_text(line: &str) -> &str {
-    prompt_remainder(line, COMPOSER_PROMPTS).unwrap_or("")
+pub fn composer_line_text(line: &str) -> String {
+    crate::detection::classify::prompt_remainder(line, &crate::detection::global_composer_prompts())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Whether this provider's suggestion styling has been measured off real
+/// frames.
+///
+/// Claude Code paints its tab-to-accept ghost with SGR 2 and leaves the cursor
+/// at the start of the composer; both were read off a live session's snapshot
+/// on 2026-09-07 (`\x1b[0m❯\u{a0}\x1b[2mcommit this`). Nothing else here has
+/// been measured, and this file's rule is that unmeasured chrome matches
+/// nothing rather than being written from the shape a matcher expects.
+///
+/// Deliberately not a rule-file entry. `detection/rules.json` describes what
+/// provider chrome *reads* as — text, glyphs, vocabulary — and a cell's
+/// styling is not text: nothing in the matcher language can express "painted
+/// faint", and inventing a styling dialect to hold one measured fact would be
+/// a worse architecture than the one the rule file replaced.
+fn paints_faint_suggestions(provider: AgentProvider) -> bool {
+    matches!(provider, AgentProvider::Claude)
+}
+
+/// One rendered cell of the composer row: what it draws and whether it is dim.
+struct ComposerCell {
+    text: String,
+    faint: bool,
+}
+
+/// Read a composer row's cells into the facts a caller can act on.
+///
+/// The draft starts after the prompt glyph and the single separator cell the
+/// provider draws next to it — the same two characters the classifier's own
+/// prompt-remainder read skips — so what is captured here is what a human
+/// would see themselves having typed, and nothing the provider drew.
+fn composer_row_from_cells(
+    cells: &[ComposerCell],
+    prompts: &[char],
+    cursor_x: Option<u16>,
+) -> ComposerRow {
+    let prompt_index = cells
+        .iter()
+        .position(|cell| {
+            cell.text
+                .chars()
+                .next()
+                .is_some_and(|character| prompts.contains(&character))
+        })
+        .unwrap_or(0);
+    let separator = cells.get(prompt_index + 1).is_some_and(cell_is_blank);
+    let start = prompt_index + 1 + usize::from(separator);
+    let cell_is_content = |cell: &ComposerCell| !cell_is_blank(cell);
+
+    let end = cells
+        .iter()
+        .rposition(cell_is_content)
+        .map_or(start, |index| index + 1)
+        .max(start);
+    let text: String = cells[start.min(cells.len())..end.min(cells.len())]
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect();
+    let styled = &cells[start.min(cells.len())..end.min(cells.len())];
+    let all_faint = styled.iter().any(&cell_is_content)
+        && styled
+            .iter()
+            .filter(|cell| cell_is_content(cell))
+            .all(|cell| cell.faint);
+
+    let cursor = cursor_x.map(usize::from);
+    let before_cursor = cursor.filter(|at| *at >= start).map(|at| {
+        cells[start.min(cells.len())..at.min(cells.len())]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+    });
+    let cursor_at_start = cursor == Some(start);
+    let cursor_at_end = cursor
+        .is_some_and(|at| at >= start && !cells[at.min(cells.len())..].iter().any(cell_is_content));
+
+    ComposerRow {
+        text,
+        all_faint,
+        before_cursor,
+        cursor_at_start,
+        cursor_at_end,
+    }
+}
+
+/// A cell holds nothing a human could have typed: it is empty, or it draws
+/// only whitespace. The provider's own separator next to the prompt is a
+/// no-break space, which is whitespace like any other here.
+fn cell_is_blank(cell: &ComposerCell) -> bool {
+    cell.text.is_empty() || cell.text.chars().all(char::is_whitespace)
 }
 
 pub fn scrollback_byte_limit(cols: u16, rows: u16, scrollback_rows: usize) -> usize {
@@ -657,24 +700,6 @@ fn normalize_row_text(text: &str) -> String {
         }
     }
     normalized
-}
-
-pub fn bound_waiting_prompt(value: &str) -> Option<String> {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return None;
-    }
-
-    let chars = normalized.chars().collect::<Vec<_>>();
-    if chars.len() <= WAITING_PROMPT_MAX_CHARS {
-        return Some(normalized);
-    }
-
-    let mut bounded = chars[..WAITING_PROMPT_MAX_CHARS - 1]
-        .iter()
-        .collect::<String>();
-    bounded.push('…');
-    Some(bounded)
 }
 
 fn extract_codex_resume_session_id(text: &str) -> Option<String> {
@@ -725,857 +750,56 @@ fn is_uuid_like(value: &str) -> bool {
 
     true
 }
-
-fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
-    let needle_bytes = needle.as_bytes();
-    if needle_bytes.is_empty() {
-        return true;
-    }
-
-    haystack
-        .as_bytes()
-        .windows(needle_bytes.len())
-        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
-}
-
-fn any_line_contains_ascii_case_insensitive(lines: &[String], needle: &str) -> bool {
-    lines
-        .iter()
-        .any(|line| contains_ascii_case_insensitive(line, needle))
-        || lines.windows(2).any(|pair| {
-            let mut combined = String::with_capacity(pair[0].len() + pair[1].len() + 1);
-            combined.push_str(&pair[0]);
-            combined.push(' ');
-            combined.push_str(&pair[1]);
-            contains_ascii_case_insensitive(&combined, needle)
-        })
-}
-
-fn last_non_empty_line(lines: &[String]) -> &str {
-    lines
-        .iter()
-        .rev()
-        .find(|line| !line.is_empty())
-        .map(String::as_str)
-        .unwrap_or("")
-}
-
-fn line_starts_with_prompt(line: &str, prompts: &[char]) -> bool {
-    line.trim_start()
-        .chars()
-        .next()
-        .is_some_and(|ch| prompts.contains(&ch))
-}
-
-fn prompt_remainder<'a>(line: &'a str, prompts: &[char]) -> Option<&'a str> {
-    let trimmed = line.trim_start();
-    let mut chars = trimmed.char_indices();
-    let (_, first) = chars.next()?;
-    if !prompts.contains(&first) {
-        return None;
-    }
-
-    let remainder_index = chars.next().map_or(trimmed.len(), |(index, _)| index);
-    Some(trimmed[remainder_index..].trim())
-}
-
-fn line_contains_worktree_path(line: &str) -> bool {
-    line.contains(".kanna-worktrees/") || line.contains("[⎇ ")
-}
-
-/// OpenCode's block art: the rule under the composer ("╹▀▀▀▀…") and the splash
-/// banner. Text-free, so nothing in it belongs in a prompt snippet.
-fn opencode_line_is_block_art(trimmed: &str) -> bool {
-    !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|character| character == ' ' || OPENCODE_BLOCK_GLYPHS.contains(&character))
-}
-
-/// Everything OpenCode paints that is frame rather than content: the composer
-/// box and its dialogs, the rule under it, and the bottom bar in each of its
-/// three forms (bare hint bar, working footer, turn summary).
-fn opencode_line_is_chrome(trimmed: &str) -> bool {
-    line_starts_with_prompt(trimmed, &[OPENCODE_BOX_BORDER])
-        || opencode_line_is_block_art(trimmed)
-        || contains_ascii_case_insensitive(trimmed, OPENCODE_HINT_BAR_MARKER)
-        || opencode_line_has_interrupt_marker(trimmed)
-        || line_starts_with_prompt(trimmed, &[OPENCODE_TURN_SUMMARY_GLYPH])
-        || line_starts_with_prompt(trimmed, OPENCODE_PROGRESS_GLYPHS)
-}
-
-fn line_is_visual_divider(line: &str) -> bool {
-    let trimmed = line.trim();
-    !trimmed.is_empty()
-        && trimmed
-            .chars()
-            .all(|character| matches!(character, '─' | '━' | '—' | '-' | ' '))
-}
-
-fn line_is_claude_spinner(line: &str) -> bool {
-    const SPINNER_GLYPHS: &[char] = &['✻', '✽', '✶', '✳', '✢', '✣', '✤', '✥'];
-    let mut characters = line.trim_start().chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    SPINNER_GLYPHS.contains(&first) && characters.next().is_some_and(char::is_whitespace)
-}
-
-/// Claude's in-flight working footer: "✻ Tomfoolering… (2s · ↓ 50 tokens)".
-///
-/// This is Claude's only remaining positive busy signal. 2.1.263 draws
-/// [`INTERRUPT_MARKER`] nowhere on screen — the hint every earlier CLI put in
-/// that footer is simply gone — so [`claude_status_from_lines`] matched nothing
-/// on a working frame *and* nothing on a parked one, and a `None` verdict
-/// leaves the previous status in place. That is one defect with two opposite
-/// symptoms: a session latched at `idle` reported idle through minutes of
-/// visible work, while a session latched at `busy` went on reporting busy long
-/// after it had parked.
-///
-/// The form is measured, not assumed. Across the captured frames this file
-/// replays, an in-flight footer always opens with an animation glyph and
-/// carries the ellipsis, while the *same row* is rewritten to
-/// "✻ Worked for 6s · done 3:17 PM" the moment the turn ends — no ellipsis,
-/// always [`CLAUDE_DONE_FOOTER_MARKER`]. Keying on the ellipsis is therefore
-/// what separates live work from the completed footer that persists in the
-/// transcript, which is the case
-/// [`claude_done_footer_above_parked_composer_is_idle`] pins. Requiring the
-/// animation glyph is what keeps a transcript line like
-/// "⏺ Running 1 shell command…" — a bullet, not an animation frame — out.
-fn claude_line_is_working_footer(line: &str) -> bool {
-    let trimmed = line.trim();
-    let animated = line_is_claude_spinner(trimmed)
-        || trimmed
-            .strip_prefix(CLAUDE_WORKING_FOOTER_GLYPH)
-            .is_some_and(|rest| rest.starts_with(char::is_whitespace));
-    animated
-        && trimmed.contains(ELLIPSIS)
-        && !contains_ascii_case_insensitive(trimmed, CLAUDE_DONE_FOOTER_MARKER)
-}
-
-/// A row that is shaped like Claude's footer but matches neither the in-flight
-/// nor the finished form.
-///
-/// This is the canary. The defect this file was fixed for did not announce
-/// itself: `claude_status_from_lines` simply stopped matching, returned `None`
-/// for every frame, and every session silently kept whatever status it last
-/// had — which is a failure mode no amount of fixture replay can notice,
-/// because fixtures are frozen at the version that was captured. A row opening
-/// with an animation glyph is Claude's footer by construction, so one that
-/// fits neither vocabulary means the CLI changed and the constants above need
-/// re-measuring. Today this returns `None` for every captured frame.
-fn claude_unclassified_footer(lines: &[String]) -> Option<&str> {
-    lines.iter().map(|line| line.trim()).find(|line| {
-        line_is_claude_spinner(line)
-            && !claude_line_is_working_footer(line)
-            && !contains_ascii_case_insensitive(line, CLAUDE_DONE_FOOTER_MARKER)
-    })
-}
-
-fn line_is_provider_chrome(line: &str, provider: AgentProvider) -> bool {
-    let trimmed = line.trim();
-    let common_chrome = trimmed.is_empty()
-        || line_is_visual_divider(trimmed)
-        || line_is_composer(trimmed)
-        || line_contains_worktree_path(trimmed)
-        || contains_ascii_case_insensitive(trimmed, INTERRUPT_MARKER)
-        || contains_ascii_case_insensitive(trimmed, COPILOT_BUSY_MARKER)
-        || contains_ascii_case_insensitive(trimmed, ANTIGRAVITY_BUSY_MARKER)
-        || contains_ascii_case_insensitive(trimmed, "bypass permissions")
-        || contains_ascii_case_insensitive(trimmed, "/ commands");
-    if common_chrome {
-        return true;
-    }
-
-    match provider {
-        AgentProvider::Claude => {
-            trimmed == "Claude Code"
-                || line_is_claude_spinner(trimmed)
-                || (["Sonnet", "Opus", "Haiku"]
-                    .iter()
-                    .any(|model| trimmed.starts_with(model))
-                    && contains_ascii_case_insensitive(trimmed, " with "))
-        }
-        AgentProvider::Codex => {
-            trimmed == "OpenAI Codex"
-                || trimmed.starts_with("◦ Working")
-                || (trimmed.contains(" · ")
-                    && (trimmed.starts_with("gpt-")
-                        || trimmed.starts_with("o1")
-                        || trimmed.starts_with("o3")
-                        || trimmed.starts_with("o4")))
-        }
-        AgentProvider::Opencode => trimmed == "OpenCode" || opencode_line_is_chrome(trimmed),
-        AgentProvider::Antigravity => trimmed == "Antigravity",
-        AgentProvider::Copilot => trimmed == "GitHub Copilot",
-    }
-}
-
-fn waiting_question_from_lines(lines: &[String]) -> Option<String> {
-    let start = lines
-        .iter()
-        .rposition(|line| contains_ascii_case_insensitive(line, WAITING_MARKER))
-        .or_else(|| {
-            lines.windows(2).rposition(|pair| {
-                contains_ascii_case_insensitive(&format!("{} {}", pair[0], pair[1]), WAITING_MARKER)
-            })
-        })?;
-
-    let mut question = Vec::new();
-    for line in lines.iter().skip(start) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if question.is_empty() {
-                continue;
-            }
-            break;
-        }
-        if !question.is_empty() && line_is_permission_option(trimmed) {
-            break;
-        }
-        question.push(trimmed);
-        if trimmed.ends_with('?') || question.len() == WAITING_PROMPT_MAX_LINES {
-            break;
-        }
-    }
-    bound_waiting_prompt(&question.join(" "))
-}
-
-fn line_is_permission_option(line: &str) -> bool {
-    let trimmed = prompt_remainder(line, &[CLAUDE_IDLE_PROMPT, CODEX_IDLE_PROMPT])
-        .unwrap_or(line)
-        .trim_start();
-    starts_numbered_option(trimmed)
-}
-
-fn starts_numbered_option(text: &str) -> bool {
-    let digit_count = text.chars().take_while(char::is_ascii_digit).count();
-    digit_count > 0
-        && text[digit_count..]
-            .chars()
-            .next()
-            .is_some_and(|character| matches!(character, '.' | ')'))
-}
-
-/// A selected option in an interactive menu: the caret is on a numbered choice
-/// rather than on an empty input box.
-///
-/// This is what makes an AskUserQuestion menu ("rebase and force-push / …")
-/// visible. Those carry none of the permission-prompt wording, and the caret
-/// alone reads as the idle input box — so without this a task parked on a
-/// question looked exactly like a task waiting for its next instruction.
-///
-/// It is a positive match on rendered chrome, never an inference from silence:
-/// a session running a long build shows no caret-on-option line and is never
-/// reported as waiting. The one benign overlap is a human who typed a line
-/// beginning "1." into the input box and did not send it — a task that is, in
-/// fact, waiting on its human.
-fn line_is_selected_menu_option(line: &str) -> bool {
-    prompt_remainder(line, &[CLAUDE_IDLE_PROMPT]).is_some_and(starts_numbered_option)
-}
-
-/// The question a menu is asking, read from the lines above its first option.
-/// Scanning from the bottom instead would return the option list, which tells a
-/// watcher what the choices are but not what is being decided.
-fn waiting_question_above_menu(lines: &[String]) -> Option<String> {
-    let menu_index = lines
-        .iter()
-        .position(|line| line_is_selected_menu_option(line))?;
-
-    let mut question = Vec::new();
-    for line in lines[..menu_index].iter().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || line_is_visual_divider(trimmed) {
-            if question.is_empty() {
-                continue;
-            }
-            break;
-        }
-        if line_is_permission_option(trimmed) {
-            break;
-        }
-        question.push(trimmed);
-        if question.len() == WAITING_PROMPT_MAX_LINES {
-            break;
-        }
-    }
-    question.reverse();
-    bound_waiting_prompt(&question.join(" "))
-}
-
-/// What OpenCode's permission dialog is asking, read from inside the composer
-/// box: the "△ Permission required" header and the command underneath it. The
-/// generic scans cannot find it — every line carries the box border, so the
-/// dialog looks like chrome — and the border is stripped here so the snippet
-/// reads as a question rather than as box drawing.
-fn opencode_permission_question(lines: &[String]) -> Option<String> {
-    let action_index = lines
-        .iter()
-        .rposition(|line| opencode_line_is_permission_action(line))?;
-
-    // The dialog is the contiguous run of bordered rows ending at the action
-    // row. Walking up to its first row matters on a narrow terminal, where the
-    // window also reaches the echoed user message — itself drawn in a bordered
-    // block, and the wrong answer to "what is being decided".
-    let mut start = action_index;
-    while start > 0 && line_starts_with_prompt(&lines[start - 1], &[OPENCODE_BOX_BORDER]) {
-        start -= 1;
-    }
-
-    let mut question = Vec::new();
-    for line in &lines[start..action_index] {
-        let Some(body) = prompt_remainder(line, &[OPENCODE_BOX_BORDER]) else {
-            continue;
-        };
-        if body.is_empty() {
-            continue;
-        }
-        question.push(body);
-        if question.len() == WAITING_PROMPT_MAX_LINES {
-            break;
-        }
-    }
-    bound_waiting_prompt(&question.join(" "))
-}
-
-/// The agent's last words, read from above the composer box.
-///
-/// This is the snippet that ships with every `StatusChanged(Idle)`. OpenCode's
-/// bottom bar is the project path plus token counters and it *wraps* on a
-/// narrow terminal, so recognising it line by line is a losing game; the
-/// composer box is the reliable landmark instead. Everything from its first
-/// bordered row down is frame, and everything above it is transcript.
-fn opencode_transcript_tail(lines: &[String]) -> Option<String> {
-    let composer_index = lines
-        .iter()
-        .position(|line| line_starts_with_prompt(line, &[OPENCODE_BOX_BORDER]))?;
-
-    let mut content = Vec::new();
-    for line in lines[..composer_index].iter().rev() {
-        // OpenCode paints a scrollbar in the right-hand gutter, so a transcript
-        // row can end in a stray block glyph that is not part of what was said.
-        let trimmed = line
-            .trim()
-            .trim_end_matches(OPENCODE_BLOCK_GLYPHS)
-            .trim_end();
-        if trimmed.is_empty() || opencode_line_is_chrome(trimmed) {
-            if content.is_empty() {
-                continue;
-            }
-            break;
-        }
-        content.push(trimmed);
-        if content.len() == WAITING_PROMPT_MAX_LINES {
-            break;
-        }
-    }
-    content.reverse();
-    bound_waiting_prompt(&content.join(" "))
-}
-
-fn waiting_prompt_from_lines(
-    classification_lines: &[String],
-    frame_lines: &[String],
-    provider: AgentProvider,
-) -> Option<String> {
-    // Nothing at or below the composer is session output. Claude can paint a
-    // slash-command palette below it whose entries look exactly like ordinary
-    // transcript, so locate this boundary in the whole visible frame before
-    // running *any* content classifier. When the bounded classification window
-    // no longer contains that boundary, every one of its rows is below it.
-    let (classification_transcript, frame_transcript) =
-        match composer_index_from_lines(frame_lines, provider) {
-            Some(composer_index) => {
-                let classification_transcript =
-                    composer_index_from_lines(classification_lines, provider)
-                        .map_or(&classification_lines[..0], |classification_composer| {
-                            &classification_lines[..classification_composer]
-                        });
-                (classification_transcript, &frame_lines[..composer_index])
-            }
-            None => (classification_lines, frame_lines),
-        };
-
-    if let Some(question) = waiting_question_from_lines(classification_transcript) {
-        return Some(question);
-    }
-    if let Some(question) = waiting_question_above_menu(classification_transcript) {
-        return Some(question);
-    }
-    if provider == AgentProvider::Opencode {
-        if let Some(question) = opencode_permission_question(classification_transcript) {
-            return Some(question);
-        }
-        if let Some(tail) = opencode_transcript_tail(classification_transcript) {
-            return Some(tail);
-        }
-    }
-
-    let mut content = Vec::new();
-    for line in frame_transcript.iter().rev() {
-        if line_is_provider_chrome(line, provider) {
-            if content.is_empty() {
-                continue;
-            }
-            break;
-        }
-        content.push(line.trim());
-        if content.len() == WAITING_PROMPT_MAX_LINES {
-            break;
-        }
-    }
-    content.reverse();
-    bound_waiting_prompt(&content.join(" "))
-}
-
-fn claude_line_starts_subagent_parent(line: &str) -> bool {
-    line.trim_start().starts_with("⏺ ")
-}
-
-fn claude_line_starts_subagent_task(line: &str) -> bool {
-    line.trim_start().starts_with("◯ ")
-}
-
-fn claude_lines_have_active_subagent_footer(lines: &[String]) -> bool {
-    let Some(parent_index) = lines
-        .iter()
-        .rposition(|line| claude_line_starts_subagent_parent(line))
-    else {
-        return false;
-    };
-
-    let lines_after_parent = &lines[parent_index + 1..];
-    lines_after_parent
-        .iter()
-        .any(|line| claude_line_starts_subagent_task(line))
-        && !lines_after_parent
-            .iter()
-            .any(|line| line_starts_with_prompt(line, &[CLAUDE_IDLE_PROMPT]))
-}
-
-/// Claude draws the composer above a divider and its mode/status bar. The
-/// composer therefore is not generally the last meaningful row, even though
-/// it is the positive proof that the turn has parked. Only accept it when
-/// everything below the last composer is measured provider chrome; busy and
-/// waiting markers retain priority in [`claude_status_from_lines`].
-fn claude_lines_have_parked_composer(lines: &[String]) -> bool {
-    let Some(composer_index) = composer_index_from_lines(lines, AgentProvider::Claude) else {
-        return false;
-    };
-    // The classified window must reach above the composer box, or this frame
-    // cannot answer the question at all.
-    //
-    // `visible_status` reads only [`STATUS_ROWS`] rows, and Claude's own chrome
-    // can fill nearly all of them: the two box borders and the composer are
-    // three, and the status bar beneath them has five measured rows it may
-    // draw (`/rc`, an effort badge, a `/clear` hint, an update badge, a
-    // login-expiry notice). Once the box's opening divider is the top of the
-    // window — or is not inside it at all — the row that would carry the
-    // in-flight footer was never read. An empty slice below then makes the
-    // chrome test vacuously true, which is how a turn that is running gets
-    // called `Idle`: not a stale verdict, a confidently wrong one.
-    //
-    // So require the evidence rather than assume its absence. With no row above
-    // the composer region this reports nothing and the session keeps the status
-    // it has, which is what the classifier did before the divider rule existed.
-    //
-    // The region's top is the box's opening border where Claude draws one, and
-    // the composer row itself where it does not; everything from there down is
-    // the frame's own input chrome, so a window starting at it has read none of
-    // the transcript above.
-    let composer_region_top = lines[..composer_index]
-        .iter()
-        .rposition(|line| line_is_visual_divider(line))
-        .unwrap_or(composer_index);
-    if composer_region_top == 0 {
-        return false;
-    }
-
-    let below = &lines[composer_index + 1..];
-    // Claude closes its composer box with a divider and draws only its status
-    // bar beneath that border, so everything past the border is chrome by
-    // construction. Reading it that way is what stops a status-bar row this
-    // file has never measured from costing a parked frame its idle verdict:
-    // 2.1.263 puts the `/rc` agent-connection row, an effort badge, a
-    // login-expiry notice and an update badge down there, and any one of them
-    // used to leave the frame unclassifiable — which left a settled session
-    // reporting whatever status it last had.
-    let above_status_bar = below
-        .iter()
-        .position(|line| line_is_visual_divider(line))
-        .map_or(below, |border| &below[..border]);
-    above_status_bar
-        .iter()
-        .all(|line| line_is_provider_chrome(line, AgentProvider::Claude))
-}
-
-fn claude_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
-    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
-        return Some(SessionStatus::Waiting);
-    }
-    if any_line_contains_ascii_case_insensitive(lines, INTERRUPT_MARKER) {
-        return Some(SessionStatus::Busy);
-    }
-    // Deliberately ahead of the parked-composer check below: Claude keeps
-    // drawing its composer while a turn is in flight, so the composer alone
-    // cannot prove the session settled. The working footer is the one row that
-    // differs between the two frames.
-    if lines.iter().any(|line| claude_line_is_working_footer(line)) {
-        return Some(SessionStatus::Busy);
-    }
-    if claude_lines_have_active_subagent_footer(lines) {
-        return Some(SessionStatus::Busy);
-    }
-    if lines.iter().any(|line| line_is_selected_menu_option(line)) {
-        return Some(SessionStatus::Waiting);
-    }
-    if claude_lines_have_parked_composer(lines) {
-        return Some(SessionStatus::Idle);
-    }
-    // A second, independent route to Idle. The composer rule above reads
-    // Claude's box structure; this reads the footer Claude rewrites the moment
-    // a turn ends. Either alone proves the session settled, so a change to one
-    // no longer costs idle detection outright — which is what happened when the
-    // status bar grew rows the composer rule had never measured.
-    //
-    // Ordered last on purpose: every busy and waiting match above outranks it,
-    // so a finished footer still on screen above a new turn's spinner, or above
-    // a permission prompt, does not read as settled.
-    if lines
-        .iter()
-        .any(|line| contains_ascii_case_insensitive(line, CLAUDE_DONE_FOOTER_MARKER))
-    {
-        return Some(SessionStatus::Idle);
-    }
-
-    None
-}
-
-fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
-    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
-        return Some(SessionStatus::Waiting);
-    }
-    if any_line_contains_ascii_case_insensitive(lines, INTERRUPT_MARKER) {
-        return Some(SessionStatus::Busy);
-    }
-    if line_starts_with_prompt(last_non_empty_line(lines), &[CODEX_IDLE_PROMPT]) {
-        return Some(SessionStatus::Idle);
-    }
-
-    None
-}
-
-/// Read the composer out of a rendered frame: its index in `lines` and the
-/// text rendered after its prompt glyph, or `None` when the frame draws no
-/// readable composer at all.
-///
-/// Claude and Codex only: both draw a single-glyph prompt with the draft
-/// immediately after it, so an empty remainder on that line *is* the proof
-/// that nothing is typed. OpenCode, Antigravity and Copilot draw composers
-/// whose empty state has never been captured here, and this file's rule is
-/// that unmeasured chrome matches nothing rather than being written from the
-/// shape a matcher happened to expect.
-///
-/// The composer is the last prompt line in the window, with only provider
-/// chrome below it — Claude draws its permission-mode hint under the composer,
-/// so the composer is frequently not the last line on screen. A busy or
-/// waiting frame is refused outright: its empty composer is true but its
-/// screen is mid-repaint, and nothing needs an answer from a session that is
-/// still working.
-///
-/// "There is no readable composer here" and "the composer reads as holding
-/// something" are different answers, which is why this returns the reading
-/// rather than a verdict: only the second is worth looking at the cells for.
-fn composer_reading_from_lines(lines: &[String], provider: AgentProvider) -> Option<(usize, &str)> {
-    if frame_is_busy_or_waiting(lines, provider) {
-        return None;
-    }
-    let composer_index = composer_index_from_lines(lines, provider)?;
-    if claude_composer_box_tail(&lines[composer_index + 1..], provider)
-        .iter()
-        .any(|line| !line_is_provider_chrome(line, provider))
-    {
-        return None;
-    }
-    Some((composer_index, composer_line_text(&lines[composer_index])))
-}
-
-/// Whether this provider's suggestion styling has been measured off real
-/// frames.
-///
-/// Claude Code paints its tab-to-accept ghost with SGR 2 and leaves the cursor
-/// at the start of the composer; both were read off a live session's snapshot
-/// on 2026-09-07 (`\x1b[0m❯\u{a0}\x1b[2mcommit this`). Nothing else here has
-/// been measured, and this file's rule is that unmeasured chrome matches
-/// nothing rather than being written from the shape a matcher expects.
-fn paints_faint_suggestions(provider: AgentProvider) -> bool {
-    matches!(provider, AgentProvider::Claude)
-}
-
-/// One rendered cell of the composer row: what it draws and whether it is dim.
-struct ComposerCell {
-    text: String,
-    faint: bool,
-}
-
-/// Read a composer row's cells into the facts a caller can act on.
-///
-/// The draft starts after the prompt glyph and the single separator cell the
-/// provider draws next to it — the same two characters [`prompt_remainder`]
-/// skips — so what is captured here is what a human would see themselves
-/// having typed, and nothing the provider drew.
-fn composer_row_from_cells(
-    cells: &[ComposerCell],
-    prompt: char,
-    cursor_x: Option<u16>,
-) -> ComposerRow {
-    let prompt_index = cells
-        .iter()
-        .position(|cell| cell.text.starts_with(prompt))
-        .unwrap_or(0);
-    let separator = cells.get(prompt_index + 1).is_some_and(cell_is_blank);
-    let start = prompt_index + 1 + usize::from(separator);
-    let cell_is_content = |cell: &ComposerCell| !cell_is_blank(cell);
-
-    let end = cells
-        .iter()
-        .rposition(cell_is_content)
-        .map_or(start, |index| index + 1)
-        .max(start);
-    let text: String = cells[start.min(cells.len())..end.min(cells.len())]
-        .iter()
-        .map(|cell| cell.text.as_str())
-        .collect();
-    let styled = &cells[start.min(cells.len())..end.min(cells.len())];
-    let all_faint = styled.iter().any(&cell_is_content)
-        && styled
-            .iter()
-            .filter(|cell| cell_is_content(cell))
-            .all(|cell| cell.faint);
-
-    let cursor = cursor_x.map(usize::from);
-    let before_cursor = cursor.filter(|at| *at >= start).map(|at| {
-        cells[start.min(cells.len())..at.min(cells.len())]
-            .iter()
-            .map(|cell| cell.text.as_str())
-            .collect::<String>()
-    });
-    let cursor_at_start = cursor == Some(start);
-    let cursor_at_end = cursor
-        .is_some_and(|at| at >= start && !cells[at.min(cells.len())..].iter().any(cell_is_content));
-
-    ComposerRow {
-        text,
-        all_faint,
-        before_cursor,
-        cursor_at_start,
-        cursor_at_end,
-    }
-}
-
-/// A cell holds nothing a human could have typed: it is empty, or it draws
-/// only whitespace. The provider's own separator next to the prompt is a
-/// no-break space, which is whitespace like any other here.
-fn cell_is_blank(cell: &ComposerCell) -> bool {
-    cell.text.is_empty() || cell.text.chars().all(char::is_whitespace)
-}
-
-/// The text rendered on the composer line, or `None` when this frame draws no
-/// readable composer.
-///
-/// `Some("")` is the positive proof [`ComposerState::Empty`] is built on;
-/// `Some(text)` is what is *rendered* there and nothing more. This function
-/// reads normalised text, and text alone cannot say whether a line was typed
-/// or drawn by the CLI, which is why the session's typed-byte attestation
-/// decides how it is labelled. The *cells* can say more than the text can —
-/// see [`ComposerState::SuggestionOnly`] — but that is corroboration for the
-/// ledger, not a replacement for it.
-fn composer_prompt(provider: AgentProvider) -> Option<char> {
-    match provider {
-        AgentProvider::Claude => Some(CLAUDE_IDLE_PROMPT),
-        AgentProvider::Codex => Some(CODEX_IDLE_PROMPT),
-        AgentProvider::Opencode | AgentProvider::Antigravity | AgentProvider::Copilot => None,
-    }
-}
-
-fn composer_index_from_lines(lines: &[String], provider: AgentProvider) -> Option<usize> {
-    let prompt = composer_prompt(provider)?;
-    lines.iter().rposition(|line| {
-        line_starts_with_prompt(line, &[prompt])
-            && !(provider == AgentProvider::Claude && line_is_selected_menu_option(line))
-    })
-}
-
-/// The rows below a Claude composer that still have to read as chrome.
-///
-/// Claude closes its composer box with a divider and draws only its status bar
-/// beneath that border, so everything past the border is chrome by
-/// construction — the same reading [`claude_composer_is_parked`] uses, and for
-/// the same reason. 2.1.263 puts a `/rc` agent-connection row, an effort
-/// badge, an update badge and a login-expiry notice down there; unclassified,
-/// any one of them made the composer unreadable, so `composer_state` answered
-/// `Unknown` for every live Claude session on this machine and attestation
-/// could not fire at all. Other providers are read unchanged: only Claude's
-/// box has been measured.
-fn claude_composer_box_tail(below: &[String], provider: AgentProvider) -> &[String] {
-    if provider != AgentProvider::Claude {
-        return below;
-    }
-    below
-        .iter()
-        .position(|line| line_is_visual_divider(line))
-        .map_or(below, |border| &below[..border])
-}
-
-fn frame_is_busy_or_waiting(lines: &[String], provider: AgentProvider) -> bool {
-    let status = match provider {
-        AgentProvider::Claude => claude_status_from_lines(lines),
-        AgentProvider::Codex => codex_status_from_lines(lines),
-        _ => None,
-    };
-    matches!(
-        status,
-        Some(SessionStatus::Busy) | Some(SessionStatus::Waiting)
-    )
-}
-
-fn composer_line_from_lines(
-    lines: &[String],
-    status_lines: &[String],
-    provider: AgentProvider,
-) -> Option<String> {
-    if frame_is_busy_or_waiting(status_lines, provider) {
-        return None;
-    }
-    let composer_index = composer_index_from_lines(lines, provider)?;
-    Some(composer_line_text(&lines[composer_index]).to_string())
-}
-
-fn opencode_line_has_interrupt_marker(line: &str) -> bool {
-    OPENCODE_INTERRUPT_MARKERS
-        .iter()
-        .any(|marker| contains_ascii_case_insensitive(line, marker))
-}
-
-/// OpenCode's permission dialog, matched on its action row:
-/// "Allow once  Allow always  Reject   ⇆ select  enter confirm  esc reject".
-fn opencode_line_is_permission_action(line: &str) -> bool {
-    OPENCODE_PERMISSION_ACTIONS
-        .iter()
-        .all(|action| contains_ascii_case_insensitive(line, action))
-}
-
-/// The composer's status line — "┃ Build · Big Pickle OpenCode Zen": mode and
-/// model, inside the input box. 1.16.2 appended the variant as a third field;
-/// one separator is all this needs.
-///
-/// Matching on the separator rather than the mode word is load-bearing: what
-/// sits left of the dot varies with the spawn's flags. Kanna's own PTY spawn
-/// passes a permission-bypass flag, which badges the mode — it draws
-/// "┃ Build auto · Big Pickle OpenCode Zen".
-///
-/// This is the idle marker because it is the only composer chrome that survived
-/// every width measured (80, 100, 120 and 160 columns) *and* both CLI versions
-/// seen: the hint bar below it is not drawn on a narrow terminal, and the
-/// working footer's wording changed under us mid-investigation. It stays a
-/// positive match on rendered chrome, never an inference from silence: a
-/// session that has not drawn its composer yet, or that has replaced it with
-/// the permission dialog, matches nothing and leaves the previous status in
-/// place.
-fn opencode_line_is_composer_status(line: &str) -> bool {
-    prompt_remainder(line, &[OPENCODE_BOX_BORDER])
-        .is_some_and(|remainder| remainder.contains(" \u{B7} "))
-}
-
-fn opencode_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
-    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER)
-        || lines
-            .iter()
-            .any(|line| opencode_line_is_permission_action(line))
-    {
-        return Some(SessionStatus::Waiting);
-    }
-    if lines
-        .iter()
-        .any(|line| opencode_line_has_interrupt_marker(line))
-    {
-        return Some(SessionStatus::Busy);
-    }
-    if lines
-        .iter()
-        .any(|line| opencode_line_is_composer_status(line))
-    {
-        return Some(SessionStatus::Idle);
-    }
-
-    None
-}
-
-fn antigravity_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
-    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
-        return Some(SessionStatus::Waiting);
-    }
-    if any_line_contains_ascii_case_insensitive(lines, ANTIGRAVITY_BUSY_MARKER) {
-        return Some(SessionStatus::Busy);
-    }
-    if line_starts_with_prompt(last_non_empty_line(lines), &[CODEX_IDLE_PROMPT]) {
-        return Some(SessionStatus::Idle);
-    }
-
-    None
-}
-
-fn copilot_line_has_busy_marker(line: &str) -> bool {
-    contains_ascii_case_insensitive(line, COPILOT_BUSY_MARKER)
-        || contains_ascii_case_insensitive(line, "thinking ")
-}
-
-fn copilot_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
-    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
-        return Some(SessionStatus::Waiting);
-    }
-
-    if let Some(path_index) = lines
-        .iter()
-        .rposition(|line| line_contains_worktree_path(line))
-    {
-        if path_index > 0 && copilot_line_has_busy_marker(&lines[path_index - 1]) {
-            return Some(SessionStatus::Busy);
-        }
-
-        let path_relative_status = lines
-            .iter()
-            .skip(path_index + 1)
-            .find_map(|line| prompt_remainder(line, &[CLAUDE_IDLE_PROMPT]))
-            .filter(|remainder| remainder.is_empty())
-            .map(|_| SessionStatus::Idle);
-        if path_relative_status.is_some() {
-            return path_relative_status;
-        }
-    }
-
-    if any_line_contains_ascii_case_insensitive(lines, COPILOT_BUSY_MARKER) {
-        return Some(SessionStatus::Busy);
-    }
-    if line_starts_with_prompt(last_non_empty_line(lines), &[CLAUDE_IDLE_PROMPT]) {
-        return Some(SessionStatus::Idle);
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use crate::protocol::{AgentProvider, SessionStatus};
 
+    use crate::detection::classify::contains_ascii_case_insensitive;
+    use crate::detection::rules::DEFAULT_STATUS_ROWS as STATUS_ROWS;
+    use crate::detection::schema::Channel;
+    use crate::detection::{Classifier, CliVersion, Evidence, Verdict};
+
     use super::{
-        bound_waiting_prompt, claude_line_is_working_footer, composer_index_from_lines,
-        contains_ascii_case_insensitive, initial_session_status, line_is_claude_spinner,
-        ComposerState, HeadlessTerminal, TerminalSnapshot, CLAUDE_DONE_FOOTER_MARKER,
-        INTERRUPT_MARKER, STATUS_ROWS,
+        bound_waiting_prompt, initial_session_status, line_is_composer, ComposerState,
+        HeadlessTerminal, TerminalSnapshot,
     };
+
+    /// The marker every Claude release before 2.1.263 drew in its working
+    /// footer, kept here because several tests pin its *absence*.
+    const INTERRUPT_MARKER: &str = "esc to interrupt";
+    /// What a finished turn's footer carries in place of the ellipsis.
+    const CLAUDE_DONE_FOOTER_MARKER: &str = "\u{B7} done ";
+    /// OpenCode's composer box border, pinned so snippet tests can assert it
+    /// never leaks into a published snippet.
+    const OPENCODE_BOX_BORDER: char = '\u{2503}';
+    const OPENCODE_HINT_BAR_MARKER: &str = "ctrl+p commands";
+
+    /// A session classifier for a provider whose CLI version is unknown —
+    /// which selects every rule measured for that provider, exactly as a live
+    /// session does before its version probe answers.
+    fn rules_for(provider: AgentProvider) -> Classifier {
+        Classifier::new(Some(provider))
+    }
+
+    /// The same, pinned to a CLI release.
+    fn rules_for_version(provider: AgentProvider, version: &str) -> Classifier {
+        Classifier::with_version(Some(provider), CliVersion::parse(version))
+    }
+
+    /// Classify a hand-written frame, naming the rule that decided it.
+    fn verdict_for(provider: AgentProvider, lines: &[&str]) -> Option<Verdict> {
+        let lines = lines
+            .iter()
+            .map(|line| (*line).to_string())
+            .collect::<Vec<_>>();
+        rules_for(provider).classify(&Evidence {
+            lines: &lines,
+            title: "",
+            progress: None,
+        })
+    }
 
     /// A frame of the OpenCode TUI as it was actually drawn.
     ///
@@ -1607,6 +831,11 @@ mod tests {
             headless_terminal
         }
     }
+
+    /// The CLI release the OpenCode fixtures were captured from. Named here so
+    /// the rule-selection assertions run under the rules measured for that
+    /// release, and a re-capture moves both together.
+    const OPENCODE_FIXTURE_CLI_VERSION: &str = "1.18.15";
 
     /// Captured from OpenCode CLI **1.18.15** (`opencode/big-pickle`).
     /// Re-capture with the script beside the fixtures when the TUI moves.
@@ -1657,13 +886,13 @@ mod tests {
 
     #[test]
     fn ascii_case_insensitive_contains_matches_status_markers() {
-        assert!(super::contains_ascii_case_insensitive(
+        assert!(contains_ascii_case_insensitive(
             "• Working (0s • Esc To Interrupt)",
-            super::INTERRUPT_MARKER
+            INTERRUPT_MARKER
         ));
-        assert!(!super::contains_ascii_case_insensitive(
+        assert!(!contains_ascii_case_insensitive(
             "Thinking hard",
-            super::INTERRUPT_MARKER
+            INTERRUPT_MARKER
         ));
     }
 
@@ -1830,7 +1059,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Codex))
                 .unwrap()
                 .as_deref(),
             Some("• Updated the mobile task card and all focused tests pass.")
@@ -1853,7 +1082,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Codex))
                 .unwrap()
                 .as_deref(),
             Some("• The renamed title is synced to mobile.")
@@ -1879,7 +1108,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Codex))
                 .unwrap()
                 .as_deref(),
             Some("• Ready for review.")
@@ -1905,7 +1134,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("Ready for review.")
@@ -1932,13 +1161,13 @@ mod tests {
 
         assert_eq!(
             terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Waiting)
         );
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("Do you want to allow Bash to run the focused tests?")
@@ -1967,12 +1196,14 @@ mod tests {
         );
 
         assert_eq!(
-            terminal.visible_status(Some(AgentProvider::Codex)).unwrap(),
+            terminal
+                .visible_status(&mut rules_for(AgentProvider::Codex))
+                .unwrap(),
             Some(SessionStatus::Idle)
         );
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Codex))
                 .unwrap()
                 .as_deref(),
             Some("• Ready for review.")
@@ -2000,13 +1231,13 @@ mod tests {
 
         assert_eq!(
             terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Waiting)
         );
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("How should I publish the fix?")
@@ -2032,7 +1263,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -2060,14 +1291,14 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("⏺ Ready for review.")
         );
         assert_eq!(
             terminal
-                .composer_line(Some(AgentProvider::Claude))
+                .composer_line(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("check again in a minute"),
@@ -2094,7 +1325,7 @@ mod tests {
         );
 
         let snippet = terminal
-            .waiting_prompt_snippet(Some(AgentProvider::Claude))
+            .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
             .unwrap();
         assert_eq!(snippet.as_deref(), Some("⏺ Ready for review."));
         assert!(
@@ -2120,7 +1351,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("⏺ Ready for review.")
@@ -2150,7 +1381,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("⏺ Ready for review."),
@@ -2176,7 +1407,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("⏺ Ready for review.")
@@ -2209,21 +1440,21 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("⏺ Ready for review.")
         );
         assert_eq!(
             terminal
-                .composer_line(Some(AgentProvider::Claude))
+                .composer_line(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("/loop")
         );
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2247,7 +1478,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Empty
         );
@@ -2268,7 +1499,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2292,7 +1523,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2313,13 +1544,13 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::SuggestionOnly
         );
         assert_eq!(
             terminal
-                .composer_line(Some(AgentProvider::Claude))
+                .composer_line(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("commit this"),
@@ -2336,7 +1567,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2353,7 +1584,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2369,7 +1600,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2391,7 +1622,9 @@ mod tests {
         terminal.write(b"\x1b[3;3H");
 
         assert_eq!(
-            terminal.composer_state(Some(AgentProvider::Codex)).unwrap(),
+            terminal
+                .composer_state(&mut rules_for(AgentProvider::Codex))
+                .unwrap(),
             ComposerState::Unknown
         );
     }
@@ -2407,7 +1640,7 @@ mod tests {
         terminal.write(b"\x1b[3;16H");
 
         let row = terminal
-            .plain_composer_row(Some(AgentProvider::Claude))
+            .plain_composer_row(&mut rules_for(AgentProvider::Claude))
             .unwrap()
             .expect("a plain composer row");
         assert_eq!(row.before_cursor.as_deref(), Some("héllo  wörld "));
@@ -2426,7 +1659,7 @@ mod tests {
         terminal.write(b"\x1b[3;13H");
 
         let row = terminal
-            .plain_composer_row(Some(AgentProvider::Claude))
+            .plain_composer_row(&mut rules_for(AgentProvider::Claude))
             .unwrap()
             .expect("a composer row on the alternate screen");
         assert_eq!(row.before_cursor.as_deref(), Some("half typed"));
@@ -2446,7 +1679,7 @@ mod tests {
         );
 
         assert!(terminal
-            .plain_composer_row(Some(AgentProvider::Claude))
+            .plain_composer_row(&mut rules_for(AgentProvider::Claude))
             .unwrap()
             .is_none());
     }
@@ -2472,7 +1705,46 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
+                .unwrap(),
+            ComposerState::Empty
+        );
+    }
+
+    /// The box-tail reading is Claude's because Claude's box is what was
+    /// measured, and that is a rule-file fact rather than a branch in code.
+    ///
+    /// Codex declares no divider glyphs of its own, so the same frame shape
+    /// keeps the reading it always had: an unmeasured row below the composer
+    /// leaves the composer unreadable. A provider does not inherit another
+    /// provider's measurements by drawing a similar-looking screen.
+    #[test]
+    fn an_unmeasured_providers_composer_box_is_not_read_from_a_divider() {
+        let frame = concat!(
+            "⏺ Done.\r\n",
+            "────────────────────────────────\r\n",
+            "› \r\n",
+            "────────────────────────────────\r\n",
+            "some unmeasured status row\r\n",
+        );
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(frame.as_bytes());
+
+        assert_eq!(
+            terminal
+                .composer_state(&mut rules_for(AgentProvider::Codex))
+                .unwrap(),
+            ComposerState::Unknown,
+            "Codex declares no box border, so nothing below its composer is \
+             read as a status bar"
+        );
+
+        // The identical shape, for the provider whose box *was* measured.
+        let mut claude = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        claude.write(frame.replace('\u{203A}', "\u{276F}").as_bytes());
+        assert_eq!(
+            claude
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Empty
         );
@@ -2497,7 +1769,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2523,7 +1795,8 @@ mod tests {
             .as_bytes(),
         );
         assert_eq!(
-            busy.composer_state(Some(AgentProvider::Claude)).unwrap(),
+            busy.composer_state(&mut rules_for(AgentProvider::Claude))
+                .unwrap(),
             ComposerState::Unknown
         );
 
@@ -2537,7 +1810,9 @@ mod tests {
             .as_bytes(),
         );
         assert_eq!(
-            waiting.composer_state(Some(AgentProvider::Claude)).unwrap(),
+            waiting
+                .composer_state(&mut rules_for(AgentProvider::Claude))
+                .unwrap(),
             ComposerState::Unknown
         );
     }
@@ -2551,7 +1826,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Unknown
         );
@@ -2563,14 +1838,18 @@ mod tests {
         terminal.write(concat!("OpenAI Codex\r\n", "Done.\r\n", "› \r\n").as_bytes());
 
         assert_eq!(
-            terminal.composer_state(Some(AgentProvider::Codex)).unwrap(),
+            terminal
+                .composer_state(&mut rules_for(AgentProvider::Codex))
+                .unwrap(),
             ComposerState::Empty
         );
 
         let mut drafted = HeadlessTerminal::new(120, 10, 10_000).unwrap();
         drafted.write(concat!("OpenAI Codex\r\n", "Done.\r\n", "› why did\r\n").as_bytes());
         assert_eq!(
-            drafted.composer_state(Some(AgentProvider::Codex)).unwrap(),
+            drafted
+                .composer_state(&mut rules_for(AgentProvider::Codex))
+                .unwrap(),
             ComposerState::Unknown
         );
     }
@@ -2585,7 +1864,7 @@ mod tests {
         terminal.write("❯ \r\n".as_bytes());
 
         assert_eq!(
-            terminal.composer_state(None).unwrap(),
+            terminal.composer_state(&mut Classifier::none()).unwrap(),
             ComposerState::Unknown
         );
         for provider in [
@@ -2594,7 +1873,7 @@ mod tests {
             AgentProvider::Copilot,
         ] {
             assert_eq!(
-                terminal.composer_state(Some(provider)).unwrap(),
+                terminal.composer_state(&mut rules_for(provider)).unwrap(),
                 ComposerState::Unknown,
                 "{provider:?} has no captured empty-composer frame to match"
             );
@@ -2608,7 +1887,7 @@ mod tests {
 
             assert_eq!(
                 headless_terminal
-                    .composer_state(Some(AgentProvider::Opencode))
+                    .composer_state(&mut rules_for(AgentProvider::Opencode))
                     .unwrap(),
                 ComposerState::Unknown,
                 "{} must not be read as a provably empty composer",
@@ -2631,7 +1910,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -2652,7 +1931,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("Do you want to allow Bash to run the focused tests?")
@@ -2675,7 +1954,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("Do you want to allow Bash to run the focused tests?")
@@ -2698,7 +1977,7 @@ mod tests {
 
         assert_eq!(
             terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("Do you want to allow Bash to run this command with elevated permissions?")
@@ -2722,7 +2001,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Codex))
+                .visible_status(&mut rules_for(AgentProvider::Codex))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -2731,7 +2010,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Codex))
+                .visible_status(&mut rules_for(AgentProvider::Codex))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -2747,7 +2026,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Codex))
+                .visible_status(&mut rules_for(AgentProvider::Codex))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -2768,13 +2047,13 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Codex))
+                .visible_status(&mut rules_for(AgentProvider::Codex))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
         assert_eq!(
             headless_terminal
-                .waiting_prompt_snippet(Some(AgentProvider::Codex))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Codex))
                 .unwrap(),
             None
         );
@@ -2795,7 +2074,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Codex))
+                .visible_status(&mut rules_for(AgentProvider::Codex))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -2808,14 +2087,12 @@ mod tests {
 
             assert_eq!(
                 headless_terminal
-                    .visible_status(Some(AgentProvider::Opencode))
+                    .visible_status(&mut rules_for(AgentProvider::Opencode))
                     .unwrap(),
                 Some(fixture.status),
                 "{} reported the wrong status. Rendered footer:\n{}",
                 fixture.name,
-                headless_terminal
-                    .visible_footer_text(super::STATUS_ROWS)
-                    .unwrap(),
+                headless_terminal.visible_footer_text(STATUS_ROWS).unwrap(),
             );
         }
     }
@@ -2834,7 +2111,7 @@ mod tests {
 
             assert_eq!(
                 headless_terminal
-                    .visible_status(Some(AgentProvider::Opencode))
+                    .visible_status(&mut rules_for(AgentProvider::Opencode))
                     .unwrap(),
                 Some(SessionStatus::Idle),
                 "{} never left Busy",
@@ -2853,7 +2130,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Opencode))
+                .visible_status(&mut rules_for(AgentProvider::Opencode))
                 .unwrap(),
             None
         );
@@ -2873,7 +2150,7 @@ mod tests {
 
             assert_eq!(
                 headless_terminal
-                    .visible_status(Some(AgentProvider::Opencode))
+                    .visible_status(&mut rules_for(AgentProvider::Opencode))
                     .unwrap(),
                 Some(SessionStatus::Busy),
                 "{footer:?} did not read as busy"
@@ -2899,7 +2176,7 @@ mod tests {
 
             assert_eq!(
                 headless_terminal
-                    .visible_status(Some(AgentProvider::Opencode))
+                    .visible_status(&mut rules_for(AgentProvider::Opencode))
                     .unwrap(),
                 Some(SessionStatus::Idle),
                 "{composer:?} did not read as an idle composer"
@@ -2917,7 +2194,7 @@ mod tests {
         {
             let snippet = fixture
                 .replay()
-                .waiting_prompt_snippet(Some(AgentProvider::Opencode))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Opencode))
                 .unwrap()
                 .unwrap_or_else(|| panic!("{} produced no waiting prompt", fixture.name));
 
@@ -2932,7 +2209,7 @@ mod tests {
                 fixture.name
             );
             assert!(
-                !snippet.contains(super::OPENCODE_BOX_BORDER),
+                !snippet.contains(OPENCODE_BOX_BORDER),
                 "{} snippet still carries the composer border: {snippet:?}",
                 fixture.name
             );
@@ -2950,14 +2227,14 @@ mod tests {
         {
             let snippet = fixture
                 .replay()
-                .waiting_prompt_snippet(Some(AgentProvider::Opencode))
+                .waiting_prompt_snippet(&mut rules_for(AgentProvider::Opencode))
                 .unwrap()
                 .unwrap_or_else(|| panic!("{} produced no idle prompt", fixture.name));
 
             assert!(
-                !snippet.contains(super::OPENCODE_BOX_BORDER)
+                !snippet.contains(OPENCODE_BOX_BORDER)
                     && !snippet.contains('\u{2580}')
-                    && !snippet.contains(super::OPENCODE_HINT_BAR_MARKER),
+                    && !snippet.contains(OPENCODE_HINT_BAR_MARKER),
                 "{} snippet is chrome, not content: {snippet:?}",
                 fixture.name
             );
@@ -2970,6 +2247,31 @@ mod tests {
         }
     }
 
+    /// The transcript above a bordered composer box is what the session said,
+    /// and the shared chrome markers do not apply inside it: an agent whose
+    /// last line names a file it wrote must keep that line, even though the
+    /// path it names is also how a CLI's own footer is recognised.
+    #[test]
+    fn a_boxed_transcript_tail_keeps_a_reply_that_names_a_worktree_path() {
+        let mut headless_terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "Wrote /repo/.kanna-worktrees/task-9/NOTES.md\r\n",
+                "\u{2503} Build \u{B7} Big Pickle OpenCode Zen\r\n",
+            )
+            .as_bytes(),
+        );
+
+        let snippet = headless_terminal
+            .waiting_prompt_snippet(&mut rules_for(AgentProvider::Opencode))
+            .unwrap()
+            .expect("a parked OpenCode frame must publish what it last said");
+        assert!(
+            snippet.contains("NOTES.md"),
+            "the agent's last words were dropped as chrome: {snippet:?}"
+        );
+    }
+
     #[test]
     fn antigravity_status_comes_from_visible_cancel_marker() {
         let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
@@ -2980,7 +2282,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Antigravity))
+                .visible_status(&mut rules_for(AgentProvider::Antigravity))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -2989,7 +2291,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Antigravity))
+                .visible_status(&mut rules_for(AgentProvider::Antigravity))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3004,7 +2306,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -3013,7 +2315,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3035,7 +2337,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -3057,7 +2359,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -3100,7 +2402,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3126,7 +2428,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3145,13 +2447,13 @@ mod tests {
 
         assert_eq!(
             terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Empty
         );
@@ -3172,6 +2474,240 @@ mod tests {
         .unwrap();
         terminal.write(fixture["serialized"].as_str().unwrap().as_bytes());
         terminal
+    }
+
+    /// The CLI release a captured frame came from, read out of the fixture
+    /// rather than restated here: a re-capture that bumps the version moves
+    /// the rules these assertions run under with it, instead of silently
+    /// leaving them pinned to a release nobody runs any more.
+    fn claude_fixture_classifier(name: &str) -> Classifier {
+        let raw = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/claude/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let version = fixture["claudeVersion"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} must record the CLI version it was captured from"));
+        rules_for_version(AgentProvider::Claude, version)
+    }
+
+    /// Every captured frame, classified under the rules measured for the
+    /// release it came from, must be decided by the rule written for it.
+    ///
+    /// Asserting the status alone is not enough. A frame that still lands on
+    /// `busy` through a rule written for a different release is rule selection
+    /// drifting — the exact failure version gating exists to prevent — and only
+    /// the rule id can see it.
+    #[test]
+    fn captured_claude_frames_match_the_rule_measured_for_their_version() {
+        for (fixture, status, rule) in [
+            (
+                "working-footer-2.1.263-171x65.json",
+                SessionStatus::Busy,
+                "claude/busy/working-footer",
+            ),
+            (
+                "working-footer-first-paint-2.1.263-171x65.json",
+                SessionStatus::Busy,
+                "claude/busy/working-footer",
+            ),
+            (
+                "parked-composer-status-bar-2.1.263-171x65.json",
+                SessionStatus::Idle,
+                "claude/idle/parked-composer",
+            ),
+        ] {
+            let mut terminal = claude_fixture_terminal(fixture);
+            let verdict = terminal
+                .visible_verdict(&mut claude_fixture_classifier(fixture))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{fixture} must classify"));
+            assert_eq!(
+                (verdict.status, verdict.rule_id.as_str()),
+                (status, rule),
+                "{fixture}"
+            );
+        }
+    }
+
+    /// The marker every Claude before 2.1.263 drew, and 2.1.263 does not.
+    ///
+    /// Both spellings of the truth coexist: a session on an older CLI still
+    /// classifies from the footer hint, and a session on 2.1.263 does not
+    /// match a hint its CLI cannot draw. Before rules carried version ranges
+    /// this was one slot, and measuring it against either release broke the
+    /// other.
+    #[test]
+    fn the_retired_interrupt_marker_applies_only_to_the_releases_that_drew_it() {
+        let frame = [
+            "Header".to_string(),
+            "\u{2022} Working (12s \u{2022} esc to interrupt)".to_string(),
+        ];
+        let evidence = |lines: &[String]| -> Option<Verdict> {
+            let lines = lines.to_vec();
+            let mut classifier = rules_for_version(AgentProvider::Claude, "2.1.259");
+            classifier.classify(&Evidence {
+                lines: &lines,
+                title: "",
+                progress: None,
+            })
+        };
+        let older = evidence(&frame).expect("2.1.259 must still classify its footer hint");
+        assert_eq!(older.status, SessionStatus::Busy);
+        assert_eq!(older.rule_id, "claude/busy/interrupt-marker");
+
+        let mut newer = rules_for_version(AgentProvider::Claude, "2.1.263");
+        assert_eq!(
+            newer.classify(&Evidence {
+                lines: &frame,
+                title: "",
+                progress: None,
+            }),
+            None,
+            "2.1.263 draws no interrupt hint, so a rule measured against \
+             earlier releases must not decide its frames"
+        );
+
+        // And an unprobed session keeps both, which is what it classified from
+        // before rule selection existed.
+        let unknown = rules_for(AgentProvider::Claude)
+            .classify(&Evidence {
+                lines: &frame,
+                title: "",
+                progress: None,
+            })
+            .expect("an unknown-version session must apply every measured rule");
+        assert_eq!(unknown.rule_id, "claude/busy/interrupt-marker");
+    }
+
+    /// OpenCode renamed its working footer from "escape interrupt" (1.16.2) to
+    /// "esc interrupt" (1.18.15) inside a single day. Both are pinned, each to
+    /// the releases that drew it.
+    #[test]
+    fn opencode_interrupt_spellings_are_selected_by_cli_version() {
+        let frame = ["\u{2B1D}\u{2B1D}\u{2B1D} escape interrupt tab agents".to_string()];
+        let classify = |version: &str| {
+            rules_for_version(AgentProvider::Opencode, version).classify(&Evidence {
+                lines: &frame,
+                title: "",
+                progress: None,
+            })
+        };
+
+        let older = classify("1.16.2").expect("1.16.2 drew this spelling");
+        assert_eq!(older.status, SessionStatus::Busy);
+        assert_eq!(older.rule_id, "opencode/busy/interrupt-marker");
+
+        assert_eq!(
+            classify("1.18.15"),
+            None,
+            "1.18.15 renamed the footer, so its rules must not match the old \
+             spelling"
+        );
+    }
+
+    /// The captured 1.18.15 frames, under the rules measured for 1.18.15.
+    #[test]
+    fn captured_opencode_frames_match_the_rule_measured_for_their_version() {
+        for (fixture, rule) in [
+            ("busy 120x40", "opencode/busy/interrupt-marker"),
+            ("idle 120x40", "opencode/idle/composer-status"),
+            ("permission 120x40", "opencode/waiting/permission-action"),
+            ("busy 80x24", "opencode/busy/interrupt-marker"),
+            ("idle 80x24", "opencode/idle/composer-status"),
+            ("permission 80x24", "opencode/waiting/permission-action"),
+        ] {
+            let fixture = OPENCODE_FIXTURES
+                .iter()
+                .find(|candidate| candidate.name == fixture)
+                .unwrap_or_else(|| panic!("{fixture} must exist"));
+            let verdict = fixture
+                .replay()
+                .visible_verdict(&mut rules_for_version(
+                    AgentProvider::Opencode,
+                    OPENCODE_FIXTURE_CLI_VERSION,
+                ))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} must classify", fixture.name));
+            assert_eq!(
+                (verdict.status, verdict.rule_id.as_str()),
+                (fixture.status, rule),
+                "{}",
+                fixture.name
+            );
+        }
+    }
+
+    /// Claude sets its terminal title on every animation frame, and the title
+    /// survives a repaint that leaves the grid unreadable. Read off the
+    /// captured frames rather than assumed.
+    #[test]
+    fn captured_claude_frames_set_an_animated_terminal_title() {
+        for (fixture, busy) in [
+            ("working-footer-2.1.263-171x65.json", true),
+            ("working-footer-first-paint-2.1.263-171x65.json", true),
+            ("parked-composer-status-bar-2.1.263-171x65.json", false),
+        ] {
+            let title = claude_fixture_terminal(fixture).title();
+            assert!(
+                !title.is_empty(),
+                "{fixture} should carry an OSC 0 title: {title:?}"
+            );
+            let animating = title.starts_with('\u{25D0}') || title.starts_with('\u{25D1}');
+            assert_eq!(animating, busy, "{fixture} title was {title:?}");
+        }
+    }
+
+    /// The title is additive, not authoritative: it decides only the frames the
+    /// grid cannot read, which is the case that latches a stale status.
+    #[test]
+    fn a_busy_title_decides_only_a_frame_the_grid_cannot_read() {
+        let unreadable = ["Building the workspace".to_string()];
+        let mut classifier = rules_for_version(AgentProvider::Claude, "2.1.263");
+        let verdict = classifier
+            .classify(&Evidence {
+                lines: &unreadable,
+                title: "\u{25D0} Sleep command test",
+                progress: None,
+            })
+            .expect("a busy title must answer a frame no grid rule matched");
+        assert_eq!(verdict.status, SessionStatus::Busy);
+        assert_eq!(verdict.rule_id, "claude/busy/title-spinner");
+        assert_eq!(verdict.channel, Channel::Title);
+    }
+
+    /// And a grid verdict is never overruled by one.
+    #[test]
+    fn a_grid_verdict_outranks_a_busy_title() {
+        let mut terminal =
+            claude_fixture_terminal("parked-composer-status-bar-2.1.263-171x65.json");
+        let lines = terminal.visible_footer_lines(STATUS_ROWS).unwrap();
+        let mut classifier = rules_for_version(AgentProvider::Claude, "2.1.263");
+        let verdict = classifier
+            .classify(&Evidence {
+                lines: &lines,
+                title: "\u{25D0} Sleep command test",
+                progress: None,
+            })
+            .expect("a parked frame must classify");
+        assert_eq!(verdict.status, SessionStatus::Idle);
+        assert_eq!(verdict.rule_id, "claude/idle/parked-composer");
+    }
+
+    /// A release before the title was measured gets no title rule at all.
+    #[test]
+    fn the_title_channel_is_version_gated_like_every_other_pattern() {
+        let unreadable = ["Building the workspace".to_string()];
+        assert_eq!(
+            rules_for_version(AgentProvider::Claude, "2.1.259").classify(&Evidence {
+                lines: &unreadable,
+                title: "\u{25D0} Sleep command test",
+                progress: None,
+            }),
+            None
+        );
     }
 
     /// 2.1.263 draws no `esc to interrupt`, so the marker every earlier CLI
@@ -3205,7 +2741,7 @@ mod tests {
             let mut terminal = claude_fixture_terminal(fixture);
             assert_eq!(
                 terminal
-                    .visible_status(Some(AgentProvider::Claude))
+                    .visible_status(&mut rules_for(AgentProvider::Claude))
                     .unwrap(),
                 Some(SessionStatus::Busy),
                 "{fixture}"
@@ -3220,7 +2756,7 @@ mod tests {
         let mut terminal = claude_fixture_terminal("working-footer-2.1.263-171x65.json");
         let lines = terminal.visible_footer_lines(STATUS_ROWS).unwrap();
         assert!(
-            composer_index_from_lines(&lines, AgentProvider::Claude).is_some(),
+            lines.iter().any(|line| line_is_composer(line)),
             "expected a composer row in {lines:?}"
         );
     }
@@ -3239,7 +2775,7 @@ mod tests {
         );
         assert_eq!(
             terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3255,7 +2791,7 @@ mod tests {
             claude_fixture_terminal("parked-composer-status-bar-2.1.263-171x65.json");
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::Empty
         );
@@ -3280,14 +2816,14 @@ mod tests {
 
         assert_eq!(
             terminal
-                .composer_line(Some(AgentProvider::Claude))
+                .composer_line(&mut rules_for(AgentProvider::Claude))
                 .unwrap()
                 .as_deref(),
             Some("commit this")
         );
         assert_eq!(
             terminal
-                .composer_state(Some(AgentProvider::Claude))
+                .composer_state(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             ComposerState::SuggestionOnly
         );
@@ -3308,14 +2844,15 @@ mod tests {
             .iter()
             .find(|line| line.contains(CLAUDE_DONE_FOOTER_MARKER))
             .expect("captured parked frame should carry a done footer");
-        assert!(line_is_claude_spinner(done_footer), "{done_footer:?}");
-        assert!(
-            !claude_line_is_working_footer(done_footer),
-            "{done_footer:?}"
+        assert_eq!(
+            verdict_for(AgentProvider::Claude, &[done_footer.as_str()])
+                .map(|verdict| (verdict.status, verdict.rule_id)),
+            Some((SessionStatus::Idle, "claude/idle/done-footer".to_string())),
+            "a finished footer is not live work: {done_footer:?}"
         );
         assert_eq!(
             terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3332,7 +2869,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3354,7 +2891,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -3391,15 +2928,16 @@ mod tests {
         // really is outside the rows the classifier reads.
         let classified = headless_terminal.visible_footer_lines(STATUS_ROWS).unwrap();
         assert!(
-            !classified
+            classified
                 .iter()
-                .any(|line| claude_line_is_working_footer(line)),
+                .all(|line| verdict_for(AgentProvider::Claude, &[line.as_str()])
+                    .is_none_or(|verdict| verdict.rule_id != "claude/busy/working-footer")),
             "fixture should push the footer out of the window: {classified:?}"
         );
 
         assert_ne!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle),
             "a frame that cannot see above the composer box must not claim Idle"
@@ -3426,7 +2964,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3446,7 +2984,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Waiting)
         );
@@ -3464,7 +3002,11 @@ mod tests {
         ] {
             let mut terminal = claude_fixture_terminal(fixture);
             let lines = terminal.visible_footer_lines(STATUS_ROWS).unwrap();
-            assert_eq!(super::claude_unclassified_footer(&lines), None, "{fixture}");
+            assert_eq!(
+                rules_for(AgentProvider::Claude).unclassified_footer(&lines),
+                None,
+                "{fixture}"
+            );
         }
     }
 
@@ -3477,7 +3019,7 @@ mod tests {
             "\u{273B} Cogitating for 3s".to_string(),
         ];
         assert_eq!(
-            super::claude_unclassified_footer(&lines),
+            rules_for(AgentProvider::Claude).unclassified_footer(&lines),
             Some("\u{273B} Cogitating for 3s")
         );
     }
@@ -3487,32 +3029,36 @@ mod tests {
     fn claude_unclassified_footer_warns_once_per_session() {
         let mut headless_terminal = HeadlessTerminal::new(120, 4, 10_000).unwrap();
         headless_terminal.write("\u{273B} Cogitating for 3s\r\n".as_bytes());
-        assert!(!headless_terminal.warned_unclassified_claude_footer);
+        assert!(!headless_terminal.warned_unclassified_footer);
 
         headless_terminal
-            .visible_status(Some(AgentProvider::Claude))
+            .visible_status(&mut rules_for(AgentProvider::Claude))
             .unwrap();
         assert!(
-            headless_terminal.warned_unclassified_claude_footer,
+            headless_terminal.warned_unclassified_footer,
             "an unmeasured footer should report itself once"
         );
 
         headless_terminal
-            .visible_status(Some(AgentProvider::Claude))
+            .visible_status(&mut rules_for(AgentProvider::Claude))
             .unwrap();
-        assert!(headless_terminal.warned_unclassified_claude_footer);
+        assert!(headless_terminal.warned_unclassified_footer);
     }
 
     /// A transcript bullet is not an animation frame, even carrying the same
     /// ellipsis the live footer is keyed on.
     #[test]
     fn claude_transcript_bullet_with_an_ellipsis_is_not_a_working_footer() {
-        assert!(!claude_line_is_working_footer(
-            "\u{23FA} Running 1 shell command\u{2026}"
-        ));
-        assert!(!claude_line_is_working_footer(
-            "Running 1 shell command\u{2026}"
-        ));
+        for line in [
+            "\u{23FA} Running 1 shell command\u{2026}",
+            "Running 1 shell command\u{2026}",
+        ] {
+            assert!(
+                verdict_for(AgentProvider::Claude, &[line])
+                    .is_none_or(|verdict| verdict.rule_id != "claude/busy/working-footer"),
+                "{line:?} is a transcript bullet, not an animation frame"
+            );
+        }
     }
 
     /// A live footer above a drawn composer still reports busy: the captured
@@ -3535,7 +3081,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Claude))
+                .visible_status(&mut rules_for(AgentProvider::Claude))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -3548,7 +3094,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Copilot))
+                .visible_status(&mut rules_for(AgentProvider::Copilot))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -3561,7 +3107,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Copilot))
+                .visible_status(&mut rules_for(AgentProvider::Copilot))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );
@@ -3585,7 +3131,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Copilot))
+                .visible_status(&mut rules_for(AgentProvider::Copilot))
                 .unwrap(),
             Some(SessionStatus::Busy)
         );
@@ -3608,7 +3154,7 @@ mod tests {
 
         assert_eq!(
             headless_terminal
-                .visible_status(Some(AgentProvider::Copilot))
+                .visible_status(&mut rules_for(AgentProvider::Copilot))
                 .unwrap(),
             Some(SessionStatus::Idle)
         );

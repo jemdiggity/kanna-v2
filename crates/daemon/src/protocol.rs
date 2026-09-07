@@ -130,6 +130,12 @@ pub struct HandoffSession {
     pub snapshot: Option<TerminalSnapshot>,
     #[serde(default)]
     pub agent_provider: Option<AgentProvider>,
+    /// The provider CLI release this session is running, as the sending daemon
+    /// probed it. Absent on a sender that predates version-aware detection, in
+    /// which case the successor treats the session as unknown-version and
+    /// applies every rule measured for its provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
     #[serde(default)]
     pub status: SessionStatus,
     #[serde(default)]
@@ -276,6 +282,17 @@ pub enum Command {
         rows: u16,
         #[serde(default)]
         agent_provider: Option<AgentProvider>,
+        /// Absolute path to the provider CLI this shell command line will run.
+        ///
+        /// `executable` is the login shell that runs repo setup before the
+        /// agent, so the daemon cannot find the CLI by looking at its own
+        /// child. The server resolved this path to build the command line, and
+        /// the daemon probes it for the CLI version its detection rules are
+        /// selected by. Absent on an older server, and on every non-agent
+        /// session: the version is then unknown, which applies every rule
+        /// measured for the provider.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_executable: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_prelude: Option<Vec<u8>>,
         #[serde(default)]
@@ -627,6 +644,7 @@ mod tests {
             cols: 80,
             rows: 24,
             agent_provider: Some(AgentProvider::Codex),
+            agent_executable: None,
             terminal_prelude: Some(b"stage marker\r\n".to_vec()),
             operator_input_only: false,
         };
@@ -1028,6 +1046,7 @@ mod tests {
                 cols: 80,
                 snapshot: None,
                 agent_provider: None,
+                cli_version: None,
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
                 provider_session_id: None,

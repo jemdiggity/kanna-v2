@@ -32,11 +32,12 @@ struct AdoptedPtyReader {
 
 fn adopted_runtime_status(
     headless_terminal: &mut headless_terminal::HeadlessTerminal,
-    agent_provider: Option<kanna_daemon::protocol::AgentProvider>,
+    classifier: &mut crate::detection::Classifier,
     inherited_status: kanna_daemon::protocol::SessionStatus,
 ) -> Result<(kanna_daemon::protocol::SessionStatus, bool), Box<dyn std::error::Error + Send + Sync>>
 {
-    let detected_status = headless_terminal.visible_status(agent_provider)?;
+    let agent_provider = classifier.provider();
+    let detected_status = headless_terminal.visible_status(classifier)?;
     let status_observed = detected_status.is_some()
         || inherited_status != headless_terminal::initial_session_status(agent_provider);
     Ok((detected_status.unwrap_or(inherited_status), status_observed))
@@ -159,6 +160,13 @@ pub(crate) async fn run_daemon() {
         }
     };
     kanna_daemon::terminal_perf::start_global_watchdog();
+
+    // Agent-status detection rules, before any session is adopted or spawned.
+    // The watcher is what lets a pattern fix — or a rule set measured against
+    // a CLI release this build predates — reach live sessions without a daemon
+    // release.
+    crate::detection::init();
+    let _detection_rules_watcher = crate::detection::spawn_watcher();
 
     // Capture the app/test launcher executable while it is still our direct
     // parent. The daemon can outlive and be reparented after that launcher
@@ -316,9 +324,20 @@ pub(crate) async fn run_daemon() {
             // rendered verdict is newer evidence than the status field being
             // transferred beside it, which may be the conservative startup
             // `Busy` value the old classifier never managed to replace.
+            // A sender that predates version-aware detection sends no version;
+            // the session then classifies from every rule measured for its
+            // provider, which is what it classified from before.
+            let inherited_cli_version = handoff
+                .cli_version
+                .as_deref()
+                .and_then(crate::detection::CliVersion::parse);
+            let mut adopted_classifier = crate::detection::Classifier::with_version(
+                handoff.agent_provider,
+                inherited_cli_version.clone(),
+            );
             let (status, status_observed) = match adopted_runtime_status(
                 &mut headless_terminal,
-                handoff.agent_provider,
+                &mut adopted_classifier,
                 handoff.status,
             ) {
                 Ok(derived) => derived,
@@ -351,6 +370,7 @@ pub(crate) async fn run_daemon() {
                 headless_terminal,
                 stream_control: None,
                 agent_provider: handoff.agent_provider,
+                cli_version: inherited_cli_version,
                 status,
                 status_observed,
                 last_status_check_at: None,
@@ -603,12 +623,89 @@ mod adopted_runtime_status_tests {
 
         let (status, observed) = super::adopted_runtime_status(
             &mut terminal,
-            Some(AgentProvider::Claude),
+            &mut crate::detection::Classifier::new(Some(AgentProvider::Claude)),
             SessionStatus::Busy,
         )
         .unwrap();
 
         assert_eq!(status, SessionStatus::Idle);
         assert!(observed);
+    }
+
+    /// A daemon too old to probe CLI versions sends none, and its sessions
+    /// must still classify — from every rule measured for the provider, which
+    /// is what they classified from before rule selection existed.
+    #[test]
+    fn a_legacy_handoff_payload_without_a_cli_version_still_classifies() {
+        let legacy = serde_json::json!({
+            "session_id": "inherited",
+            "pid": 4242,
+            "cwd": "/tmp",
+            "rows": 40,
+            "cols": 120,
+            "snapshot": null,
+            "agent_provider": "claude",
+            "status": "busy",
+        });
+        let session: kanna_daemon::protocol::HandoffSession =
+            serde_json::from_value(legacy).expect("a legacy payload must still deserialize");
+        assert_eq!(session.cli_version, None);
+
+        let inherited = session
+            .cli_version
+            .as_deref()
+            .and_then(crate::detection::CliVersion::parse);
+        let mut classifier =
+            crate::detection::Classifier::with_version(session.agent_provider, inherited);
+        let frame = ["\u{2022} Working (12s \u{2022} esc to interrupt)".to_string()];
+        let verdict = classifier
+            .classify(&crate::detection::Evidence {
+                lines: &frame,
+                title: "",
+                progress: None,
+            })
+            .expect("an unknown-version session must apply every measured rule");
+        assert_eq!(verdict.rule_id, "claude/busy/interrupt-marker");
+    }
+
+    /// And a sender that does report one hands over the release its successor
+    /// selects rules for, so a session does not lose its version at a handoff.
+    #[test]
+    fn an_inherited_cli_version_selects_the_rules_for_that_release() {
+        let payload = serde_json::json!({
+            "session_id": "inherited",
+            "pid": 4242,
+            "cwd": "/tmp",
+            "rows": 40,
+            "cols": 120,
+            "snapshot": null,
+            "agent_provider": "claude",
+            "cli_version": "2.1.263",
+            "status": "busy",
+        });
+        let session: kanna_daemon::protocol::HandoffSession =
+            serde_json::from_value(payload).unwrap();
+        let inherited = session
+            .cli_version
+            .as_deref()
+            .and_then(crate::detection::CliVersion::parse);
+        assert_eq!(
+            inherited.as_ref().map(ToString::to_string),
+            Some("2.1.263".to_string())
+        );
+
+        let mut classifier =
+            crate::detection::Classifier::with_version(session.agent_provider, inherited);
+        let frame = ["\u{2022} Working (12s \u{2022} esc to interrupt)".to_string()];
+        assert_eq!(
+            classifier.classify(&crate::detection::Evidence {
+                lines: &frame,
+                title: "",
+                progress: None,
+            }),
+            None,
+            "2.1.263 draws no interrupt hint, so the inherited version must \
+             gate the rule measured for earlier releases"
+        );
     }
 }
