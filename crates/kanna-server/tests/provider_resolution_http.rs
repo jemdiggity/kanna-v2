@@ -809,6 +809,94 @@ async fn durable_workflow_provider_lists_fall_back_for_reloaded_stages_and_posts
     cleanup.stop_daemon().await;
 }
 
+/// A workflow stage's compact provider selectors (`provider[-model[-effort]]`)
+/// carry a coherent pair per candidate: when the leading candidate's CLI is
+/// missing, the fallback spawns with the model and effort written beside *it*,
+/// never the leader's.
+#[tokio::test(flavor = "current_thread")]
+async fn a_workflow_selector_fallback_spawns_with_its_own_model_and_effort() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let root = unique_test_root("selector-fallback");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    let mut cleanup = DurableTestCleanup::new(root.clone());
+    let repo = init_provider_repo(&root);
+    // The fixture stubs only `claude` in `.kanna/provider-bin`, so codex —
+    // the leading candidate below — is unavailable and claude is the
+    // fallback that actually spawns.
+    let workflow_dir = repo.join(".kanna/workflows");
+    std::fs::create_dir_all(&workflow_dir).expect("workflow directory should be created");
+    std::fs::write(
+        workflow_dir.join("selectors.json"),
+        json!({
+            "name": "selectors",
+            "stages": [{
+                "name": "in progress",
+                "agent": "review",
+                "agent_provider": ["codex-astra-lo", "claude-fable-hi"],
+                "transition": "manual"
+            }]
+        })
+        .to_string(),
+    )
+    .expect("selector workflow should be written");
+    publish_origin_main(&repo, "publish selector workflow");
+
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, _db_path) =
+        write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    cleanup.track_daemon(tokio::spawn(fake_daemon_persistent(daemon_dir, command_tx)));
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
+    let client = Client::new();
+    let repo_id = register_repo(&client, port, &repo).await;
+
+    let created = client
+        .post(format!("http://127.0.0.1:{port}/v1/tasks"))
+        .json(&json!({
+            "repoId": repo_id,
+            "prompt": "Exercise selector fallback",
+            "workflowName": "selectors",
+            "agentType": "agent"
+        }))
+        .send()
+        .await
+        .expect("task creation should reach kanna-server")
+        .error_for_status()
+        .expect("task creation should succeed")
+        .json::<Value>()
+        .await
+        .expect("task response should be JSON");
+    let task_id = created["taskId"]
+        .as_str()
+        .expect("task response should include an id")
+        .to_string();
+
+    match next_daemon_command(&mut commands).await {
+        DaemonCommand::SpawnAgent {
+            session_id, params, ..
+        } => {
+            assert_eq!(session_id, task_id);
+            assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
+            assert_eq!(
+                params.model.as_deref(),
+                Some("fable"),
+                "the fallback candidate must spawn with its own selector's model",
+            );
+            assert_eq!(
+                params.effort.as_deref(),
+                Some("high"),
+                "the fallback candidate must spawn with its own selector's effort",
+            );
+        }
+        other => panic!("expected Claude headless spawn, got {other:?}"),
+    }
+
+    stop_server(&mut server).await;
+    cleanup.stop_daemon().await;
+}
+
 /// The incident this layer exists for: one machine's provider CLI is wedged
 /// and the only lever used to be a commit to `origin/main`, because definitions
 /// are resolved from there. A `.kanna/config.local.json` that never reaches git

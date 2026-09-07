@@ -50,7 +50,7 @@ When `.kanna/workflows/schema.json` exists in this repo, read it before writing.
 - `prompt` — the stage assignment, rendered under `## Your Task` after the agent's `## Agent Instructions`.
 - `policy.transition` — `manual` (the user advances) or `auto` (a successful stage result advances). Optional `policy.revision_transition` controls runs entered through a revision request and defaults to `transition`.
 - `post` — tail work injected into the stage's *running* agent session when the stage transitions forward; `agent` is the fallback spawned if that session is dead. A commit step belongs here, not in its own stage.
-- `agent_provider` — a single provider (`"opencode"`) when the stage requires one, or an ordered array (`["claude", "codex", "copilot", "opencode", "antigravity"]`) so Kanna picks the first installed. Valid on stages and posts.
+- `agent_provider` — a single provider (`"opencode"`) when the stage requires one, or an ordered array (`["claude", "codex", "copilot", "opencode", "antigravity"]`) so Kanna picks the first installed. Valid on stages and posts. Each entry is a compact provider selector, `provider[-model[-effort]]`: an optional model rides after the provider and is passed to the CLI verbatim (`claude-fable`, `codex-gpt-5-codex`), and a recognized trailing effort token (`lo`/`low`, `med`/`medium`, `hi`/`high`, `xhi`/`xhigh`, `max`) sets the reasoning effort (`claude-fable-hi`, `codex-astra-lo`). Every selector in an ordered list carries its own coherent model/effort pair — a fallback candidate never inherits the leader's model — and anything under-specified inherits the provider CLI's own defaults.
 
 ## Prompt Variables
 

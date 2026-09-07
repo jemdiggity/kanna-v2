@@ -573,6 +573,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         overrides.provider.as_deref(),
         overrides.model,
         overrides.effort,
+        current_stage.agent_provider.as_deref(),
         repo_preference,
         agent.as_ref(),
     );
@@ -1010,6 +1011,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         overrides.provider.as_deref(),
         overrides.model.clone(),
         overrides.effort.clone(),
+        target_stage.agent_provider.as_deref(),
         repo_preference,
         agent.as_ref(),
     );
@@ -2105,6 +2107,11 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         explicit_provider.as_deref(),
         request.model.clone(),
         request.effort.clone(),
+        if request.agent.is_some() {
+            None
+        } else {
+            stage.agent_provider.as_deref()
+        },
         repo_preference,
         agent.as_ref(),
     );
@@ -2327,6 +2334,15 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         create_request
             .as_ref()
             .and_then(|request| request.effort.clone()),
+        if create_request
+            .as_ref()
+            .and_then(|request| request.agent.as_ref())
+            .is_some()
+        {
+            None
+        } else {
+            stage.agent_provider.as_deref()
+        },
         repo_preference,
         agent.as_ref(),
     );
@@ -2870,40 +2886,46 @@ fn generate_failure_run_id(task_id: &str) -> String {
 /// The layers are the ones AGENTS.md ("Provider/model precedence") names, in
 /// the same order provider resolution walks them: the explicit task or stage
 /// override (or, for a respawn, the values stamped on the run being
-/// reproduced), then the repo's matching `agentProviders` entry, then the
+/// reproduced), then the workflow stage's compact provider selectors — one
+/// layer per selector carrying a model or effort, each bound to its own
+/// provider — then the repo's matching `agentProviders` entry, then the
 /// layered agent definition's frontmatter. `explicit_provider` is the
 /// provider selection that travelled with the explicit values — a run stamp
 /// carries both, so reproducing one never crosses layers.
+/// `stage_provider` is the same stage selector list the caller fed candidate
+/// resolution — including the same suppression when an explicit agent
+/// override displaced the stage's agent.
 fn agent_tuning_plan(
     explicit_provider: Option<&str>,
     explicit_model: Option<String>,
     explicit_effort: Option<String>,
+    stage_provider: Option<&[String]>,
     repo_preference: Option<&definitions::AgentProviderPreference>,
     agent: Option<&definitions::AgentDefinition>,
 ) -> AgentTuningPlan {
-    AgentTuningPlan::new(vec![
-        AgentTuningLayer {
-            providers: explicit_provider
-                .map(|provider| vec![provider.to_string()])
-                .unwrap_or_default(),
-            model: explicit_model,
-            effort: explicit_effort,
-        },
-        AgentTuningLayer {
-            providers: repo_preference
-                .map(|preference| preference.providers.clone())
-                .unwrap_or_default(),
-            model: repo_preference.and_then(|preference| preference.model.clone()),
-            effort: repo_preference.and_then(|preference| preference.effort.clone()),
-        },
-        AgentTuningLayer {
-            providers: agent
-                .map(|agent| agent.agent_providers.clone())
-                .unwrap_or_default(),
-            model: agent.and_then(|agent| agent.model.clone()),
-            effort: agent.and_then(|agent| agent.effort.clone()),
-        },
-    ])
+    let mut layers = vec![AgentTuningLayer {
+        providers: explicit_provider
+            .map(|provider| vec![provider.to_string()])
+            .unwrap_or_default(),
+        model: explicit_model,
+        effort: explicit_effort,
+    }];
+    layers.extend(provider::stage_tuning_layers(stage_provider));
+    layers.push(AgentTuningLayer {
+        providers: repo_preference
+            .map(|preference| preference.providers.clone())
+            .unwrap_or_default(),
+        model: repo_preference.and_then(|preference| preference.model.clone()),
+        effort: repo_preference.and_then(|preference| preference.effort.clone()),
+    });
+    layers.push(AgentTuningLayer {
+        providers: agent
+            .map(|agent| agent.agent_providers.clone())
+            .unwrap_or_default(),
+        model: agent.and_then(|agent| agent.model.clone()),
+        effort: agent.and_then(|agent| agent.effort.clone()),
+    });
+    AgentTuningPlan::new(layers)
 }
 
 fn pin_task_workflow_definition(
@@ -3011,6 +3033,11 @@ fn resolve_task_spawn(
         request.explicit_provider.as_deref(),
         request.model,
         request.effort,
+        if request.agent.is_some() {
+            None
+        } else {
+            stage.agent_provider.as_deref()
+        },
         repo_config.agent_provider_preference(stage_agent.as_deref()),
         agent.as_ref(),
     );

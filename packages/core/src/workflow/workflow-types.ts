@@ -20,7 +20,12 @@ export interface WorkflowPost {
   description?: string;
   agent?: string;
   prompt?: string;
-  agent_provider?: AgentProvider | AgentProvider[];
+  /**
+   * Compact provider selectors (`provider[-model[-effort]]`, e.g. `claude`,
+   * `codex-sol`, `claude-fable-hi`) — validated by the loader via
+   * `parseAgentProviderSelector`; entries keep their written form.
+   */
+  agent_provider?: string | string[];
 }
 
 export interface WorkflowStage {
@@ -28,7 +33,12 @@ export interface WorkflowStage {
   description?: string;
   agent?: string;
   prompt?: string;
-  agent_provider?: AgentProvider | AgentProvider[];
+  /**
+   * Compact provider selectors (`provider[-model[-effort]]`, e.g. `claude`,
+   * `codex-sol`, `claude-fable-hi`) — validated by the loader via
+   * `parseAgentProviderSelector`; entries keep their written form.
+   */
+  agent_provider?: string | string[];
   environment?: string;
   policy: WorkflowStagePolicy;
   post?: WorkflowPost;

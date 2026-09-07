@@ -1688,8 +1688,12 @@ where
             "agent_provider must include at least one non-empty provider",
         ));
     }
+    // Workflow stage/post entries are compact provider selectors
+    // (`provider[-model[-effort]]`, e.g. `claude`, `codex-sol`,
+    // `claude-fable-hi`), validated here so a bad selector fails definition
+    // resolution naming the field instead of failing at spawn.
     for provider in &providers {
-        AgentProvider::from_str(provider).map_err(|error| {
+        kanna_agent_protocol::parse_provider_selector(provider).map_err(|error| {
             serde::de::Error::custom(format!("invalid agent_provider: {error}"))
         })?;
     }

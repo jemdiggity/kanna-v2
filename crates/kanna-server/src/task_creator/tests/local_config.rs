@@ -186,7 +186,7 @@ fn local_provider_preference_beats_the_repo_and_agent_but_loses_to_a_task_overri
         AgentProvider::Opencode,
     );
     assert_eq!(
-        super::super::agent_tuning_plan(None, None, None, Some(&preference), Some(&agent))
+        super::super::agent_tuning_plan(None, None, None, None, Some(&preference), Some(&agent))
             .model_for(AgentProvider::Opencode)
             .as_deref(),
         Some("local-model"),
@@ -223,8 +223,9 @@ fn local_provider_preference_beats_the_repo_and_agent_but_loses_to_a_task_overri
             Some("claude"),
             Some("explicit-model".to_string()),
             None,
+            None,
             Some(&preference),
-            Some(&agent),
+            Some(&agent)
         )
         .model_for(AgentProvider::Claude)
         .as_deref(),
@@ -238,8 +239,9 @@ fn local_provider_preference_beats_the_repo_and_agent_but_loses_to_a_task_overri
             Some("claude"),
             None,
             None,
+            None,
             Some(&preference),
-            Some(&agent),
+            Some(&agent)
         )
         .model_for(AgentProvider::Claude),
         None,

@@ -155,29 +155,40 @@ pub(super) fn resolve_agent_provider_candidates(
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
 ) -> Result<Vec<AgentProvider>, ResolveProviderCandidatesError> {
-    let raw_candidates =
+    // Workflow stage/post entries are compact provider selectors
+    // (`provider[-model[-effort]]`); every other layer names plain provider
+    // ids. Both syntaxes resolve to the provider here — a selector's model
+    // and effort enter through the tuning plan (`stage_tuning_layers`), not
+    // through candidate resolution.
+    let (raw_candidates, selector_syntax) =
         if let Some(source) = explicit_provider.filter(|value| !value.trim().is_empty()) {
-            source
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
+            (
+                source
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                false,
+            )
         } else if let Some(providers) = stage_provider.filter(|providers| !providers.is_empty()) {
-            providers.to_vec()
+            (providers.to_vec(), true)
         } else if let Some(providers) = repo_provider.filter(|providers| !providers.is_empty()) {
-            providers.to_vec()
+            (providers.to_vec(), false)
         } else if let Some(agent) = agent.filter(|agent| !agent.agent_providers.is_empty()) {
-            agent.agent_providers.clone()
+            (agent.agent_providers.clone(), false)
         } else if let Some(source) = fallback_provider.filter(|value| !value.trim().is_empty()) {
-            source
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
+            (
+                source
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                false,
+            )
         } else {
-            Vec::new()
+            (Vec::new(), false)
         };
 
     if raw_candidates.is_empty() {
@@ -187,10 +198,37 @@ pub(super) fn resolve_agent_provider_candidates(
     raw_candidates
         .iter()
         .map(|candidate| {
-            AgentProvider::from_str(candidate)
-                .map_err(|_| ResolveProviderCandidatesError::Unsupported(candidate.clone()))
+            if selector_syntax {
+                kanna_agent_protocol::parse_provider_selector(candidate)
+                    .map(|selector| selector.provider)
+                    .map_err(|_| ResolveProviderCandidatesError::Unsupported(candidate.clone()))
+            } else {
+                AgentProvider::from_str(candidate)
+                    .map_err(|_| ResolveProviderCandidatesError::Unsupported(candidate.clone()))
+            }
         })
         .collect::<Result<Vec<_>, _>>()
+}
+
+/// The tuning layers a workflow stage's compact provider selectors
+/// contribute — one layer per selector that names a model or an effort, each
+/// bound to exactly that selector's provider. This is what lets an ordered
+/// fallback list like `["claude-fable-hi", "codex-astra-lo"]` give every
+/// candidate its own coherent pair: whichever provider availability lands on
+/// draws the values written beside it, and a selector with neither model nor
+/// effort contributes nothing (the CLI's own defaults apply).
+pub(super) fn stage_tuning_layers(stage_provider: Option<&[String]>) -> Vec<AgentTuningLayer> {
+    stage_provider
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| kanna_agent_protocol::parse_provider_selector(entry).ok())
+        .filter(|selector| selector.model.is_some() || selector.effort.is_some())
+        .map(|selector| AgentTuningLayer {
+            providers: vec![selector.provider.as_str().to_string()],
+            model: selector.model,
+            effort: selector.effort,
+        })
+        .collect()
 }
 
 fn unavailable_provider_error(candidates: &[AgentProvider]) -> String {

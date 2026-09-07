@@ -150,7 +150,18 @@ repo (and dogfooded by this repo on itself):
   workflow.
 - `agents/{name}/AGENT.md` (+ optional `EXTEND.md`) — agent definitions and
   repo-local extensions.
-- `workflows/{name}.json` — workflow definitions.
+- `workflows/{name}.json` — workflow definitions. Stage and post
+  `agent_provider` entries are compact provider selectors,
+  `provider[-model[-effort]]`: a plain provider id (`codex`), an optional
+  model passed to the CLI verbatim (`claude-fable`, `codex-gpt-5-codex`), and
+  an optional trailing effort token (`lo`/`low`, `med`/`medium`, `hi`/`high`,
+  `xhi`/`xhigh`, `max`) — e.g. `claude-fable-hi`, `codex-astra-lo`. Each
+  selector names exactly one provider, so an ordered fallback list gives every
+  candidate its own coherent model/effort pair; anything under-specified
+  inherits the provider CLI's own defaults. Selectors are workflow-JSON
+  syntax only — explicit overrides, `agentProviders` entries, and agent
+  frontmatter keep naming plain provider ids with separate `model`/`effort`
+  fields.
 - `tasks/{slug}/agent.md` — custom task templates.
 - `config.local.json` — optional, gitignored, machine-local overrides for
   `config.json` (see below).
