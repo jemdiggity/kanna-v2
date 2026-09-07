@@ -20,6 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 vi.mock("react-native", () => ({
   KeyboardAvoidingView: "KeyboardAvoidingView",
@@ -114,7 +115,7 @@ async function waitForServer(baseUrl: string, child: ChildProcess): Promise<void
       throw new Error(`kanna-server exited early with code ${child.exitCode}`);
     }
     try {
-      const response = await fetch(`${baseUrl}/v1/status`);
+      const response = await localProcessFetch(`${baseUrl}/v1/status`);
       if (response.ok) return;
     } catch {
       // Not listening yet.
@@ -216,7 +217,7 @@ describeIntegration("mobile composer agent options against a real desktop", () =
         );
       });
     }
-    const addRepo = await fetch(`${baseUrl}/v1/repos`, {
+    const addRepo = await localProcessFetch(`${baseUrl}/v1/repos`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: repoPath, name: "Inventory Repo" })
@@ -239,7 +240,7 @@ describeIntegration("mobile composer agent options against a real desktop", () =
     const { createMobileController } = await import("../src/state/mobileController");
     const { CreateTaskComposer } = await import("../src/components/CreateTaskComposer");
 
-    const client = createKannaClient(createLanTransport(baseUrl, fetch));
+    const client = createKannaClient(createLanTransport(baseUrl, localProcessFetch));
 
     // 1. The desktop reports its own inventory over the LAN payloads.
     const desktops = await client.listDesktops();

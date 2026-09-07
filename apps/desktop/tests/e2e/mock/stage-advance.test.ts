@@ -49,6 +49,7 @@ import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../hel
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { advanceStageWithShortcut, pressAdvanceStageShortcut } from "../helpers/stageAdvance";
 import { resolveAppKannaServer, type AppKannaServer } from "../helpers/kannaServer";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const execFileAsync = promisify(execFile);
 
@@ -438,7 +439,7 @@ describe("stage advance", () => {
 
     const taskCountBefore = await countRepoTasks(client, repoId);
     await withAppKannaServer(async (server) => {
-      const response = await fetch(
+      const response = await localProcessFetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`,
         { method: "POST" },
       );
@@ -592,7 +593,7 @@ describe("stage advance", () => {
     await selectTask(client, selectedTaskId);
 
     await withAppKannaServer(async (server) => {
-      const response = await fetch(
+      const response = await localProcessFetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(sourceTaskId)}/actions/complete-stage`,
         {
           method: "POST",
@@ -646,7 +647,7 @@ describe("stage advance", () => {
     await insertRunningStageRun(taskId, seedRunId, "in progress");
 
     await withAppKannaServer(async (server) => {
-      const response = await fetch(
+      const response = await localProcessFetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/rerun-stage`,
         { method: "POST" },
       );
@@ -695,7 +696,7 @@ describe("stage advance", () => {
     await insertRunningStageRun(taskId, seedRunId, "review");
 
     await withAppKannaServer(async (server) => {
-      const response = await fetch(
+      const response = await localProcessFetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`,
         {
           method: "POST",

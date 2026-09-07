@@ -196,16 +196,20 @@ async function inspectRunningExpoProcess(pid: number): Promise<RunningExpoProces
 async function waitForExpoServer(port: number): Promise<void> {
   await waitFor(
     `Expo Metro server on port ${port}`,
-    async () => {
+    async (recordReason) => {
       try {
         const response = await fetch(`http://127.0.0.1:${port}/status`);
         if (!response.ok) {
+          recordReason(`GET /status answered ${response.status} ${response.statusText}`);
           return null;
         }
 
         const body = await response.text();
-        return body.includes("packager-status:running") ? true : null;
-      } catch {
+        if (body.includes("packager-status:running")) return true;
+        recordReason(`GET /status answered 200 but not "packager-status:running": ${body.trim().slice(0, 200)}`);
+        return null;
+      } catch (error) {
+        recordReason(error instanceof Error ? error.message : String(error));
         return null;
       }
     },

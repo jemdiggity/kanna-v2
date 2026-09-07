@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, tauriInvoke } from "../helpers/vue";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 async function serverBaseUrl(client: WebDriverClient): Promise<string> {
   const port = await tauriInvoke(client, "read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" })
@@ -89,7 +90,7 @@ describe("desktop server phase 3 paths", () => {
 
   it("persists selected repo through the settings API", async () => {
     await callVueMethod(client, "store.selectRepo", "repo-phase3");
-    const response = await fetch(`${await serverBaseUrl(client)}/v1/settings/selected_repo_id`);
+    const response = await localProcessFetch(`${await serverBaseUrl(client)}/v1/settings/selected_repo_id`);
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       key: "selected_repo_id",

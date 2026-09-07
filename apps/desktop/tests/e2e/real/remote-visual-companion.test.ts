@@ -22,6 +22,7 @@ import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import type { WebDriverClient } from "../helpers/webdriver";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 const execFileAsync = promisify(execFile);
@@ -1613,7 +1614,7 @@ async function runCausalRemoteInputTest(): Promise<void> {
       await waitForRemoteTerminalLine(taskId, `DRAFT:<${humanInput}>`);
 
       const { baseUrl } = await resolveAppKannaServer(primary);
-      const response = await fetch(
+      const response = await localProcessFetch(
         `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/input`,
         {
           method: "POST",

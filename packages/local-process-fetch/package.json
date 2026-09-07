@@ -1,0 +1,16 @@
+{
+  "name": "@kanna/local-process-fetch",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --maxWorkers=2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5",
+    "vitest": "^4.1.4"
+  }
+}

@@ -1,4 +1,4 @@
-import { localProcessFetch, type LocalProcessFetch } from "./localProcessFetch";
+import { localProcessFetch, type LocalProcessFetch } from "@kanna/local-process-fetch";
 
 export interface DesktopPairingSession {
   code: string;

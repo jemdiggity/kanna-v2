@@ -40,12 +40,18 @@ export async function exerciseShellVisualScreens(ui: ShellVisualUi): Promise<voi
 function elementRect(driver: Browser, selector: string): Promise<NativeRect> {
   return waitFor(
     `non-empty native geometry for ${selector}`,
-    async () => {
+    async (recordReason) => {
+      const describe = (error: unknown): null => {
+        recordReason(error instanceof Error ? error.message : String(error));
+        return null;
+      };
       const element = await driver.$(selector);
-      const location = await element.getLocation().catch(() => null);
-      const size = location ? await element.getSize().catch(() => null) : null;
+      const location = await element.getLocation().catch(describe);
+      const size = location ? await element.getSize().catch(describe) : null;
       const rect = location && size ? { ...location, ...size } : null;
-      return rect && isNonEmptyNativeRect(rect) ? rect : null;
+      if (rect && isNonEmptyNativeRect(rect)) return rect;
+      if (rect) recordReason(`element reported an empty rect ${JSON.stringify(rect)}`);
+      return null;
     },
     { intervalMs: 100, timeoutMs: 5_000 }
   );

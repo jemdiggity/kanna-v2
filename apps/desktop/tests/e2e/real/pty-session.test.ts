@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { localProcessFetch } from "../../../../../tests/remote-e2e/src/localProcessFetch";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
@@ -19,6 +18,7 @@ import { waitForTaskCreated } from "../helpers/taskCreation";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { callVueMethod, execDb, getVueState, tauriInvoke } from "../helpers/vue";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 interface WebDriverErrorValue {
   error?: string;

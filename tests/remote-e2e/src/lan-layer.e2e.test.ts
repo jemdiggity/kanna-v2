@@ -40,7 +40,7 @@ import {
   startRemoteHarness,
   type RemoteHarness
 } from "./harness";
-import { localProcessFetch } from "./localProcessFetch";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 import {
   collectTerminalEvents,
   createScriptedTask,
@@ -739,7 +739,13 @@ describe("LAN task loop E2E", () => {
   }, 45_000);
 });
 
-const nodeFetch: FetchLike = async (input, init) => fetch(input, init);
+/**
+ * The `FetchLike` a phone's LAN transport is handed. The phone is not a browser
+ * — React Native's fetch sends no fetch metadata — so the harness must not be
+ * one either: Node's global fetch would attach `Sec-Fetch-Mode` and every call
+ * would be refused as browser-originated. See `@kanna/local-process-fetch`.
+ */
+const nodeFetch: FetchLike = async (input, init) => await localProcessFetch(input, init);
 
 type LanTransport = ReturnType<typeof createLanTransport>;
 
@@ -881,7 +887,7 @@ async function waitForReferenceOutput(
 }
 
 async function fetchJson<T = unknown>(url: string): Promise<T> {
-  const response = await fetch(url);
+  const response = await localProcessFetch(url);
   if (!response.ok) {
     throw new Error(`request failed (${response.status}) for ${url}`);
   }

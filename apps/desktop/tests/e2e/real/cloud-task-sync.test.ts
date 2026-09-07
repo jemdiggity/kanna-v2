@@ -7,6 +7,7 @@ import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { pressShiftEnterInActiveTerminal } from "../helpers/terminalInput";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
@@ -882,7 +883,7 @@ describe("cloud task sync", () => {
       ownerLocalTaskId: result,
       activity: "idle",
     });
-    const workingResponse = await fetch(
+    const workingResponse = await localProcessFetch(
       `http://127.0.0.1:${primaryLanPort}/v1/tasks/${encodeURIComponent(result)}/actions/runtime-status`,
       {
         method: "POST",

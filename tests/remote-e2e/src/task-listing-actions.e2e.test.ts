@@ -15,7 +15,7 @@ import {
   waitForTerminalOutput
 } from "./terminalFlowTestUtils";
 import { BUFFY_UID } from "./firebaseAuth";
-import { localProcessFetch } from "./localProcessFetch";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const execFileAsync = promisify(execFile);
 

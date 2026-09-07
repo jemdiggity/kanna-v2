@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { tauriInvoke } from "./vue";
 import type { WebDriverClient } from "./webdriver";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const execFileAsync = promisify(execFile);
 
@@ -149,7 +150,7 @@ export async function startTestKannaServer(
     if (child.exitCode !== null) {
       throw new Error(`kanna-server exited early with code ${child.exitCode}: ${stderr}`);
     }
-    const response = await fetch(`${baseUrl}/v1/status`).catch(() => null);
+    const response = await localProcessFetch(`${baseUrl}/v1/status`).catch(() => null);
     if (response?.ok) return { baseUrl, child };
     await sleep(250);
   }
