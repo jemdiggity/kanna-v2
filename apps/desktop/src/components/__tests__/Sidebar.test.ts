@@ -226,6 +226,10 @@ function mountSidebarWithRepos(
   });
 }
 
+function wrapper_style(wrapper: ReturnType<typeof mountSidebar>, taskId: string) {
+  return wrapper.get(`[data-task-id="${taskId}"] .item-title`).attributes("style");
+}
+
 describe("Sidebar", () => {
   beforeEach(() => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
@@ -238,9 +242,9 @@ describe("Sidebar", () => {
   });
 
   it("renders settled server activity when runtime status has not been observed", () => {
-    // Desktop snapshots deliberately carry the blended activity value, not
-    // the nullable runtime_status column. A pre-observation task follows this
-    // path and must not acquire working styling from the missing field.
+    // runtime_status is nullable: a task no session has reported on yet has
+    // no runtime dimension, so the row falls back to the blended activity
+    // value and must not acquire working styling from the missing field.
     const wrapper = mountSidebar([
       item("task-runtime-pending", {
         display_name: "Waiting for first runtime observation",
@@ -251,6 +255,118 @@ describe("Sidebar", () => {
     const title = wrapper.get('[data-task-id="task-runtime-pending"] .item-title');
     expect(title.attributes("style")).toContain("font-style: normal");
     expect(title.text()).toBe("Waiting for first runtime observation");
+  });
+
+  it("draws a busy task as working even when its output is unread", () => {
+    // Working outranks unread: mid-turn, "it is working" is the more useful
+    // thing to say, and the output nobody has read is still being written.
+    const wrapper = mountSidebar([
+      item("task-busy-unread", {
+        display_name: "Busy and unread",
+        activity: "unread",
+        runtime_state: "busy",
+        read_state: "unread",
+      }),
+    ], null);
+
+    const style = wrapper
+      .get('[data-task-id="task-busy-unread"] .item-title')
+      .attributes("style");
+    expect(style).toContain("font-style: italic");
+    expect(style).toContain("font-weight: normal");
+  });
+
+  it("restores the unread mark once a busy task settles", () => {
+    // The point of keeping the dimensions separate: suppressing the mark while
+    // working is a display choice, not a write. The read dimension survives, so
+    // the mark comes back the moment the agent stops — which the old behaviour
+    // could not do, because a busy transition destroyed the unread state.
+    const settled = item("task-settling", {
+      display_name: "Finished with unread output",
+      activity: "unread",
+      runtime_state: "idle",
+      read_state: "unread",
+    });
+
+    const style = wrapper_style(mountSidebar([settled], null), "task-settling");
+    expect(style).toContain("font-weight: bold");
+    expect(style).toContain("font-style: normal");
+  });
+
+  it("keeps the unread mark on a task parked on a prompt", () => {
+    // `waiting` is a live session, but it is not working, so the mark stays.
+    const wrapper = mountSidebar([
+      item("task-waiting-unread", {
+        display_name: "Parked on a permission prompt",
+        activity: "unread",
+        runtime_state: "waiting",
+        read_state: "unread",
+      }),
+    ], null);
+
+    const style = wrapper
+      .get('[data-task-id="task-waiting-unread"] .item-title')
+      .attributes("style");
+    expect(style).toContain("font-weight: bold");
+    expect(style).toContain("font-style: normal");
+  });
+
+  it("stops drawing a settled task as working while it is unselected", () => {
+    // The opposite report: a task that had parked at its composer but went on
+    // rendering as busy. `activity` was stranded at "working"; the runtime
+    // dimension is what actually settled.
+    const wrapper = mountSidebar([
+      item("task-settled", {
+        display_name: "Parked at its composer",
+        activity: "working",
+        runtime_state: "idle",
+        read_state: "unread",
+      }),
+    ], null);
+
+    const style = wrapper
+      .get('[data-task-id="task-settled"] .item-title')
+      .attributes("style");
+    expect(style).toContain("font-style: normal");
+    expect(style).toContain("font-weight: bold");
+  });
+
+  it("keeps a task working after it is marked read", () => {
+    // Marking read moves the read dimension only. A task still inside a long
+    // tool call must not stop reading as working just because someone looked
+    // at it, and reading it must not be required to see that it is working.
+    const wrapper = mountSidebar([
+      item("task-read-busy", {
+        display_name: "Read but still working",
+        activity: "working",
+        runtime_state: "busy",
+        read_state: "read",
+      }),
+    ], "slot:task-read-busy");
+
+    const style = wrapper
+      .get('[data-task-id="task-read-busy"] .item-title')
+      .attributes("style");
+    expect(style).toContain("font-style: italic");
+    expect(style).toContain("font-weight: normal");
+  });
+
+  it("falls back to blended activity for a remote task that has no dimensions", () => {
+    // The cloud index projects `activity` and nothing else, so a task owned by
+    // another desktop has no runtime or read dimension of its own to read.
+    const wrapper = mountSidebar([
+      item("task-remote", {
+        display_name: "Owned elsewhere",
+        remote_task: true,
+        activity: "working",
+      }),
+    ], null);
+
+    const style = wrapper
+      .get('[data-task-id="task-remote"] .item-title')
+      .attributes("style");
+    expect(style).toContain("font-style: italic");
+    expect(style).toContain("font-weight: normal");
   });
 
   it("places a remotely blocked task in the blocked section with its blocker name", () => {

@@ -648,6 +648,89 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
 }
 
 #[test]
+fn snapshot_carries_the_runtime_and_read_dimensions_separately() {
+    // A reloaded window must be able to tell a task working inside a long tool
+    // call from a finished one it has not read. `activity` blends the two into
+    // one value and cannot answer either alone, so the snapshot that seeds the
+    // sidebar carries both dimensions rather than making the window wait for
+    // the next live change to learn what its tasks are doing.
+    let path = Db::test_db_path("snapshot-runtime-and-read-dimensions");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-busy-unread",
+        "repo-1",
+        "task prompt",
+        Some("Busy and unread"),
+        "in progress",
+        "2026-09-06 01:00:00",
+    )
+    .expect("insert task");
+
+    db.update_pipeline_item_runtime_status("task-busy-unread", "busy", None)
+        .expect("record busy");
+    db.update_pipeline_item_activity("task-busy-unread", "unread")
+        .expect("mark unread");
+
+    let snapshot = db.ui_snapshot().expect("load snapshot");
+    let item = snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-busy-unread")
+        .expect("task in snapshot");
+    assert_eq!(item.activity, "unread");
+    assert_eq!(item.runtime_state.as_deref(), Some("busy"));
+    assert_eq!(item.read_state, "unread");
+
+    // Reading it moves the read dimension only.
+    assert!(db
+        .mark_pipeline_item_read_if_unchanged("task-busy-unread", None)
+        .expect("mark read"));
+    let snapshot = db.ui_snapshot().expect("reload snapshot");
+    let item = snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-busy-unread")
+        .expect("task in snapshot");
+    assert_eq!(item.read_state, "read");
+    assert_eq!(
+        item.runtime_state.as_deref(),
+        Some("busy"),
+        "reading a task changes nothing about whether its agent is running"
+    );
+}
+
+#[test]
+fn snapshot_reports_no_runtime_dimension_before_a_session_reports_one() {
+    let path = Db::test_db_path("snapshot-runtime-dimension-unobserved");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-fresh",
+        "repo-1",
+        "task prompt",
+        Some("Fresh"),
+        "in progress",
+        "2026-09-06 01:00:00",
+    )
+    .expect("insert task");
+
+    let snapshot = db.ui_snapshot().expect("load snapshot");
+    let item = snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-fresh")
+        .expect("task in snapshot");
+    assert_eq!(
+        item.runtime_state, None,
+        "an unobserved task has no runtime dimension to report"
+    );
+    assert_eq!(item.read_state, "read");
+}
+
+#[test]
 fn snapshot_reports_the_latest_stage_run_provider_for_terminal_rendering() {
     let path = Db::test_db_path("snapshot-active-stage-provider");
     let db = Db::open_for_tests(&path).expect("open test db");

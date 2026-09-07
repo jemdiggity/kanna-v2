@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -21,12 +22,58 @@ interface TaskDimensions {
   readState?: string | null;
 }
 
+/**
+ * A loopback request made as the local process this harness actually is.
+ *
+ * `kanna-server` classifies any request carrying `Origin` or a `Sec-Fetch-*`
+ * header as browser-originated and requires the desktop's local control
+ * credential for it (`crates/kanna-server/src/http_api/lan_trust.rs`). Node's
+ * global `fetch` attaches `Sec-Fetch-*` to every request, so it is refused with
+ * 403 even though this harness is an ordinary local process already holding the
+ * user's authority. `node:http` sends only the headers it is given, which is
+ * what this request is.
+ */
+function localProcessRequest(
+  url: string,
+  options: { method?: string; body?: string } = {},
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const headers: Record<string, string | number> = {};
+    if (options.body !== undefined) {
+      headers["content-type"] = "application/json";
+      headers["content-length"] = Buffer.byteLength(options.body);
+    }
+    const req = httpRequest(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        method: options.method ?? "GET",
+        headers,
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+      },
+    );
+    req.on("error", reject);
+    if (options.body !== undefined) req.write(options.body);
+    req.end();
+  });
+}
+
 async function fetchTaskDetail(baseUrl: string, taskId: string): Promise<TaskDimensions> {
-  const response = await fetch(`${baseUrl}/v1/tasks/${taskId}`);
-  if (!response.ok) {
+  const response = await localProcessRequest(`${baseUrl}/v1/tasks/${taskId}`);
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`GET /v1/tasks/${taskId} failed with ${response.status}`);
   }
-  return await response.json() as TaskDimensions;
+  return JSON.parse(response.body) as TaskDimensions;
 }
 
 async function postRuntimeStatus(
@@ -34,12 +81,11 @@ async function postRuntimeStatus(
   taskId: string,
   status: "busy" | "idle",
 ): Promise<void> {
-  const response = await fetch(`${baseUrl}/v1/tasks/${taskId}/actions/runtime-status`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ status, selected: false }),
-  });
-  if (!response.ok) {
+  const response = await localProcessRequest(
+    `${baseUrl}/v1/tasks/${taskId}/actions/runtime-status`,
+    { method: "POST", body: JSON.stringify({ status, selected: false }) },
+  );
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`runtime-status ${status} failed with ${response.status}`);
   }
 }
@@ -115,14 +161,32 @@ async function waitForActivity(
   );
 }
 
-async function waitForUnselectedSidebarActivity(
+/**
+ * What the sidebar draws for a task, as the two independent dimensions rather
+ * than the blended `activity`.
+ *
+ * `working` is the runtime dimension (italic) and `unreadMark` the read one
+ * (bold). They are separate inputs because a task can be both at once — an
+ * agent inside a long tool call whose latest output nobody has read — and
+ * because working outranks unread in the styling, so the mark is suppressed
+ * while a turn is in flight and returns when it settles. Encoding
+ * `activity === "unread" -> bold` here, as this helper used to, asserts the
+ * pre-change contract and passes only while the runtime dimension happens to
+ * have settled first.
+ */
+interface SidebarEmphasis {
+  working: boolean;
+  unreadMark: boolean;
+}
+
+async function waitForUnselectedSidebarEmphasis(
   client: WebDriverClient,
   taskId: string,
-  activity: "working" | "unread",
+  expected: SidebarEmphasis,
   timeoutMs = 10_000,
 ): Promise<void> {
-  const expectedFontStyle = activity === "working" ? "italic" : "normal";
-  const expectedFontWeight = activity === "unread" ? "bold" : "normal";
+  const expectedFontStyle = expected.working ? "italic" : "normal";
+  const expectedFontWeight = expected.unreadMark ? "bold" : "normal";
   const deadline = Date.now() + timeoutMs;
   let latest: unknown = null;
   while (Date.now() < deadline) {
@@ -152,7 +216,8 @@ async function waitForUnselectedSidebarActivity(
     await sleep(100);
   }
   throw new Error(
-    `timed out waiting for unselected sidebar ${taskId} activity=${activity}; latest=${JSON.stringify(latest)}`,
+    `timed out waiting for unselected sidebar ${taskId} emphasis=${JSON.stringify(expected)}; `
+      + `latest=${JSON.stringify(latest)}`,
   );
 }
 
@@ -228,7 +293,10 @@ describe("PTY runtime status over KSP", () => {
     await client.deleteSession();
   });
 
-  async function createFalseAgentTask(prompt: string): Promise<string> {
+  async function createFalseAgentTask(
+    prompt: string,
+    phaseDelaySeconds = 2,
+  ): Promise<string> {
     const sessionId = `pty-status-${randomUUID()}`;
     sessionIds.push(sessionId);
     await execDb(
@@ -246,7 +314,7 @@ describe("PTY runtime status over KSP", () => {
       args: [],
       env: {
         TERM: "xterm-256color",
-        KANNA_FALSE_AGENT_PHASE_DELAY_SECONDS: "2",
+        KANNA_FALSE_AGENT_PHASE_DELAY_SECONDS: String(phaseDelaySeconds),
       },
       cols: 80,
       rows: 24,
@@ -296,9 +364,15 @@ describe("PTY runtime status over KSP", () => {
 
     await waitForDaemonStatus(client, unselectedTaskId, "busy");
     await waitForActivity(client, unselectedTaskId, "working");
-    await waitForUnselectedSidebarActivity(client, unselectedTaskId, "working");
+    await waitForUnselectedSidebarEmphasis(client, unselectedTaskId, {
+      working: true,
+      unreadMark: false,
+    });
     await waitForActivity(client, unselectedTaskId, "unread");
-    await waitForUnselectedSidebarActivity(client, unselectedTaskId, "unread");
+    await waitForUnselectedSidebarEmphasis(client, unselectedTaskId, {
+      working: false,
+      unreadMark: true,
+    });
     await waitForDaemonStatus(client, unselectedTaskId, "idle");
 
     // The task began and finished before its terminal ever mounted. Its first
@@ -358,6 +432,145 @@ describe("PTY runtime status over KSP", () => {
     const waited = JSON.parse(stdout) as { waitOutcome?: string };
     expect(waited.waitOutcome).toBe("timeout");
   }, 60_000);
+
+  // The reported defect at the surface the owner actually looks at: an
+  // unselected sidebar row, drawn from the two dimensions, with nothing
+  // clicked and no terminal ever attached. `activity` alone cannot express
+  // this task — busy with unread output reads `unread`, identically to a
+  // finished one — so the row is asserted against the server's own
+  // `runtimeState`/`readState` rather than against a helper's inputs.
+  async function parkSelectionElsewhere(label: string): Promise<string> {
+    const holderTaskId = `selection-holder-${randomUUID()}`;
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+        (id, repo_id, prompt, stage, branch, agent_type, agent_provider, activity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [holderTaskId, repoId, label, "in progress", holderTaskId, "agent", "codex", "idle"],
+    );
+    await waitForTaskCreated(client, label);
+    await callVueMethod(client, "loadItems", repoId);
+    await selectTaskAndWait(client, holderTaskId);
+    return holderTaskId;
+  }
+
+  async function readSidebarRow(taskId: string): Promise<{
+    selected: boolean;
+    fontStyle: string;
+    fontWeight: string;
+  } | null> {
+    return await client.executeSync<{
+      selected: boolean;
+      fontStyle: string;
+      fontWeight: string;
+    } | null>(`
+      const row = document.querySelector(
+        '.workflow-item[data-task-id=' + ${JSON.stringify(JSON.stringify(taskId))} + ']'
+      );
+      const title = row?.querySelector('.item-title');
+      return row && title ? {
+        selected: row.classList.contains('selected'),
+        fontStyle: title.style.fontStyle,
+        fontWeight: title.style.fontWeight,
+      } : null;
+    `);
+  }
+
+  it("draws an unselected busy row as working while unread, and restores the mark when it settles", async () => {
+    const baseUrl = (await resolveAppKannaServer(client)).baseUrl;
+    await parkSelectionElsewhere("Selection holder for busy unread row");
+
+    const taskId = await createFalseAgentTask("Unselected busy row with unread output", 8);
+    await callVueMethod(client, "loadItems", repoId);
+    await startFalseAgent(client, taskId);
+    await waitForDaemonStatus(client, taskId, "busy");
+    await waitForRuntimeState(baseUrl, taskId, "busy");
+
+    // The same write the existing wait test uses: several server paths flag
+    // output unread without consulting the runtime dimension.
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET activity = 'unread' WHERE id = ?",
+      [taskId],
+    );
+    await callVueMethod(client, "loadItems", repoId);
+
+    // (a) Busy and unread at once, on a row nobody selected or attached.
+    const busyDetail = await fetchTaskDetail(baseUrl, taskId);
+    expect(busyDetail.runtimeState).toBe("busy");
+    expect(busyDetail.readState).toBe("unread");
+    await waitForUnselectedSidebarEmphasis(client, taskId, {
+      working: true,
+      unreadMark: false,
+    });
+    expect(await client.executeSync<boolean>(
+      `return window.__KANNA_E2E__?.terminalBuffers?.sessionIds?.()
+        .includes(${JSON.stringify(taskId)}) ?? false;`,
+    )).toBe(false);
+    expect((await readSidebarRow(taskId))?.selected).toBe(false);
+
+    // (b) The read dimension survived the whole busy phase: once the agent
+    // settles the mark comes back, with no click and no attach.
+    await waitForDaemonStatus(client, taskId, "idle", 30_000);
+    await waitForRuntimeState(baseUrl, taskId, "idle");
+    const settledDetail = await fetchTaskDetail(baseUrl, taskId);
+    expect(settledDetail.runtimeState).toBe("idle");
+    expect(settledDetail.readState).toBe("unread");
+    await waitForUnselectedSidebarEmphasis(client, taskId, {
+      working: false,
+      unreadMark: true,
+    });
+    expect((await readSidebarRow(taskId))?.selected).toBe(false);
+  }, 90_000);
+
+  it("renders an unselected row from the runtime dimension after a cold snapshot reload", async () => {
+    const baseUrl = (await resolveAppKannaServer(client)).baseUrl;
+    await parkSelectionElsewhere("Selection holder for cold snapshot row");
+
+    // Long enough that the agent is still working on the far side of a full
+    // WebView reload, which is the point: the row must come back correct from
+    // `/v1/snapshot` alone, without waiting for the next live change.
+    const taskId = await createFalseAgentTask("Cold snapshot busy row", 45);
+    await callVueMethod(client, "loadItems", repoId);
+    await startFalseAgent(client, taskId);
+    await waitForDaemonStatus(client, taskId, "busy");
+    await waitForRuntimeState(baseUrl, taskId, "busy");
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET activity = 'unread' WHERE id = ?",
+      [taskId],
+    );
+
+    await client.executeSync("window.__KANNA_E2E__?.resetStreamClient?.();");
+    await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+    await callVueMethod(client, "loadItems", repoId);
+
+    const detail = await fetchTaskDetail(baseUrl, taskId);
+    expect(detail.runtimeState).toBe("busy");
+    expect(detail.readState).toBe("unread");
+
+    // Straight off the cold snapshot the store carries both dimensions, so the
+    // row draws working even though the blended `activity` says `unread` and
+    // would have drawn it as a finished task nobody had read.
+    const items = await getVueState(client, "items") as Array<{
+      id?: string;
+      activity?: string;
+      runtime_state?: string | null;
+      read_state?: string | null;
+    }> | null;
+    const item = items?.find((entry) => entry.id === taskId);
+    expect(item?.activity).toBe("unread");
+    expect(item?.runtime_state).toBe("busy");
+    expect(item?.read_state).toBe("unread");
+
+    await waitForUnselectedSidebarEmphasis(client, taskId, {
+      working: true,
+      unreadMark: false,
+    });
+    expect((await readSidebarRow(taskId))?.selected).toBe(false);
+  }, 90_000);
 
   it("applies a burst of task status changes without snapshot fetches or sidebar replacement", async () => {
     const baseUrl = (await resolveAppKannaServer(client)).baseUrl;
@@ -482,7 +695,12 @@ describe("PTY runtime status over KSP", () => {
         await postRuntimeStatus(baseUrl, burstTaskId, index % 2 === 0 ? "busy" : "idle");
       }
       await waitForActivity(client, burstTaskId, "unread");
-      await waitForUnselectedSidebarActivity(client, burstTaskId, "unread");
+      // The burst ends on `idle`, so the runtime dimension has settled and the
+      // read dimension draws the mark.
+      await waitForUnselectedSidebarEmphasis(client, burstTaskId, {
+        working: false,
+        unreadMark: true,
+      });
       await sleep(250);
 
       const measurement = await client.executeSync<{
