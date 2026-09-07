@@ -1,5 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use kanna_daemon::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
+use kanna_daemon::detection::Classifier;
 use kanna_daemon::headless_terminal::{initial_session_status, HeadlessTerminal};
 use kanna_daemon::protocol::{AgentProvider, SessionStatus};
 use kanna_daemon::session::{replay_headless_terminal_for_benchmark, BenchmarkStatusState};
@@ -35,12 +36,13 @@ fn replay_case(provider: BenchmarkProvider, mode: BenchmarkMode, sessions: usize
     let transcript = TranscriptSpec::new(provider, mode).build();
     let provider = agent_provider(provider);
     let mut state = new_replay_state(provider, sessions);
+    let mut classifier = Classifier::new(Some(provider));
 
     for chunk in &transcript.chunks {
         for index in 0..sessions {
             let changed = replay_headless_terminal_for_benchmark(
                 &mut state.headless_terminals[index],
-                Some(provider),
+                &mut classifier,
                 &mut state.statuses[index],
                 state.started_at,
                 chunk.at_ms,

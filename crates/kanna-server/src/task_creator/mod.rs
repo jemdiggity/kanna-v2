@@ -1474,6 +1474,7 @@ fn prepare_workspace_teardown_with_extra(
         cwd: worktree_path,
         env: spawn_env,
         session: PreparedSessionSpawn::Pty {
+            agent_executable: None,
             executable: "/bin/zsh".to_string(),
             args: vec![
                 "--login".to_string(),
@@ -1678,6 +1679,7 @@ fn build_prepared_session(
                     cols: 80,
                     rows: 24,
                     agent_provider: provider,
+                    agent_executable: Some(executable.clone()),
                 },
                 provider_session_id,
             )

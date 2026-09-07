@@ -6,6 +6,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::detection::{Classifier, CliVersion};
 use crate::draft_bytes::draft_content_byte_count;
 #[cfg(test)]
 use crate::headless_terminal::ComposerState;
@@ -209,6 +210,12 @@ pub struct SessionRecord {
     pub headless_terminal: HeadlessTerminal,
     pub stream_control: Option<StreamControl>,
     pub agent_provider: Option<AgentProvider>,
+    /// The provider CLI release this session is running, when a probe has
+    /// answered. `None` is a first-class answer, not a gap to be filled in
+    /// later with a guess: it selects every rule measured for the provider,
+    /// which is what an unversioned session classified from before rule
+    /// selection existed.
+    pub cli_version: Option<CliVersion>,
     pub status: SessionStatus,
     pub status_observed: bool,
     pub last_status_check_at: Option<Instant>,
@@ -226,6 +233,10 @@ pub struct SessionRecord {
 
 pub struct SessionRuntimeState {
     pub headless_terminal: HeadlessTerminal,
+    /// This session's view of the detection rules: its provider, its CLI
+    /// version, and the rule set those resolve to. Re-resolves itself when a
+    /// hot-reloaded rule file changes.
+    pub classifier: Classifier,
     /// The composer line and verdict already published to subscribers, so the
     /// status loop can emit on the edge instead of on every tick.
     published_composer: Option<(Option<String>, ComposerAttestation)>,
@@ -728,6 +739,7 @@ impl SessionHandle {
             teardown_claimed: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(SessionRuntimeState {
                 headless_terminal: record.headless_terminal,
+                classifier: Classifier::with_version(record.agent_provider, record.cli_version),
                 published_composer: None,
                 stream_control: record.stream_control,
                 agent_provider: record.agent_provider,
@@ -1042,8 +1054,12 @@ impl SessionHandle {
         let mirrored_chunks_before_read = self.mirrored_chunks.load(Ordering::SeqCst);
         let composer = {
             let mut state = self.state.lock().await;
-            let provider = state.agent_provider;
-            state.headless_terminal.composer_state(provider)?
+            let SessionRuntimeState {
+                headless_terminal,
+                classifier,
+                ..
+            } = &mut *state;
+            headless_terminal.composer_state(classifier)?
         };
         if !composer.proves_nothing_typed() {
             return Ok(false);
@@ -1300,8 +1316,12 @@ impl SessionHandle {
         &self,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
-        let provider = state.agent_provider;
-        let Some(row) = state.headless_terminal.plain_composer_row(provider)? else {
+        let SessionRuntimeState {
+            headless_terminal,
+            classifier,
+            ..
+        } = &mut *state;
+        let Some(row) = headless_terminal.plain_composer_row(classifier)? else {
             return Ok(None);
         };
         // A faint line is the provider's own suggestion, not a draft; nothing
@@ -1340,18 +1360,25 @@ impl SessionHandle {
         }
         let composer = {
             let mut state = self.state.lock().await;
-            let provider = state.agent_provider;
-            state.headless_terminal.composer_state(provider)?
+            let SessionRuntimeState {
+                headless_terminal,
+                classifier,
+                ..
+            } = &mut *state;
+            headless_terminal.composer_state(classifier)?
         };
         if composer.proves_nothing_typed() {
             return Ok(true);
         }
         let still_drafted = {
             let mut state = self.state.lock().await;
-            let provider = state.agent_provider;
-            state
-                .headless_terminal
-                .plain_composer_row(provider)?
+            let SessionRuntimeState {
+                headless_terminal,
+                classifier,
+                ..
+            } = &mut *state;
+            headless_terminal
+                .plain_composer_row(classifier)?
                 .is_some_and(|row| row.text == draft)
         };
         if still_drafted {
@@ -1612,9 +1639,20 @@ impl SessionHandle {
     ) -> Result<StatusObservation, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
         let agent_provider = state.agent_provider;
+        let cli_version = state.classifier.version().map(ToString::to_string);
+        let verdict = {
+            let SessionRuntimeState {
+                headless_terminal,
+                classifier,
+                ..
+            } = &mut *state;
+            headless_terminal.visible_verdict(classifier)?
+        };
         Ok(StatusObservation {
             provider: agent_provider,
-            detected_status: state.headless_terminal.visible_status(agent_provider)?,
+            cli_version,
+            detected_status: verdict.as_ref().map(|verdict| verdict.status),
+            matched_rule: verdict.map(|verdict| verdict.rule_id),
             lines: state.headless_terminal.debug_lines(8)?,
         })
     }
@@ -1644,8 +1682,12 @@ impl SessionHandle {
         &self,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
-        let provider = state.agent_provider;
-        state.headless_terminal.waiting_prompt_snippet(provider)
+        let SessionRuntimeState {
+            headless_terminal,
+            classifier,
+            ..
+        } = &mut *state;
+        headless_terminal.waiting_prompt_snippet(classifier)
     }
 
     pub async fn status(&self) -> SessionStatus {
@@ -1654,6 +1696,26 @@ impl SessionHandle {
 
     pub async fn agent_provider(&self) -> Option<AgentProvider> {
         self.state.lock().await.agent_provider
+    }
+
+    /// Record what the CLI version probe answered.
+    ///
+    /// Arrives after the session is already classifying, and deliberately so:
+    /// blocking a spawn on a subprocess would trade a detection improvement
+    /// for a startup regression. Until it lands the session uses every rule
+    /// measured for its provider.
+    pub async fn set_cli_version(&self, version: Option<CliVersion>) {
+        let mut state = self.state.lock().await;
+        let provider = state.agent_provider;
+        if state.classifier.set_version(version.clone()) {
+            log::info!(
+                "[detection] session provider={:?} is running CLI version {}",
+                provider,
+                version
+                    .map(|version| version.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+        }
     }
 
     pub async fn snapshot(
@@ -1827,8 +1889,12 @@ impl SessionHandle {
     /// frame draws a readable one.
     async fn composer_line(&self) -> Option<String> {
         let mut state = self.state.lock().await;
-        let provider = state.agent_provider;
-        match state.headless_terminal.composer_line(provider) {
+        let SessionRuntimeState {
+            headless_terminal,
+            classifier,
+            ..
+        } = &mut *state;
+        match headless_terminal.composer_line(classifier) {
             Ok(text) => text,
             Err(error) => {
                 log::warn!("[composer] failed to read composer line: {error}");
@@ -1844,8 +1910,12 @@ impl SessionHandle {
         &self,
     ) -> Result<ComposerState, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
-        let provider = state.agent_provider;
-        state.headless_terminal.composer_state(provider)
+        let SessionRuntimeState {
+            headless_terminal,
+            classifier,
+            ..
+        } = &mut *state;
+        headless_terminal.composer_state(classifier)
     }
 
     /// The composer change this session has not published yet, if any.
@@ -1857,8 +1927,15 @@ impl SessionHandle {
     pub async fn take_composer_transition(&self) -> Option<(Option<String>, ComposerAttestation)> {
         let attestation = self.composer_attestation();
         let mut state = self.state.lock().await;
-        let provider = state.agent_provider;
-        let text = match state.headless_terminal.composer_line(provider) {
+        let text = {
+            let SessionRuntimeState {
+                headless_terminal,
+                classifier,
+                ..
+            } = &mut *state;
+            headless_terminal.composer_line(classifier)
+        };
+        let text = match text {
             Ok(text) => text,
             Err(error) => {
                 log::warn!("[composer] failed to read composer line: {error}");
@@ -1913,6 +1990,7 @@ impl SessionHandle {
             cols,
             snapshot,
             agent_provider: state.agent_provider,
+            cli_version: state.classifier.version().cloned(),
             status: state.status,
             operator_input_only: state.operator_input_only,
             input_policy_classified: state.input_policy_classified,
@@ -1939,6 +2017,7 @@ pub struct SessionHandoffParts {
     pub cols: u16,
     pub snapshot: Option<crate::protocol::TerminalSnapshot>,
     pub agent_provider: Option<AgentProvider>,
+    pub cli_version: Option<CliVersion>,
     pub status: SessionStatus,
     pub operator_input_only: bool,
     pub input_policy_classified: bool,
@@ -1974,7 +2053,13 @@ impl Default for SessionManager {
 
 pub struct StatusObservation {
     pub provider: Option<AgentProvider>,
+    /// The CLI release the rules were selected for, when a probe has answered.
+    pub cli_version: Option<String>,
     pub detected_status: Option<SessionStatus>,
+    /// Which rule produced `detected_status`. A frame that lands on the right
+    /// status through the wrong rule means selection has drifted, and only the
+    /// rule id can say so.
+    pub matched_rule: Option<String>,
     pub lines: Vec<String>,
 }
 
@@ -2264,6 +2349,7 @@ pub mod test_support {
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
             stream_control: Some(stream_control.clone()),
             agent_provider: None,
+            cli_version: None,
             status: SessionStatus::Idle,
             status_observed: false,
             last_status_check_at: None,
@@ -2292,6 +2378,7 @@ pub mod test_support {
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
             stream_control: None,
             agent_provider: None,
+            cli_version: None,
             status: SessionStatus::Idle,
             status_observed: false,
             last_status_check_at: None,
@@ -2336,7 +2423,7 @@ struct StatusDetectionOptions {
 
 fn detect_headless_terminal_status_if_due(
     headless_terminal: &mut HeadlessTerminal,
-    agent_provider: Option<AgentProvider>,
+    classifier: &mut Classifier,
     status: SessionStatus,
     status_observed: &mut bool,
     last_status_check_at: &mut Option<Instant>,
@@ -2355,7 +2442,7 @@ fn detect_headless_terminal_status_if_due(
         return Ok(None);
     }
 
-    let visible_status = headless_terminal.visible_status(agent_provider)?;
+    let visible_status = headless_terminal.visible_status(classifier)?;
     if let Some(next_status) = visible_status {
         // For a provider without atomic repaint frames, a partial redraw can
         // expose its parked composer between two busy frames. Positive
@@ -2392,7 +2479,7 @@ fn detect_headless_terminal_status_if_due(
 #[allow(dead_code)]
 pub fn replay_headless_terminal_for_benchmark(
     headless_terminal: &mut HeadlessTerminal,
-    agent_provider: Option<AgentProvider>,
+    classifier: &mut Classifier,
     state: &mut BenchmarkStatusState,
     benchmark_started_at: Instant,
     chunk_at_ms: u64,
@@ -2407,14 +2494,14 @@ pub fn replay_headless_terminal_for_benchmark(
 
     detect_headless_terminal_status_if_due(
         headless_terminal,
-        agent_provider,
+        classifier,
         state.status,
         &mut state.status_observed,
         &mut state.last_status_check_at,
         StatusDetectionOptions {
             now,
             throttle: status_detection_throttle(),
-            allow_idle: allows_output_triggered_idle(agent_provider),
+            allow_idle: allows_output_triggered_idle(classifier.provider()),
         },
     )
 }
@@ -2427,7 +2514,7 @@ fn detect_runtime_status_if_due(
 ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
     detect_headless_terminal_status_if_due(
         &mut state.headless_terminal,
-        state.agent_provider,
+        &mut state.classifier,
         state.status,
         &mut state.status_observed,
         &mut state.last_status_check_at,
@@ -2452,6 +2539,7 @@ mod tests {
         StreamControl, WriteOutcome,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
+    use crate::detection::Classifier;
     use crate::headless_terminal::{initial_session_status, ComposerState, HeadlessTerminal};
     use crate::protocol::{AgentProvider, SessionStatus};
     use crate::pty::PtySession;
@@ -2474,6 +2562,7 @@ mod tests {
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
             stream_control: None,
             agent_provider: Some(provider),
+            cli_version: None,
             status,
             status_observed: false,
             last_status_check_at: None,
@@ -4273,7 +4362,7 @@ mod tests {
         for chunk in &transcript.chunks {
             let changed = replay_headless_terminal_for_benchmark(
                 &mut headless_terminal,
-                Some(AgentProvider::Codex),
+                &mut Classifier::new(Some(AgentProvider::Codex)),
                 &mut state,
                 started_at,
                 chunk.at_ms,

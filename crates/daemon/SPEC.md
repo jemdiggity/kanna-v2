@@ -109,6 +109,33 @@ list and prefers that positive verdict to the status copied beside the
 snapshot. An inherited conservative `Busy` therefore cannot override a frame
 that already proves the provider is parked.
 
+### Detection rules
+
+**The patterns are data, and they are selected by the CLI version the session
+is running.** The chrome each provider draws lives in
+`src/detection/rules.json` — bundled into the daemon, deep-merged with a
+machine-local `detection-rules.json` in the daemon data directory, and
+hot-reloaded into live sessions — not as constants in the binary. Every rule
+and vocabulary entry carries a version range, so the patterns for an old CLI
+and a new one coexist instead of one overwriting the other. A verdict names
+the rule that produced it.
+
+A PTY task's `Spawn` names the login shell that runs repo setup, so the daemon
+cannot find the agent CLI by inspecting its own child; the server sends the
+path it resolved as `Spawn.agent_executable`, and the daemon probes it off the
+spawn path. **An unknown version applies every rule measured for the provider**
+— before the probe answers, when it fails, and for a session inherited from a
+daemon too old to send one — which is exactly what an unversioned session
+classified from before rule selection existed. The version travels across
+handoff as `HandoffSession.cli_version`.
+
+The rendered grid stays authoritative. Terminal titles (OSC 0/2) and progress
+reports (OSC 9) are addressable rule channels, evaluated only when no grid rule
+matched — the case that latches a stale status — never to overrule a frame that
+already proved something. Waiting is decided from the grid alone.
+
+Design, rule schema and migration: `docs/specs/agent-status-detection-rules.md`.
+
 ## Reconnection
 
 The daemon does **not** buffer raw scrollback. Reconnection uses the headless terminal snapshot:
@@ -488,12 +515,23 @@ measured (`crates/daemon/tests/fixtures/claude/faint-suggestion-composer.ansi`,
 captured off the reported session); no other provider matches, on this file's
 standing rule that unmeasured chrome matches nothing.
 
-The `❯` line also has to be *findable*, and it was not. Claude right-aligns a
-lone `/rc` release-channel token under its composer rule; unclassified, it made
-every live Claude session fail the "nothing but provider chrome below the
+The `❯` line also has to be *findable*, and it was not. Claude's status bar
+carries rows nobody enumerated — a `/rc` release-channel token, an effort
+badge, an update badge, a login-expiry notice; unclassified, any one of them
+made every live Claude session fail the "nothing but provider chrome below the
 composer" test, so `composer_state` answered `Unknown` for all of them and
-attestation could not fire at all. A lone slash token below the composer is now
-classified as the chrome it is.
+attestation could not fire at all. Nothing enumerates them now either. The
+composer box closes with a divider and only the status bar is drawn beneath it,
+so everything past that border reads as chrome by construction — the same
+reading the parked-composer rule already uses, and for the same reason.
+
+Which providers get that reading is data, not a branch: the truncation runs off
+the provider's own divider glyphs in `src/detection/rules.json`, and only a
+provider whose box has actually been measured declares any. Everyone else
+resolves an empty set and is read exactly as before. The *styling* half stays
+out of the rule file on purpose — the matcher language describes what chrome
+reads as, and a cell being painted faint is not text — so the cells are read
+where the grid is rendered.
 
 The daemon runs attestation on each session's own status tick — an inherited
 session nobody types into produces no output at all, so nothing else would ever

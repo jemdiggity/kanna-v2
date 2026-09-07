@@ -53,6 +53,7 @@ async fn merge_pty_spawns_with_ordinary_input_policy() {
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Pty {
+            agent_executable: None,
             executable: "/bin/cat".to_string(),
             args: Vec::new(),
             cols: 80,
@@ -128,6 +129,7 @@ async fn protected_pty_negotiation_disconnect_is_recorded_before_acknowledgement
         provider_session_id: None,
         recovery_snapshot: None,
         session: PreparedSessionSpawn::Pty {
+            agent_executable: None,
             executable: "/bin/cat".to_string(),
             args: Vec::new(),
             cols: 80,

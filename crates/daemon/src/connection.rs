@@ -523,6 +523,7 @@ pub(crate) async fn handle_command(
             cols,
             rows,
             agent_provider,
+            agent_executable,
             terminal_prelude,
             operator_input_only,
         } => {
@@ -654,6 +655,11 @@ pub(crate) async fn handle_command(
                         headless_terminal,
                         stream_control: Some(stream_control.clone()),
                         agent_provider,
+                        // Unknown until the probe answers, which is a
+                        // first-class answer: it applies every rule measured
+                        // for the provider, so classification is never worse
+                        // than it was before rule selection existed.
+                        cli_version: None,
                         status: headless_terminal::initial_session_status(agent_provider),
                         status_observed: false,
                         last_status_check_at: None,
@@ -702,6 +708,32 @@ pub(crate) async fn handle_command(
                         return;
                     }
                     drop(mgr);
+
+                    // Ask the provider CLI which version it is, off the spawn
+                    // path. The session is already classifying by now, from
+                    // every rule measured for its provider; the probe narrows
+                    // that to the rules measured for the release actually
+                    // installed. Blocking the spawn on a subprocess would
+                    // trade a detection improvement for a startup regression,
+                    // and a probe that never answers must cost nothing.
+                    if let (Some(provider), Some(agent_executable)) =
+                        (agent_provider, agent_executable)
+                    {
+                        let probe_handle = Arc::clone(&handle);
+                        let probe_env = env.clone();
+                        let probe_cwd = cwd.clone();
+                        tokio::spawn(async move {
+                            let args = crate::detection::current_rules().0.probe_args(provider);
+                            let version = crate::detection::probe::probe(
+                                &agent_executable,
+                                &args,
+                                &probe_cwd,
+                                &probe_env,
+                            )
+                            .await;
+                            probe_handle.set_cli_version(version).await;
+                        });
+                    }
 
                     let (recovery_cols, recovery_rows) = seeded_snapshot
                         .as_ref()

@@ -4802,6 +4802,91 @@ fn resolve_requested_initial_terminal_geometry_requires_complete_positive_pair()
     );
 }
 
+/// A PTY task's `Spawn` names the login shell, not the agent CLI: the agent is
+/// launched from inside a shell command line so repo setup runs first. The
+/// daemon therefore cannot find the CLI by inspecting its own child, and probes
+/// the path resolved here for the version its detection rules are selected by.
+///
+/// Asserting that the path is also *in* the command line is the point: a path
+/// that names a different binary than the session runs would have the daemon
+/// select rules for a version nothing is drawing.
+#[test]
+fn a_pty_task_spawn_names_the_agent_cli_the_daemon_probes_for_its_version() {
+    let repo_root = init_git_repo("pty-spawn-agent-executable");
+    let config = test_config("pty-spawn-agent-executable");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            prompt: "Name the agent executable".to_string(),
+            ..default_base_task_request()
+        },
+    )
+    .unwrap();
+
+    match prepared.session {
+        PreparedSessionSpawn::Pty {
+            agent_executable,
+            args,
+            ..
+        } => {
+            let agent_executable =
+                agent_executable.expect("a PTY agent spawn must name the CLI it runs");
+            assert!(
+                std::path::Path::new(&agent_executable).is_absolute(),
+                "the daemon probes this path from another process: {agent_executable}"
+            );
+            assert!(
+                args.join(" ").contains(&agent_executable),
+                "the probed path must be the binary the session actually runs: \
+                 {agent_executable}"
+            );
+        }
+        PreparedSessionSpawn::Agent { .. } => panic!("a pty request must prepare a PTY"),
+    }
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+/// A workspace teardown shell runs no agent, so it names none. The daemon then
+/// probes nothing and classifies the session as the plain shell it is.
+#[test]
+fn a_teardown_spawn_names_no_agent_cli_to_probe() {
+    let repo_root = init_git_repo("teardown-spawn-no-agent-executable");
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"teardown":["printf TEARDOWN"]}"#,
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish teardown config");
+
+    let config = test_config("teardown-spawn-no-agent-executable");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    let prepared = prepare_task_for_api(&db, &config, default_base_task_request()).unwrap();
+    let task_id = prepared.task_id().to_string();
+
+    let teardown = super::super::prepare_workspace_teardown_for_close(&db, &config, &task_id)
+        .expect("teardown spawn");
+    match teardown.session {
+        PreparedSessionSpawn::Pty {
+            agent_executable, ..
+        } => assert_eq!(agent_executable, None),
+        PreparedSessionSpawn::Agent { .. } => panic!("teardown must use a PTY"),
+    }
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[test]
 fn prepare_task_uses_requested_initial_terminal_geometry() {
     let repo_root = init_git_repo("requested-initial-terminal-geometry");

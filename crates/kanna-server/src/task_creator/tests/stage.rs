@@ -490,6 +490,7 @@ async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
         env: std::collections::HashMap::new(),
         terminal_prelude: None,
         session: PreparedSessionSpawn::Pty {
+            agent_executable: None,
             executable: "/bin/cat".to_string(),
             args: Vec::new(),
             cols: 80,
@@ -3380,6 +3381,7 @@ fn current_stage_spawn_fixture(
         env: HashMap::new(),
         terminal_prelude: None,
         session: PreparedSessionSpawn::Pty {
+            agent_executable: None,
             executable: "/bin/cat".to_string(),
             args: Vec::new(),
             cols: 80,

@@ -1750,8 +1750,11 @@ paint therefore cannot publish a false status or consume the classifier's
 per-session throttle slot. The daemon's periodic settled-frame check is
 independent of output-triggered throttling, so chrome repaints cannot starve
 convergence to an idle composer. Within a complete frame the provider matcher
-is stateless: `claude_status_from_lines` still decides Busy from the literal
-"esc to interrupt" marker without inventing a quiet-time heuristic.
+is stateless: the matching rule still decides Busy from a marker the provider
+drew, without inventing a quiet-time heuristic. Which patterns are matched is
+selected by the CLI version the session is running, from the declarative rule
+set in `crates/daemon/src/detection/rules.json` — see
+`docs/specs/agent-status-detection-rules.md`.
 
 `kanna-mcp` smooths that at the point of consumption, asymmetrically:
 

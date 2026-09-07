@@ -1983,6 +1983,7 @@ fn spawn_session_command(
             cols,
             rows,
             agent_provider,
+            agent_executable,
         } => DaemonCommand::Spawn {
             session_id,
             executable,
@@ -1992,6 +1993,7 @@ fn spawn_session_command(
             cols,
             rows,
             agent_provider: Some(agent_provider),
+            agent_executable,
             terminal_prelude,
             operator_input_only,
         },
@@ -4427,6 +4429,7 @@ mod teardown_deadline_tests {
                 cwd: "/tmp".to_string(),
                 env: std::collections::HashMap::new(),
                 session: PreparedSessionSpawn::Pty {
+                    agent_executable: None,
                     executable: "/bin/sh".to_string(),
                     args: vec![],
                     cols: 80,

@@ -822,6 +822,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Db;
+    use kanna_daemon::detection::Classifier;
     use kanna_daemon::headless_terminal::{initial_session_status, HeadlessTerminal};
     use kanna_daemon::protocol::{
         AgentProvider, Command as DaemonCommand, ComposerAttestation, Event as DaemonEvent,
@@ -2431,6 +2432,7 @@ mod tests {
         let provider = AgentProvider::Codex;
         let mut terminal = HeadlessTerminal::new(220, 48, 10_000).unwrap();
         let mut classifier = BenchmarkStatusState::new(initial_session_status(Some(provider)));
+        let mut detection_rules = Classifier::new(Some(provider));
         // Model the owner-observed session after it has previously published
         // Busy; absence of a busy marker can only settle an observed session.
         classifier.status_observed = true;
@@ -2450,7 +2452,7 @@ mod tests {
             let frame_was_complete = terminal.status_frame_complete();
             let changed = replay_headless_terminal_for_benchmark(
                 &mut terminal,
-                Some(provider),
+                &mut detection_rules,
                 &mut classifier,
                 started_at,
                 u64::try_from(byte_offset).unwrap(),

@@ -205,10 +205,9 @@ async fn handle_mcp_request(
 ///
 /// The daemon classifies each rendered terminal frame on its own — no
 /// hysteresis, no dwell, no memory of the previous frame (see
-/// `claude_status_from_lines` in `crates/daemon/src/headless_terminal.rs`). Busy
-/// hangs off the literal "esc to interrupt" marker being present in that one
-/// frame, so a frame captured mid-redraw can drop it, fall through to the
-/// trailing-prompt test, and classify a mid-turn agent as idle. That verdict
+/// `crates/daemon/src/detection/`). Busy hangs off a marker being present in
+/// that one frame, so a frame captured mid-redraw can drop it, fall through to
+/// the trailing-prompt test, and classify a mid-turn agent as idle. That verdict
 /// reaches this layer as a task whose `activity` flipped to a stopped-looking
 /// value for a single detection window, and an orchestrator polling `activity`
 /// to decide whether an agent stopped acts on it.
