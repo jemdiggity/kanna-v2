@@ -45,6 +45,19 @@ export const MOBILE_RELAY_PTY_HISTORY_FIXTURE = {
   sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL"
 } as const;
 
+export function mobileRelayTerminalGeometryExpectation(
+  fixture: PtyTerminalFixture,
+) {
+  return {
+    cols: fixture.expectedCols,
+    // Serialized VT size changes when the terminal reflows. Keep this as a
+    // bounded-snapshot sanity check; the sentinel proves retained content.
+    minEncodedChars: MOBILE_RELAY_PTY_HISTORY_FIXTURE.minEncodedChars,
+    rows: fixture.expectedRows,
+    sentinel: fixture.sentinel,
+  };
+}
+
 export const MOBILE_RELAY_FILE_PREVIEW_FIXTURE = {
   ambiguousBarePath: "shared.ts",
   ambiguousCanonicalPaths: [
@@ -166,17 +179,6 @@ interface TerminalEventCollector {
     rows: number;
     scrollbackLines: number;
   }>;
-  waitForNewSnapshot(
-    expectation: {
-      minEncodedChars: number;
-      sentinel: string;
-    },
-    timeoutMs?: number,
-  ): Promise<{
-    cols: number;
-    dataB64: string;
-    rows: number;
-  }>;
 }
 
 interface RemoteHarnessModule {
@@ -276,7 +278,7 @@ export interface MobileRelayHarness {
     timeoutMs?: number,
   ): Promise<string>;
   waitForLocalTaskActivity(activity: TaskActivity, timeoutMs?: number): Promise<void>;
-  beginMobileTerminalGeometryObservation(timeoutMs?: number): Promise<void>;
+  waitForMobileTerminalGeometry(timeoutMs?: number): Promise<void>;
 }
 
 export interface RelayTaskOrderingFixture {
@@ -658,24 +660,23 @@ export async function startMobileRelayHarness(
       waitForLocalTaskActivity(activity, timeoutMs) {
         return waitForLocalTaskActivity(harness, localTask, activity, timeoutMs);
       },
-      async beginMobileTerminalGeometryObservation(timeoutMs = 10_000) {
-        const snapshot = await terminalEvents!.waitForNewSnapshot(
-          {
-            minEncodedChars: terminalFixture.minDecodedBytes,
-            sentinel: terminalFixture.sentinel
-          },
-          timeoutMs
+      async waitForMobileTerminalGeometry(timeoutMs = 10_000) {
+        // Resize changes the daemon's authoritative terminal state, but it does
+        // not emit a snapshot to existing attachments. Attach after the detail
+        // mount and inspect that attachment's authoritative initial snapshot.
+        const observer = remote.terminal.collectTerminalEvents(
+          harness,
+          localTask.taskId
         );
-        if (
-          snapshot.cols !== terminalFixture.expectedCols ||
-          snapshot.rows !== terminalFixture.expectedRows
-        ) {
-          throw new Error(
-            `Expected a post-mount daemon PTY resize to ${terminalFixture.expectedCols}x` +
-              `${terminalFixture.expectedRows}, received ${snapshot.cols}x${snapshot.rows}`
+        try {
+          await observer.waitForSnapshot(
+            mobileRelayTerminalGeometryExpectation(terminalFixture),
+            timeoutMs
           );
+        } finally {
+          observer.close();
         }
-      },
+      }
     };
   } catch (error) {
     terminalEvents?.close();

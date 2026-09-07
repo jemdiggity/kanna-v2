@@ -1841,6 +1841,7 @@ impl TerminalControlCommand {
 
 struct TerminalControlHandle {
     session_id: Option<String>,
+    pending_resize: Option<(u16, u16)>,
     tx: mpsc::Sender<TerminalControlCommand>,
     cancel_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -2382,6 +2383,7 @@ impl StreamConn {
         ));
         TerminalControlHandle {
             session_id,
+            pending_resize: None,
             tx,
             cancel_tx,
             task,
@@ -2396,10 +2398,19 @@ impl StreamConn {
         if route_matches {
             return;
         }
+        let pending_resize = self
+            .terminal_controls
+            .get(task_id)
+            .and_then(|control| control.pending_resize);
         if let Some(existing) = self.terminal_controls.remove(task_id) {
             Self::retire_terminal_control(existing).await;
         }
         let control = self.create_terminal_control(task_id.to_string(), Some(session_id));
+        if let Some((cols, rows)) = pending_resize {
+            let _ = control
+                .tx
+                .try_send(TerminalControlCommand::Resize { cols, rows });
+        }
         self.terminal_controls.insert(task_id.to_string(), control);
     }
 
@@ -2408,6 +2419,14 @@ impl StreamConn {
             let session_id = task_id.starts_with("shell-").then(|| task_id.to_string());
             let control = self.create_terminal_control(task_id.clone(), session_id);
             self.terminal_controls.insert(task_id.clone(), control);
+        }
+
+        if let TerminalControlCommand::Resize { cols, rows } = &command {
+            if let Some(control) = self.terminal_controls.get_mut(&task_id) {
+                if control.session_id.is_none() {
+                    control.pending_resize = Some((*cols, *rows));
+                }
+            }
         }
 
         let send_result = self
@@ -10122,6 +10141,73 @@ mod tests {
         assert_eq!(daemon.await.expect("route daemon failed"), 2);
         conn.shutdown().await;
 
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_control_before_attach_survives_route_binding() {
+        let unique = format!(
+            "ksp-terminal-control-before-attach-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(
+            "ksp-terminal-control-before-attach",
+            "KSP Terminal Control Before Attach",
+        );
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 1).await;
+        let state = Arc::new(AppState::new(config));
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
+        let mut conn = StreamConn {
+            state,
+            frame_tx,
+            companion_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            companion_events: None,
+            authed: true,
+            supports_companion_event_epoch: false,
+            supports_term_input_boundary: true,
+            supports_terminal_window: false,
+            supports_agent_history_window: false,
+            terminal_taps: HashMap::new(),
+            agent_histories: HashMap::new(),
+            legacy_companion_tasks_on_connection: HashSet::new(),
+            auth_mode: AuthMode::AllowEmpty,
+            companion_access: true,
+        };
+
+        conn.enqueue_terminal_control(
+            "task-before-attach".into(),
+            TerminalControlCommand::Resize { cols: 80, rows: 48 },
+        );
+        conn.replace_terminal_control_route("task-before-attach", "session-bound-at-attach".into())
+            .await;
+
+        assert_command(
+            tokio::time::timeout(std::time::Duration::from_secs(2), commands.recv())
+                .await
+                .expect("attach-bound worker did not replay resize"),
+            DaemonCommand::ResizeNoReply {
+                session_id: "session-bound-at-attach".into(),
+                cols: 80,
+                rows: 48,
+            },
+        );
+        assert_eq!(daemon.await.expect("resize daemon failed"), 1);
+        conn.shutdown().await;
         let _ = std::fs::remove_dir_all(&daemon_dir);
     }
 
