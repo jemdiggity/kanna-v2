@@ -773,6 +773,20 @@ checks reachable siblings and, when the id exists elsewhere, returns an error
 that names the owning machine and tells MCP callers to repeat
 `kanna_get_task` with that `machine_id`, rather than returning a bare 404.
 
+`GET /v1/machine-stats` (`kanna_machine_stats`) is the read-only capacity
+snapshot for task managers. It returns `machines` with one row for the local
+desktop and each currently reachable sibling: 1/5/15-minute load averages,
+physical CPU core count (logical count as a fallback), memory total, used,
+free, and available bytes, macOS memory pressure when the kernel exposes it,
+counts for `rustc`, `cargo`, Bazel, Vitest, `xcodebuild`, and Node test-runner
+processes, and the number of open tasks whose durable `runtimeState` is
+`busy`. Process and memory inspection uses native system APIs and does not
+spawn shell probes. Sibling requests use `localOnly=true` to prevent recursive
+aggregation. An unreachable, incompatible, or malformed sibling contributes a
+`machineErrors` row instead of failing or silently presenting partial capacity
+as complete. These values are observational; the endpoint performs no
+scheduling or reservation.
+
 Repository singleton signals use that authenticated desktop-routing boundary
 before local creation. A repository row with `remote_url_hash` is identified
 account-wide by that hash plus the singleton agent name; local repository ids

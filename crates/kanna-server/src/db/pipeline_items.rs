@@ -51,6 +51,14 @@ pub(super) fn update_open_pipeline_item_activity(
 }
 
 impl Db {
+    pub fn count_busy_tasks(&self) -> Result<u64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM pipeline_item WHERE closed_at IS NULL AND runtime_status = 'busy'",
+            [],
+            |row| row.get(0),
+        )
+    }
+
     pub fn get_task_state_summary(
         &self,
         id: &str,

@@ -466,6 +466,144 @@ async fn list_desktops_route_returns_configured_desktop() {
 }
 
 #[tokio::test]
+async fn machine_stats_route_returns_sane_local_native_stats() {
+    let app = super::test_router_with_seed("desktop-stats", "Stats Mac", |db| {
+        db.insert_test_repo("repo-stats", "Stats Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "task-busy",
+            "repo-stats",
+            "exercise busy count",
+            Some("Busy task"),
+            "in progress",
+            "2026-09-07 12:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_runtime_status("task-busy", "busy", None)
+            .unwrap();
+    });
+    let response = app
+        .oneshot(
+            Request::get("/v1/machine-stats?localOnly=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let stats: serde_json::Value = from_slice(&body).unwrap();
+    let machine = &stats["machines"][0];
+    assert_eq!(machine["machineId"], "desktop-stats");
+    assert!(machine["cpuCoreCount"].as_u64().unwrap() >= 1);
+    assert!(machine["memory"]["totalBytes"].as_u64().unwrap() > 0);
+    assert!(machine["memory"]["usedBytes"].as_u64().unwrap() > 0);
+    assert!(machine["loadAverages"]["one"].as_f64().unwrap() >= 0.0);
+    assert!(machine["heavyProcesses"]["rustc"].is_number());
+    assert_eq!(machine["busyTaskCount"], 1);
+    assert_eq!(stats["machineErrors"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn machine_stats_route_aggregates_siblings_and_reports_peer_errors() {
+    let state = super::test_state_with_seed("desktop-local", "Local Mac", |_| {});
+    let mut requests = state.take_desktop_relay_requests().unwrap();
+    state.set_desktop_routing_available(true);
+    let responder = tokio::spawn(async move {
+        let super::super::state::DesktopRelayRequest::ListActive { response, .. } =
+            requests.recv().await.expect("active desktop request")
+        else {
+            panic!("expected active desktop request");
+        };
+        response
+            .send(Ok(vec![
+                "desktop-local".to_string(),
+                "desktop-remote".to_string(),
+                "desktop-offline".to_string(),
+            ]))
+            .unwrap();
+
+        let super::super::state::DesktopRelayRequest::Invoke {
+            desktop_id,
+            path,
+            response,
+            ..
+        } = requests.recv().await.expect("remote stats request")
+        else {
+            panic!("expected remote stats request");
+        };
+        assert_eq!(desktop_id, "desktop-remote");
+        assert_eq!(path, "/v1/machine-stats?localOnly=true");
+        response
+            .send(Ok(crate::http_api::HttpInvokeResponse {
+                status: 200,
+                body: Some(serde_json::json!({
+                    "machines": [{
+                        "machineId": "desktop-remote",
+                        "loadAverages": { "one": 1.0, "five": 2.0, "fifteen": 3.0 },
+                        "cpuCoreCount": 8,
+                        "memory": {
+                            "totalBytes": 16000000000_u64,
+                            "usedBytes": 8000000000_u64,
+                            "freeBytes": 2000000000_u64,
+                            "availableBytes": 8000000000_u64
+                        },
+                        "heavyProcessCount": 2,
+                        "heavyProcesses": {
+                            "bazel": 0, "cargo": 1, "nodeTestRunner": 0,
+                            "rustc": 1, "vitest": 0, "xcodebuild": 0
+                        },
+                        "busyTaskCount": 1
+                    }],
+                    "machineErrors": []
+                })),
+                error: None,
+            }))
+            .unwrap();
+
+        let super::super::state::DesktopRelayRequest::Invoke {
+            desktop_id,
+            response,
+            ..
+        } = requests.recv().await.expect("offline stats request")
+        else {
+            panic!("expected offline stats request");
+        };
+        assert_eq!(desktop_id, "desktop-offline");
+        response.send(Err("peer unavailable".to_string())).unwrap();
+    });
+
+    let response = crate::http_api::router(state)
+        .oneshot(
+            Request::get("/v1/machine-stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "aggregate request failed"
+    );
+    responder.await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let stats: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(stats["machines"].as_array().unwrap().len(), 2);
+    assert!(stats["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|machine| machine["machineId"] == "desktop-remote"));
+    assert_eq!(stats["machineErrors"][0]["machineId"], "desktop-offline");
+    assert_eq!(stats["machineErrors"][0]["error"], "peer unavailable");
+}
+
+#[tokio::test]
 async fn cloud_desktop_listing_keeps_local_machine_when_relay_is_unavailable() {
     let state = super::test_state_with_seed("desktop-local-only", "Local Mac", |_| {});
     state.set_desktop_routing_unavailable(

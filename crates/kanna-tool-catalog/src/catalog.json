@@ -29,6 +29,14 @@
       ]
     },
     {
+      "name": "kanna_machine_stats",
+      "description": "Report current resource state for this machine and every reachable sibling machine: 1/5/15-minute load averages, CPU core count, memory used/free/available and macOS pressure when exposed, heavy build/test process counts (rustc, cargo, bazel, vitest, xcodebuild, and Node test runners), and open tasks whose runtimeState is busy. Results are observational and do not reserve capacity. Unreachable or incompatible peers appear in machineErrors and must be treated as unknown capacity.",
+      "method": "GET",
+      "path": "/v1/machine-stats",
+      "response": "json",
+      "params": []
+    },
+    {
       "name": "kanna_list_transfer_peers",
       "description": "List the machines this Kanna machine can move a task to or from. The list is resolved in the server from its transfer peer registry and its provisioned cloud routes \u2014 the merge that used to exist only inside a signed-in desktop window \u2014 so an agent names a destination instead of scraping peer ids or relay credentials out of desktop code. Each entry carries peerId, the display name, and machineId when the machine is a same-account sibling whose cloud route this machine has provisioned; kanna_push_task and kanna_pull_task accept either spelling. transferable says whether a move can start right now and unavailableReason says what would make it possible. preferredTransport is \"lan\" whenever a LAN route exists, with cloudFallback for the same-account sibling reachable both ways. cloudRoute reports whether the cloud tunnel is usable: its Firebase credential is minted by the signed-in desktop app and can only be refreshed there, so a machine reachable only through an expired one is reported unusable here rather than accepted and failed later inside the transfer engine. Public keys and endpoints are deliberately absent. Pass machine_id to ask a sibling machine what it can reach before pushing a task from there.",
       "method": "GET",
