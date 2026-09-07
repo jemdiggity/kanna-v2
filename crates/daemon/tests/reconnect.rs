@@ -2711,6 +2711,22 @@ fn test_kill_then_respawn_broadcasts_exit_before_session_created() {
             other => panic!("expected Exit then SessionCreated, got: {:?}", other),
         }
     }
+
+    // Draft knowledge belongs to the PTY incarnation, not the stable session
+    // id. A fresh spawn starts from an attested-empty composer and must never
+    // inherit a predecessor's logical-input hold.
+    creator.send(&Cmd::List);
+    match creator.recv() {
+        Evt::SessionList { sessions } => {
+            let replacement = sessions
+                .iter()
+                .find(|session| session["session_id"] == "sess-swap")
+                .expect("replacement session");
+            assert_eq!(replacement["logical_input_blocked"], false);
+            assert_eq!(replacement["pending_logical_input_count"], 0);
+        }
+        other => panic!("expected replacement SessionList, got: {other:?}"),
+    }
 }
 
 /// Stress the kill/respawn ordering: the claimed incarnation's reader must

@@ -103,6 +103,11 @@ pub enum TaskEventKind {
     /// durable `task_input` row this event announces, readable through
     /// `GET /v1/tasks/{id}/inputs`.
     InputDelivered,
+    /// A logical input whose write outcome could not be proven was retired
+    /// when the exact PTY incarnation that owned it exited or was replaced.
+    /// No `task_input` row is created: the event makes the loss visible
+    /// without falsely claiming that the agent received the message.
+    InputDeliveryExpired,
     /// Discrete terminal keys or explicit bytes were written into the task's
     /// live PTY from outside its session — a call to
     /// `POST /v1/tasks/{id}/raw-input`. This is deliberately a separate kind
@@ -169,6 +174,7 @@ impl TaskEventKind {
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
             Self::InputDelivered => "task.input_delivered",
+            Self::InputDeliveryExpired => "task.input_delivery_expired",
             Self::RawInputDelivered => "task.raw_input_delivered",
             Self::InputBlocked => "task.input_blocked",
             Self::TeardownFailed => "task.teardown_failed",
@@ -197,6 +203,7 @@ impl TaskEventKind {
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
         Self::InputDelivered,
+        Self::InputDeliveryExpired,
         Self::RawInputDelivered,
         Self::InputBlocked,
         Self::TeardownFailed,

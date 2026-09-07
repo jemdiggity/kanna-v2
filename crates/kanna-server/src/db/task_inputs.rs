@@ -414,10 +414,10 @@ impl Db {
         )
     }
 
-    pub fn pending_task_input_incarnations(&self) -> Result<Vec<(String, u32)>, rusqlite::Error> {
+    pub fn queued_task_input_incarnations(&self) -> Result<Vec<(String, u32)>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT task_id, session_pid FROM queued_task_input
-             WHERE state IN ('preparing', 'held') AND session_pid IS NOT NULL",
+             WHERE session_pid IS NOT NULL",
         )?;
         let owners = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -425,17 +425,47 @@ impl Db {
         owners
     }
 
-    pub fn mark_pending_task_inputs_uncertain_for_incarnation(
+    pub fn expire_task_inputs_for_incarnation(
         &self,
         task_id: &str,
         session_pid: u32,
     ) -> Result<usize, rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE queued_task_input
-             SET state = 'uncertain', reason = 'owning daemon session was replaced or exited before delivery was proven'
-             WHERE task_id = ? AND session_pid = ? AND state IN ('preparing', 'held')",
-            params![task_id, session_pid],
-        )
+        self.with_immediate_transaction(|db| {
+            let rows = {
+                let mut stmt = db.conn.prepare(
+                    "SELECT id, state, reason FROM queued_task_input
+                     WHERE task_id = ? AND session_pid = ? ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map(params![task_id, session_pid], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            for (id, state, reason) in &rows {
+                db.append_task_event(
+                    task_id,
+                    TaskEventKind::InputDeliveryExpired,
+                    json!({
+                        "queueId": id,
+                        "sessionPid": session_pid,
+                        "previousState": state,
+                        "previousReason": reason,
+                        "reason": "owning daemon session was replaced or exited before delivery was proven",
+                    }),
+                )?;
+            }
+            db.conn.execute(
+                "DELETE FROM queued_task_input WHERE task_id = ? AND session_pid = ?",
+                params![task_id, session_pid],
+            )?;
+            Ok(rows.len())
+        })
     }
 
     pub fn queued_task_input_reason_for_id(
