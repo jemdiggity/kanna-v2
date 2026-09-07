@@ -272,6 +272,23 @@ pub(crate) async fn handle_connection(
                 };
                 let _ = write_event(&mut *writer.lock().await, &event).await;
             }
+            Some(Command::NegotiateRawInput { version }) => {
+                // A pure capability answer: it authorizes nothing and touches
+                // no session, so the caller may treat any failure as proof
+                // that no byte reached a PTY.
+                let event = if version == protocol::RAW_INPUT_PROTOCOL_VERSION {
+                    Event::RawInputReady { version }
+                } else {
+                    error_event(
+                        None,
+                        format!(
+                            "unsupported raw-input protocol {version}; this daemon speaks {}",
+                            protocol::RAW_INPUT_PROTOCOL_VERSION
+                        ),
+                    )
+                };
+                let _ = write_event(&mut *writer.lock().await, &event).await;
+            }
             Some(Command::Subscribe) => {
                 if subscription_task.is_none() {
                     let mut broadcast_rx = broadcast_tx.subscribe();
@@ -865,11 +882,30 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
-        Command::InputIfSession {
-            session_id,
-            expected_pid,
-            data,
-        } => {
+        command @ (Command::InputIfSession { .. } | Command::RawInputIfSession { .. }) => {
+            let (session_id, expected_pid, data, kind) = match command {
+                Command::InputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => (session_id, expected_pid, data, RawInputKind::Draft),
+                Command::RawInputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                    class,
+                } => (
+                    session_id,
+                    expected_pid,
+                    data,
+                    match class {
+                        protocol::RawInputClass::Draft => RawInputKind::Draft,
+                        protocol::RawInputClass::Submission => RawInputKind::Submission,
+                        protocol::RawInputClass::Control => RawInputKind::Control,
+                    },
+                ),
+                _ => unreachable!("fenced input command pattern already matched"),
+            };
             let daemon_lifecycle_guard = daemon_lifecycle.read().await;
             if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
                 let evt = error_event(
@@ -909,7 +945,7 @@ pub(crate) async fn handle_command(
                 return;
             }
 
-            let evt = match session.enqueue_acknowledged_raw_input(data, RawInputKind::Draft) {
+            let evt = match session.enqueue_acknowledged_raw_input(data, kind) {
                 Ok(written) => match written.await {
                     Ok(_) => Event::Ok,
                     Err(_) => error_event(
@@ -1796,7 +1832,8 @@ pub(crate) async fn handle_command(
 
         Command::AdoptOperator
         | Command::AuthorizeServer { .. }
-        | Command::NegotiateProtectedInput { .. } => {
+        | Command::NegotiateProtectedInput { .. }
+        | Command::NegotiateRawInput { .. } => {
             let event = error_event(None, "unexpected nested authority command");
             let _ = write_event(&mut *writer.lock().await, &event).await;
         }

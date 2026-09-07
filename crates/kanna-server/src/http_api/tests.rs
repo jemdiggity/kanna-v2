@@ -57,6 +57,23 @@ async fn read_test_daemon_command_optional(
                 .unwrap();
             continue;
         }
+        // Capability handshakes are transport bookkeeping, not the command a
+        // test is scripting. Answered here so every fake daemon speaks the
+        // current contract by default; a test about an *older* daemon reads
+        // the socket itself instead of using this helper.
+        if matches!(
+            command,
+            kanna_daemon::protocol::Command::NegotiateRawInput { .. }
+        ) {
+            let response = kanna_daemon::protocol::Event::RawInputReady {
+                version: kanna_daemon::protocol::RAW_INPUT_PROTOCOL_VERSION,
+            };
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            continue;
+        }
         return Some(command);
     }
 }
@@ -307,6 +324,7 @@ mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
 mod input;
+mod raw_input;
 mod recent_workflows;
 mod relay_dispatch;
 mod repo_commands;

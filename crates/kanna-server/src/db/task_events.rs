@@ -87,6 +87,17 @@ pub enum TaskEventKind {
     /// durable `task_input` row this event announces, readable through
     /// `GET /v1/tasks/{id}/inputs`.
     InputDelivered,
+    /// Discrete terminal keys or explicit bytes were written into the task's
+    /// live PTY from outside its session — a call to
+    /// `POST /v1/tasks/{id}/raw-input`. This is deliberately a separate kind
+    /// from `InputDelivered`: no `task_input` row exists for it, because an
+    /// arrow key answering a menu is an action, not a sentence somebody meant,
+    /// and the instruction history must not be able to read one as the other.
+    /// `payload.writes` lists each write's key name (null for explicit bytes),
+    /// its exact bytes as hex, the declared composer class, and whether it was
+    /// written; `payload.status` is the call's verdict and `payload.sessionPid`
+    /// the PTY incarnation it was fenced to.
+    RawInputDelivered,
     /// The task's agent session started or stopped refusing messages
     /// delivered into it from outside. `payload.inputBlocked` names the reason
     /// while it is blocked (`inherited-draft-unknown`) and is null when it
@@ -132,6 +143,7 @@ impl TaskEventKind {
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
             Self::InputDelivered => "task.input_delivered",
+            Self::RawInputDelivered => "task.raw_input_delivered",
             Self::InputBlocked => "task.input_blocked",
             Self::TeardownFailed => "task.teardown_failed",
             Self::LifecycleOperationRetired => "task.lifecycle_operation_retired",
@@ -156,6 +168,7 @@ impl TaskEventKind {
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
         Self::InputDelivered,
+        Self::RawInputDelivered,
         Self::InputBlocked,
         Self::TeardownFailed,
         Self::LifecycleOperationRetired,

@@ -277,6 +277,19 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_send_task_raw_input",
+            TypedToolSurface {
+                command_path: &["task", "send-raw-input"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("keys", "keys"),
+                    ("bytes", "bytes"),
+                    ("encoding", "encoding"),
+                    ("source", "source"),
+                ],
+            },
+        ),
+        (
             "kanna_close_task",
             TypedToolSurface {
                 command_path: &["task", "close"],

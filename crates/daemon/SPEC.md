@@ -264,6 +264,8 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `Detach` | session_id | Stop receiving output |
 | `Input` | session_id, data (byte array) | Send keystrokes to PTY |
 | `InputIfSession` | session_id, expected_pid, data (byte array) | Send acknowledged keystrokes only if the id still names the PTY process ID observed by `List`; otherwise return `session_incarnation_mismatch` without writing |
+| `RawInputIfSession` | session_id, expected_pid, data (byte array), class (`draft`/`submission`/`control`) | `InputIfSession` plus the producer's declared composer meaning. `InputIfSession` classifies every fenced write as a draft, which is right for a keystroke and wrong for an Enter: a CR declared a draft arms the typed-byte ledger against a composer that Enter just emptied. Requires `NegotiateRawInput` on the same connection |
+| `NegotiateRawInput` | version (u32) | Answer `RawInputReady` when this daemon speaks `RAW_INPUT_PROTOCOL_VERSION`. It has no session and no side effect, so a daemon too old to deserialize `RawInputIfSession` — which closes the connection without replying — is distinguishable from a write whose answer was lost, and the caller can honestly report that nothing reached a PTY |
 | `Resize` | session_id, cols, rows | Update terminal dimensions |
 | `Signal` | session_id, signal (string) | Send Unix signal |
 | `Kill` | session_id | Terminate and remove session |
@@ -281,6 +283,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `SessionCreated` | session_id | New session ready |
 | `InputBlockedChanged` | session_id, logical_input_blocked | Session started or stopped refusing logical input |
 | `LogicalInputReleased` | session_id | One draft-held logical message has had its text and Enter written; consumers advance one FIFO delivery record |
+| `RawInputReady` | version | This daemon speaks the fenced raw-input contract at `version` |
 | `SessionList` | sessions | Response to List |
 | `HandoffReady` | sessions | Session metadata (followed by SCM_RIGHTS) |
 | `ShuttingDown` | — | Daemon shutting down (handoff) |

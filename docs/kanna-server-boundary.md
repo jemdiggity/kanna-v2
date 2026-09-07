@@ -133,6 +133,78 @@ Every accepted delivery is also recorded durably against the task — see
 [Delivered Task Inputs](#delivered-task-inputs) — because terminal bytes are
 not a record any later stage can read.
 
+### Raw terminal keys
+
+`POST /v1/tasks/{task_id}/raw-input` (`kanna_send_task_raw_input`,
+`kanna-cli task send-raw-input`) writes discrete keys or explicit bytes into a
+task's live PTY. It exists because the logical-message route structurally
+cannot: that route sends a sentence and the daemon appends its own Enter, so it
+can answer a question and never move a selection. On 2026-09-05 an imported
+task sat at Claude's workspace-trust selection with no supported way to press
+Down; the only route was reading the daemon's session snapshot by hand, opening
+its Unix socket directly, and sending `InputIfSession` carrying `[27, 91, 66]`
+and then `[13]`.
+
+**One vocabulary, one encoder.** Named keys come from
+`kanna_runtime_defaults::terminal_keys`, which the MCP schema advertises as a
+closed enum and the server uses to produce bytes; a contract test holds the two
+in step. These are the normal-mode `xterm` sequences — cursor keys as CSI
+(`ESC [ A`), `home`/`end` as `CSI H`/`CSI F`, `backspace` as DEL — and the doc
+comment there says which applications that is *not* right for, rather than
+claiming universality. Function keys are absent because F1–F4 have two
+encodings in common use. Anything the vocabulary cannot spell unambiguously
+goes through `bytes`, hex or base64, decoded server-side so no shell is ever
+asked to produce an escape character.
+
+**Enter is a declaration.** Raw writes carry the daemon's
+draft/submission/control class, and only the named `enter` key declares a
+submission. A carriage return inside `bytes` is refused rather than written:
+submission is never inferred from bytes in a stream, so an undeclared CR would
+be counted as composer content while the CLI that received it had already
+submitted the line — leaving every later delivered message held behind a draft
+that no longer existed. Everything else is declared a draft, and the daemon's
+existing content classification decides whether it can latch one, so navigation
+and control keys hold nothing. Raw input is deliberately not a way to clear
+draft state: there is no caller-chosen class, and the global draft interlock is
+unchanged.
+
+**Fenced, ordered, and honest about what it wrote.** Discovery and delivery both
+hold the task's lifecycle lease, and every write is fenced to the PTY process ID
+that discovery observed, so a stage transition or rerun in between is refused
+rather than typed into the replacement. Writes go out one at a time and the
+daemon acknowledges each only after every byte reached the PTY, so order holds
+within a call and across consecutive acknowledged calls. `200` with
+`status: "written"` means all of them landed. A first write refused for a
+changed incarnation is a `409` `no_live_agent_session` — nothing was written. A
+burst that stops *after* its first write is `503` `delivery_uncertain`, because
+those bytes are already in somebody's terminal: the response's `writes` array
+names each key `written`, `uncertain`, or `not_written`, and it carries
+`retryable: false` like every failure below except one. A daemon predating the
+contract answers `503`
+`raw_input_unsupported`, which is knowable rather than guessed because the
+capability is negotiated by a command that touches no session — see
+`crates/daemon/SPEC.md`. A daemon mid-handoff answers `503`
+`daemon_handing_off`; it is the one failure carrying `retryable: true`, because
+nothing was written and a successor is coming, and repeating the call
+re-negotiates and re-observes the pid against that successor rather than
+replaying a write into a daemon that no longer owns the terminal. There is no
+unfenced fallback at any point. Protected sessions still refuse: `403`
+`session_operator_input_only`.
+
+**Keys are not speech.** No `task_input` row is written. That table is the
+durable instruction history a later stage reads as owner or manager directives,
+and an arrow key answering a menu is an action, not a sentence somebody meant;
+recording one there would let a reviewer read terminal control bytes as an
+owner's words, and would equally let a menu answered by hand read as an
+instruction that was never given. The action is announced on the event feed as
+`task.raw_input_delivered` — the declared source, the fenced session pid, the
+call's verdict, and every write's key, exact bytes as hex, class, and outcome —
+including for uncertain outcomes, because an audit trail that keeps only the
+clean cases is wrong about the case somebody will need to reconstruct.
+
+Raw keys enable interactive menus. They are not an approval mechanism: nothing
+here decides whether a permission or trust prompt *should* be accepted.
+
 ### Image attachments
 
 `POST /v1/tasks/{task_id}/input` accepts one optional `attachment`:
@@ -1101,6 +1173,17 @@ cursor-based, not snapshot-diffed:
   saying whether it was cut. The event is only the announcement — the record is
   the `task_input` row, read through `GET /v1/tasks/{task_id}/inputs`. See
   [Delivered Task Inputs](#delivered-task-inputs).
+- `task.raw_input_delivered` announces discrete terminal keys or explicit bytes
+  written into a task's live PTY through
+  `POST /v1/tasks/{task_id}/raw-input`. `payload.writes` lists every write's key
+  name (`null` for explicit bytes), its exact bytes as hex, the declared composer
+  class, and whether it was `written`, `uncertain`, or `not_written`;
+  `payload.status` is the call's verdict, `payload.sessionPid` the PTY
+  incarnation it was fenced to, and `payload.source` the caller-declared actor.
+  It is a separate kind from `task.input_delivered` on purpose: there is no
+  `task_input` row behind it, because a keystroke answering a menu is an action
+  and not something somebody said. See
+  [Raw terminal keys](#raw-terminal-keys).
 - `task.input_blocked` reports that a task's agent session started or stopped
   refusing messages delivered into it. `payload.inputBlocked` names the reason
   while it is blocked and is `null` when it clears; today the only reason is
@@ -1207,6 +1290,15 @@ Every delivery the daemon **accepts** is therefore appended to `task_input`:
 the full message text, `delivered_at`, the `stage` the task was on, the
 `stage_run` that was running at the time (null when none was), and a `source`.
 The row is the record; `task.input_delivered` is only its announcement.
+
+Raw terminal keys are deliberately outside this table. `POST
+/v1/tasks/{task_id}/raw-input` writes an arrow or an Escape, not a sentence, and
+a row here would let a reviewer read terminal control bytes as owner speech —
+the mirror of the 2026-08-19 failure above rather than a fix for it. Those calls
+are announced as `task.raw_input_delivered` instead; see
+[Raw terminal keys](#raw-terminal-keys). So an empty `kanna_task_inputs` means
+no message was delivered, and says nothing either way about whether a menu was
+answered.
 
 - **Sources.** `operator` and `manager` are **declared by the caller and not
   verified**: the endpoint cannot tell a human typing on mobile from an
@@ -1858,6 +1950,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 ## CLI Task Actions
 
 - `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input`. Input is accepted only for an active daemon PTY session, fenced to the PTY process ID observed before acceptance while the server holds the task lifecycle lease. The daemon may retain it behind an active human draft, but never for a later run or stage. A successful acknowledgement prints `{ "ok": true }`; an absent or concurrently replaced session returns HTTP 409 with `reason: "no_live_agent_session"`, the latest run status/finish time when available, and explicit `kanna_resume_task` / `kanna_rerun_stage` recovery guidance. If the acknowledgement is lost after acceptance, the server reports uncertain delivery so callers do not retry blindly.
+- `kanna-cli task send-raw-input --task-id <TASK_ID> (--keys <NAMES> | --bytes <HEX>) [--encoding hex|base64] [--source operator|manager] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/raw-input`, the discrete-keystroke counterpart to `send-input`: no Enter is appended, nothing is queued behind a draft, and no `task_input` row is written. `--keys down,enter` dismisses or answers a menu; `--keys escape` closes a dialog; `--bytes 1b5b42` writes an arbitrary sequence with nothing added. Byte payloads are decoded server-side, so no shell is ever asked to produce an escape character, and a carriage return in `--bytes` is refused with a pointer at `--keys enter`, which declares the submission boundary. `--list-keys` prints the accepted vocabulary offline. The response's `writes` array reports each key as `written`, `uncertain`, or `not_written`; a non-zero exit with `delivery_uncertain` means some keys may already be at the terminal and the call must not be resent. See [Raw terminal keys](#raw-terminal-keys).
 - `kanna-cli task advance-stage --task-id <TASK_ID> [--source operator|manager] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON. Omitted source is recorded as `unspecified`; automatic policy transitions are `auto`.
 - `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` sends an ordinary request to the repository's merge agent.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It accepts a latest `cancelled` or `failed` run whose daemon session is dead. It also accepts a latest `running` run only after a daemon `List` proves the run's recorded session is absent; the desktop uses that form when an attach after restart discovers a session lost with the old daemon. It resumes the provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; unsupported or missing provider context starts fresh and records `resumeFallbackReason`, while task-state precondition failures return an explanatory conflict. A present session returns a conflict for a running run and restores a false interruption for a previously interrupted run, so the route never creates a duplicate provider process. An empty route-level 404 identifies an older server that does not provide the action. Callers may use `rerun-stage` when recovery is unavailable or a deliberately fresh conversation is acceptable.

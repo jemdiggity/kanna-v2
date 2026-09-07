@@ -3107,6 +3107,7 @@ fn task_event_type_names_are_stable() {
             "task.merge_signaled",
             "task.merge_handoff_missing",
             "task.input_delivered",
+            "task.raw_input_delivered",
             "task.input_blocked",
             "task.teardown_failed",
             "task.lifecycle_operation_retired",

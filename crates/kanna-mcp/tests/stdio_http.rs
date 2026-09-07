@@ -2301,3 +2301,127 @@ fn serve_does_not_resolve_a_wait_when_the_confirmation_read_fails() {
         "an unconfirmed stop must not resolve the wait: {message}"
     );
 }
+
+/// The raw-input tool over the real MCP stdio transport: the arguments an agent
+/// writes become one POST to the raw-input route with exactly the keys named,
+/// and the per-write outcome comes back as the tool's result.
+#[test]
+fn serve_forwards_raw_key_input_to_the_raw_input_route() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/tasks/spike362c3351/raw-input",
+            body: Some(json!({ "keys": ["down", "enter"], "source": "manager" })),
+            response_status: "200 OK",
+            response_body: json!({
+                "status": "written",
+                "taskId": "spike362c3351",
+                "sessionPid": 42133,
+                "writes": [
+                    { "index": 0, "key": "down", "bytes": "1b5b42", "class": "draft", "status": "written" },
+                    { "index": 1, "key": "enter", "bytes": "0d", "class": "submission", "status": "written" }
+                ]
+            }),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/tasks/spike362c3351/raw-input",
+            body: Some(json!({ "bytes": "1b4f42", "encoding": "hex" })),
+            response_status: "200 OK",
+            response_body: json!({
+                "status": "written",
+                "taskId": "spike362c3351",
+                "sessionPid": 42133,
+                "writes": [
+                    { "index": 0, "key": null, "bytes": "1b4f42", "class": "draft", "status": "written" }
+                ]
+            }),
+        },
+    ]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_send_task_raw_input",
+                    "arguments": {
+                        "task_id": "spike362c3351",
+                        "keys": ["down", "enter"],
+                        "source": "manager"
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_send_task_raw_input",
+                    "arguments": {
+                        "task_id": "spike362c3351",
+                        "bytes": "1b4f42",
+                        "encoding": "hex"
+                    }
+                }
+            }),
+            // A name outside the shared vocabulary never reaches the server:
+            // the fixture above expects exactly two requests, so a third would
+            // fail the join below.
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "kanna_send_task_raw_input",
+                    "arguments": { "task_id": "spike362c3351", "keys": ["arrow-down"] }
+                }
+            }),
+        ],
+    );
+
+    let observed = server.join().expect("fixture server");
+    assert_eq!(observed.len(), 2);
+    assert_eq!(tool_text(&responses[1])["writes"][0]["bytes"], "1b5b42");
+    assert_eq!(tool_text(&responses[1])["writes"][1]["class"], "submission");
+    assert_eq!(tool_text(&responses[2])["writes"][0]["bytes"], "1b4f42");
+    assert!(
+        tool_error_text(&responses[3]).contains("arrow-down"),
+        "{}",
+        tool_error_text(&responses[3])
+    );
+}
+
+/// The tool is advertised, and advertised as a write.
+#[test]
+fn raw_key_input_is_listed_as_a_mutating_tool() {
+    let (base_url, server) = start_http_fixture(vec![]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        ],
+    );
+    server.join().expect("fixture server");
+
+    let tool = responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_send_task_raw_input")
+        .expect("kanna_send_task_raw_input is advertised");
+    assert!(
+        tool["annotations"]["readOnlyHint"].is_null(),
+        "writing keys into a terminal is not read-only"
+    );
+    assert_eq!(tool["inputSchema"]["properties"]["keys"]["type"], "array");
+    assert_eq!(
+        tool["inputSchema"]["properties"]["keys"]["items"]["enum"][0],
+        "escape"
+    );
+}

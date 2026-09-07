@@ -104,7 +104,86 @@ fn preview_of(message: &str) -> (String, bool) {
     }
 }
 
+/// One raw terminal write, as announced on the event feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawInputWriteRecord {
+    /// The named key, or `None` when the caller supplied explicit bytes.
+    pub key: Option<String>,
+    /// Lowercase hex of exactly the bytes written.
+    pub bytes_hex: String,
+    /// The producer-declared composer meaning: `draft` or `submission`.
+    pub class: &'static str,
+    /// `written`, `uncertain`, or `not_written`.
+    pub status: &'static str,
+}
+
 impl Db {
+    /// Announce a raw terminal write against a task.
+    ///
+    /// Deliberately *not* a `task_input` row. That table is the durable record
+    /// of messages a later stage must read as instructions, and a reviewer is
+    /// told to treat what it finds there as owner or manager speech. An arrow
+    /// key is not speech: recording `\x1b[B` as a delivered directive would put
+    /// terminal control bytes into the one place the codebase promises carries
+    /// sentences somebody meant. So the action is announced where actions are
+    /// announced — the append-only event log — carrying what it was, what
+    /// happened, and who claimed it, and nothing pretends it was a message.
+    pub fn append_raw_input_event(
+        &self,
+        task_id: &str,
+        source: &str,
+        session_pid: u32,
+        status: &str,
+        writes: &[RawInputWriteRecord],
+    ) -> Result<bool, rusqlite::Error> {
+        let stage: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT stage FROM pipeline_item WHERE id = ?",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stage) = stage else {
+            return Ok(false);
+        };
+        let run_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM stage_run
+                 WHERE task_id = ? AND status = 'running'
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let writes = writes
+            .iter()
+            .map(|write| {
+                json!({
+                    "key": write.key,
+                    "bytes": write.bytes_hex,
+                    "class": write.class,
+                    "status": write.status,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.append_task_event(
+            task_id,
+            TaskEventKind::RawInputDelivered,
+            json!({
+                "source": source,
+                "runId": run_id,
+                "stage": stage,
+                "sessionPid": session_pid,
+                "status": status,
+                "writes": writes,
+            }),
+        )?;
+        Ok(true)
+    }
+
     fn insert_delivered_task_input(
         &self,
         task_id: &str,

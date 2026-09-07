@@ -867,12 +867,20 @@ fn input_schema(tool: &ToolDef) -> Value {
         }
 
         if let Some(enum_values) = &param.enum_values {
-            property["enum"] = Value::Array(
+            let enum_values = Value::Array(
                 enum_values
                     .iter()
                     .map(|value| Value::String(value.clone()))
                     .collect(),
             );
+            // On a list the vocabulary belongs to the items. Setting it on the
+            // array would say the array itself must equal one of the strings,
+            // which no client can satisfy.
+            if param.param_type == ParamType::StringArray {
+                property["items"]["enum"] = enum_values;
+            } else {
+                property["enum"] = enum_values;
+            }
         }
 
         if let Some(default) = &param.default {
@@ -1193,6 +1201,26 @@ fn value_for_param(
     };
 
     if let Some(enum_values) = &param.enum_values {
+        // A closed vocabulary on a list constrains each element, not the list.
+        // Validated here rather than only in the schema because the CLI reaches
+        // `resolve_request` without a JSON-Schema validator in front of it.
+        if param.param_type == ParamType::StringArray {
+            for entry in string_array_value(&value, &param.name)? {
+                if !enum_values.iter().any(|allowed| allowed == &entry) {
+                    return Err(format!(
+                        "{} entry {entry} must be one of {}",
+                        param.name,
+                        enum_values.join(", ")
+                    ));
+                }
+            }
+            return Ok(Some(Value::Array(
+                string_array_value(&value, &param.name)?
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            )));
+        }
         let rendered = string_value(&value, &param.name)?;
         if !enum_values.iter().any(|allowed| allowed == &rendered) {
             if tool.name == "kanna_complete_stage" && param.name == "status" {

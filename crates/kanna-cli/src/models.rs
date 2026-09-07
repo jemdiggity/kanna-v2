@@ -496,6 +496,26 @@ pub(crate) struct TaskInputResponse {
     pub(crate) ok: bool,
 }
 
+/// Discrete terminal keys, or explicit bytes, for a task's live PTY.
+///
+/// `keys` and `bytes` are mutually exclusive, and exactly one is sent: the
+/// server owns the vocabulary and the limits, so the CLI's job is to spell the
+/// request unambiguously rather than to re-derive what a key means. In
+/// particular the bytes are carried as text and decoded server-side, so no
+/// shell ever has to be trusted to produce an escape character.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskRawInputRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) keys: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bytes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) encoding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskActionResponse {

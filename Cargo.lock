@@ -3106,6 +3106,7 @@ dependencies = [
 name = "kanna-tool-catalog"
 version = "0.1.0"
 dependencies = [
+ "kanna-runtime-defaults",
  "libc",
  "serde",
  "serde_json",

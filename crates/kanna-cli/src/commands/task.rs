@@ -10,17 +10,18 @@ use crate::api::{
     list_repo_tasks_via_api, list_task_children_via_api, list_tasks_via_api,
     list_tasks_with_options_via_api, notify_mobile_via_api, parse_wait_until, rename_task_via_api,
     request_revision_via_api, rerun_stage_via_api, resume_task_via_api, search_tasks_via_api,
-    search_tasks_with_options_via_api, send_task_input_via_api, set_task_parent_via_api,
-    set_task_workflow_via_api, signal_merge_handoff_via_api, task_inputs_via_api,
-    task_logs_with_agent_view_via_api, unblock_task_via_api, wait_task_events_via_api,
-    wait_task_via_api, WaitTaskOutcome,
+    search_tasks_with_options_via_api, send_task_input_via_api, send_task_raw_input_via_api,
+    set_task_parent_via_api, set_task_workflow_via_api, signal_merge_handoff_via_api,
+    task_inputs_via_api, task_logs_with_agent_view_via_api, unblock_task_via_api,
+    wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
     BlockTaskRequest, CreateTaskRequest, MergeHandoffRequest, MobileNotificationRequest,
     RequestRevisionRequest, SetTaskParentRequest, SetTaskWorkflowRequest, TaskCreateOptions,
-    TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
+    TaskDetail, TaskInputRequest, TaskRawInputRequest, TaskRenameRequest, TaskStatusRow,
+    TaskSummary,
 };
 use crate::TaskCommands;
 use kanna_tool_catalog::{task_event_self_exclusion, wait_resolved_result, wait_timeout_result};
@@ -247,6 +248,69 @@ pub(crate) fn build_send_task_input_request(
         input: message,
         source,
     }
+}
+
+/// Turn the CLI's flags into one raw-input request.
+///
+/// The exclusivity check lives here rather than only at the server so that a
+/// mistake costs an error message instead of a round trip into somebody's live
+/// terminal — and so the rule is stated in the place a reader of the CLI looks
+/// for it. Everything else (the key vocabulary, the byte limits, the
+/// carriage-return rule) is deliberately the server's: one definition, checked
+/// where the write happens.
+pub(crate) fn build_task_raw_input_request(
+    keys: Vec<String>,
+    bytes: Option<String>,
+    encoding: Option<String>,
+    source: Option<String>,
+) -> Result<TaskRawInputRequest, String> {
+    match (keys.is_empty(), bytes.as_ref()) {
+        (false, Some(_)) => Err(
+            "--keys and --bytes are mutually exclusive: pass named keys, or explicit bytes, not both"
+                .to_string(),
+        ),
+        (true, None) => Err(
+            "pass --keys (for example --keys down,enter) or --bytes (for example --bytes 1b5b42)"
+                .to_string(),
+        ),
+        (false, None) => {
+            if encoding.is_some() {
+                return Err("--encoding applies to --bytes, not to --keys".to_string());
+            }
+            Ok(TaskRawInputRequest {
+                keys: Some(keys),
+                bytes: None,
+                encoding: None,
+                source,
+            })
+        }
+        (true, Some(bytes)) => Ok(TaskRawInputRequest {
+            keys: None,
+            bytes: Some(bytes.clone()),
+            encoding,
+            source,
+        }),
+    }
+}
+
+/// The accepted key names, as `--list-keys` prints them.
+pub(crate) fn rendered_key_vocabulary() -> String {
+    let mut rendered = String::from(
+        "Named keys accepted by `kanna-cli task send-raw-input --keys` (comma-separated, in \
+         order):\n\n",
+    );
+    for name in kanna_runtime_defaults::terminal_keys::terminal_key_names() {
+        rendered.push_str("  ");
+        rendered.push_str(name);
+        rendered.push('\n');
+    }
+    rendered.push_str(
+        "\nOnly `enter` declares a submission boundary. `ctrl-i` and `ctrl-m` are absent: use \
+         `tab` and `enter`, which write the same bytes and declare the right composer meaning. \
+         Anything not listed goes through `--bytes` as hex, e.g. `--bytes 1b4f42` for the \
+         application-cursor form of Down.\n",
+    );
+    rendered
 }
 
 pub(crate) fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
@@ -638,6 +702,36 @@ pub(crate) async fn run(command: TaskCommands) {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
             let request = build_send_task_input_request(message, source);
             let response = send_task_input_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&response) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::SendRawInput {
+            task_id,
+            keys,
+            bytes,
+            encoding,
+            source,
+            list_keys,
+            server_url,
+        } => {
+            if list_keys {
+                print!("{}", rendered_key_vocabulary());
+                return;
+            }
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = build_task_raw_input_request(keys, bytes, encoding, source)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            let response = send_task_raw_input_via_api(&base_url, &task_id, &request)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
