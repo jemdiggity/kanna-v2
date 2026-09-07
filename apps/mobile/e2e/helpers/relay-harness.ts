@@ -194,6 +194,7 @@ interface TerminalFlowModule {
     harness: RemoteHarness,
     options: {
       displayName: string;
+      continuousOutput?: boolean;
       inputTraceFile?: string;
       prompt?: string;
       repoName?: string;
@@ -407,6 +408,7 @@ export async function startMobileRelayHarness(
 
     const localTask = await remote.terminal.createScriptedTask(harness, {
       displayName: RELAY_TASK_TITLE,
+      continuousOutput: mode !== "relay",
       ...(mode === "relay"
         ? {
             prompt: RELAY_ORIGINAL_PROMPT,
@@ -1025,6 +1027,14 @@ async function setPublishedTaskActivity(input: {
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "busy");
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "idle");
   } else {
+    // `mark-read` changes only the read/display dimension. It cannot turn a
+    // busy task idle, and a correctly functioning daemon watcher is free to
+    // restore `working` while the runtime dimension remains busy. Drive both
+    // dimensions explicitly so this fixture asks the product for a coherent
+    // idle state instead of relying on an earlier journey's runtime status.
+    await postScriptedTaskInput(input.harness, input.task.taskId, "relay-fixture-idle");
+    await waitForLocalTaskRuntimeState(input.harness, input.task, "idle");
+    await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "idle");
     await postLocalTaskAction(input.harness, input.task.taskId, "mark-read");
   }
   await waitForLocalTaskActivity(
@@ -1033,6 +1043,33 @@ async function setPublishedTaskActivity(input: {
     input.activity
   );
   await waitForCloudTaskActivity(input);
+}
+
+async function waitForLocalTaskRuntimeState(
+  harness: RemoteHarness,
+  task: ScriptedTask,
+  expected: "idle",
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastObserved: unknown = null;
+  while (Date.now() < deadline) {
+    const response = await localProcessFetch(
+      `${harness.lanBaseUrl}/v1/repos/${encodeURIComponent(task.repoId)}/tasks`,
+    );
+    if (response.ok) {
+      const tasks = await response.json() as Array<{
+        id?: unknown;
+        runtimeState?: unknown;
+      }>;
+      lastObserved = tasks.find((candidate) => candidate.id === task.taskId)?.runtimeState ?? null;
+      if (lastObserved === expected) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Expected owner task ${task.taskId} runtime ${expected}; last observed ${String(lastObserved)}`,
+  );
 }
 
 async function setLocalTaskRuntimeStatus(

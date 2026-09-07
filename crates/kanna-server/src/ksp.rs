@@ -1972,6 +1972,11 @@ async fn run_terminal_control(
         retry_attempt = 0;
 
         if let Some(command) = pending_command.take() {
+            if let TerminalControlCommand::Resize { cols, rows } = &command {
+                log::info!(
+                    "[ksp] writing terminal resize (task={task_id}, session={session_id}, cols={cols}, rows={rows}, source=pending)"
+                );
+            }
             let daemon_command = command.into_daemon_command(session_id.clone());
             let write_result = tokio::select! {
                 biased;
@@ -2027,6 +2032,11 @@ async fn run_terminal_control(
                     let Some(command) = command else {
                         return;
                     };
+                    if let TerminalControlCommand::Resize { cols, rows } = &command {
+                        log::info!(
+                            "[ksp] writing terminal resize (task={task_id}, session={session_id}, cols={cols}, rows={rows}, source=live)"
+                        );
+                    }
                     let daemon_command = command.into_daemon_command(session_id.clone());
                     let write_result = tokio::select! {
                         biased;
@@ -2362,6 +2372,11 @@ impl StreamConn {
     }
 
     async fn retire_terminal_control(control: TerminalControlHandle) {
+        log::info!(
+            "[ksp] retiring terminal control worker (session={:?}, pending_resize={:?})",
+            control.session_id,
+            control.pending_resize
+        );
         let _ = control.cancel_tx.send(true);
         let _ = control.task.await;
     }
@@ -2402,14 +2417,21 @@ impl StreamConn {
             .terminal_controls
             .get(task_id)
             .and_then(|control| control.pending_resize);
+        log::info!(
+            "[ksp] binding terminal control route (task={task_id}, session={session_id}, pending_resize={pending_resize:?})"
+        );
         if let Some(existing) = self.terminal_controls.remove(task_id) {
             Self::retire_terminal_control(existing).await;
         }
-        let control = self.create_terminal_control(task_id.to_string(), Some(session_id));
+        let control = self.create_terminal_control(task_id.to_string(), Some(session_id.clone()));
         if let Some((cols, rows)) = pending_resize {
-            let _ = control
+            let replay_result = control
                 .tx
                 .try_send(TerminalControlCommand::Resize { cols, rows });
+            log::info!(
+                "[ksp] replayed pre-attach resize (task={task_id}, session={session_id}, cols={cols}, rows={rows}, queued={})",
+                replay_result.is_ok()
+            );
         }
         self.terminal_controls.insert(task_id.to_string(), control);
     }
@@ -2423,8 +2445,15 @@ impl StreamConn {
 
         if let TerminalControlCommand::Resize { cols, rows } = &command {
             if let Some(control) = self.terminal_controls.get_mut(&task_id) {
+                log::info!(
+                    "[ksp] received terminal resize (task={task_id}, session={:?}, cols={cols}, rows={rows})",
+                    control.session_id
+                );
                 if control.session_id.is_none() {
                     control.pending_resize = Some((*cols, *rows));
+                    log::info!(
+                        "[ksp] retained pre-attach resize (task={task_id}, cols={cols}, rows={rows})"
+                    );
                 }
             }
         }

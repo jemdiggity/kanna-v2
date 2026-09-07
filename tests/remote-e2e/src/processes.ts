@@ -16,6 +16,11 @@ export interface RunCommandOptions {
   inventoryRoot?: string;
 }
 
+interface PortAvailabilityCheck {
+  name: string;
+  port: number;
+}
+
 export async function findFreePort(): Promise<number> {
   return await new Promise<number>((resolvePort, reject) => {
     const server = createServer();
@@ -34,6 +39,25 @@ export async function findFreePort(): Promise<number> {
       });
     });
   });
+}
+
+export async function assertPortsAvailable(
+  ports: readonly PortAvailabilityCheck[],
+): Promise<void> {
+  for (const { name, port } of ports) {
+    await new Promise<void>((resolve, reject) => {
+      const server = createServer();
+      server.unref();
+      server.once("error", (error: NodeJS.ErrnoException) => {
+        reject(new Error(
+          `remote E2E preflight: ${name} port ${port} is unavailable (${error.code ?? error.message})`,
+        ));
+      });
+      server.listen(port, "127.0.0.1", () => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    });
+  }
 }
 
 export async function waitForHttpOk(url: string, timeoutMs: number): Promise<void> {

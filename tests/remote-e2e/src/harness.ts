@@ -12,7 +12,7 @@ import {
 } from "../../../tools/kd/src/runtime/firebase";
 import { BUFFY_UID, waitForBuffyIdToken } from "./firebaseAuth";
 import { createNodeRelayDesktopClient } from "./nodeRelayClient";
-import { findFreePort, runCommand, startManagedProcess, waitForFile, waitForHttpOk, type ManagedProcess } from "./processes";
+import { assertPortsAvailable, findFreePort, runCommand, startManagedProcess, waitForFile, waitForHttpOk, type ManagedProcess } from "./processes";
 import { createHarnessDatabase } from "./sqlite";
 import {
   fetchStagingBuffyIdToken,
@@ -511,6 +511,12 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     });
 
     if (environment === "dev") {
+      await assertPortsAvailable([
+        { name: "Firebase Auth", port: ports.auth },
+        { name: "Firebase Firestore", port: ports.firestore },
+        { name: "Firebase Functions", port: ports.functions },
+        { name: "Firebase UI", port: ports.ui },
+      ]);
       const firebaseConfigPath = await writeRemoteHarnessFirebaseConfig(repoRoot, ports);
       processes.push(startManagedProcess(
         "firebase",
