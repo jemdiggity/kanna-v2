@@ -13,7 +13,7 @@ use crate::models::{
     RepoDetail, RepoSummary, RequestRevisionRequest, ResolvedAgentDefinition, SetTaskParentRequest,
     SetTaskWorkflowRequest, SetTaskWorkflowResponse, SignalAgentRequest, SignalAgentResponse,
     TaskActionResponse, TaskChild, TaskDetail, TaskInputRequest, TaskInputResponse, TaskInputs,
-    TaskRenameRequest, TaskSummary, WaitUntil,
+    TaskRawInputRequest, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -645,6 +645,19 @@ pub(crate) async fn send_task_input_via_api(
     post_no_content_json(base_url, &format!("/v1/tasks/{task_id}/input"), request)
         .await
         .map(|_| TaskInputResponse { ok: true })
+}
+
+/// Write raw terminal input into a task's live PTY.
+///
+/// Unlike `send_task_input_via_api` this returns a body: the per-write outcome
+/// is the answer, because a burst can stop part-way and a caller that cannot
+/// see where it stopped has no safe next move.
+pub(crate) async fn send_task_raw_input_via_api(
+    base_url: &str,
+    task_id: &str,
+    request: &TaskRawInputRequest,
+) -> Result<Value, String> {
+    post_json(base_url, &format!("/v1/tasks/{task_id}/raw-input"), request).await
 }
 
 pub(crate) async fn rename_task_via_api(

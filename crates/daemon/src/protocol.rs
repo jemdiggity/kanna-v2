@@ -16,6 +16,11 @@ pub const LEGACY_HANDOFF_PROTOCOL_VERSION: u32 = 2;
 pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 =
     kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION;
 
+/// Server/daemon contract required before fenced raw terminal input carrying a
+/// producer-declared class may be sent.
+pub const RAW_INPUT_PROTOCOL_VERSION: u32 =
+    kanna_runtime_defaults::terminal_keys::RAW_INPUT_PROTOCOL_VERSION;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -52,6 +57,25 @@ pub enum SessionKind {
     #[default]
     Pty,
     Agent,
+}
+
+/// What a producer declares one raw terminal write means for the composer.
+///
+/// This is the wire spelling of the daemon's internal draft/submission/control
+/// vocabulary, carried by [`Command::RawInputIfSession`] so that a fenced raw
+/// write can say what it is. `Input`/`InputBoundary`/`InputControl` say the
+/// same three things by having three command names; a fenced write says it in
+/// one field, because the fence itself is the part that must not vary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RawInputClass {
+    /// Bytes belonging to whatever line is being composed. The daemon decides
+    /// from their content whether they could actually create a draft.
+    Draft,
+    /// The producer knows this write submits the current composer.
+    Submission,
+    /// Terminal control that neither edits nor submits the composer.
+    Control,
 }
 
 /// A journaled agent event paired with its sequence number.
@@ -232,6 +256,16 @@ pub enum Command {
     NegotiateProtectedInput {
         version: u32,
     },
+    /// Prove this daemon understands [`Command::RawInputIfSession`] before any
+    /// raw key is sent. A daemon that predates it cannot deserialize that
+    /// command and closes the connection without answering, which is
+    /// indistinguishable from a daemon that died mid-write — so the capability
+    /// is asked for by a command that touches no PTY. A failure here therefore
+    /// proves nothing was written, which is what lets the server answer
+    /// "unsupported" instead of "uncertain".
+    NegotiateRawInput {
+        version: u32,
+    },
     Spawn {
         session_id: String,
         executable: String,
@@ -281,6 +315,21 @@ pub enum Command {
         session_id: String,
         expected_pid: u32,
         data: Vec<u8>,
+    },
+    /// Acknowledged raw terminal input fenced to an observed PTY process ID and
+    /// carrying the producer's declared composer meaning.
+    ///
+    /// `InputIfSession` classifies every fenced write as a draft, which is
+    /// right for a keystroke and wrong for an Enter: a CR declared a draft
+    /// arms the typed-byte ledger against a composer the Enter just emptied,
+    /// and every later delivered message is then held behind a line nobody
+    /// typed. Agent-facing raw key input needs both the fence and the
+    /// declaration, so it says which it is.
+    RawInputIfSession {
+        session_id: String,
+        expected_pid: u32,
+        data: Vec<u8>,
+        class: RawInputClass,
     },
     /// One logical message for a PTY session. Unlike raw terminal input, the
     /// daemon keeps the message and its synthesized Enter atomic, frames
@@ -423,6 +472,10 @@ pub enum Command {
 #[allow(clippy::enum_variant_names)]
 pub enum Event {
     ProtectedInputReady {
+        version: u32,
+    },
+    /// This daemon speaks the fenced raw-input contract at `version`.
+    RawInputReady {
         version: u32,
     },
     Output {

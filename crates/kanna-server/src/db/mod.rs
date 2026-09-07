@@ -52,7 +52,7 @@ pub use stage_runs::{FinishedStageRun, StageTrigger};
 #[allow(unused_imports)]
 pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
 #[allow(unused_imports)]
-pub use task_inputs::{TaskInputRecord, TaskInputSource};
+pub use task_inputs::{RawInputWriteRecord, TaskInputRecord, TaskInputSource};
 #[allow(unused_imports)]
 pub use transfer_work::{TransferWorkItem, MAX_TRANSFER_WORK_ATTEMPTS};
 pub use transfers::{

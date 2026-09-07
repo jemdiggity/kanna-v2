@@ -43,6 +43,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_signal_agent",
             "kanna_signal_merge_handoff",
             "kanna_send_task_input",
+            "kanna_send_task_raw_input",
             "kanna_close_task",
             "kanna_rename_task",
             "kanna_advance_stage",
@@ -651,6 +652,22 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({ "input": "continue" }),
         ),
         (
+            "kanna_send_task_raw_input",
+            json!({ "task_id": "task-1", "keys": ["down", "enter"] }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/raw-input",
+            json!({ "keys": ["down", "enter"] }),
+        ),
+        (
+            "kanna_send_task_raw_input",
+            json!({ "task_id": "task-1", "bytes": "1b5b42" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/raw-input",
+            json!({ "bytes": "1b5b42" }),
+        ),
+        (
             "kanna_close_task",
             json!({ "task_id": "task-1" }),
             Method::Post,
@@ -1086,6 +1103,7 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.merge_signaled",
         "task.merge_handoff_missing",
         "task.input_delivered",
+        "task.raw_input_delivered",
         "task.input_blocked",
         "task.transfer_finalizing",
     ] {
@@ -1613,7 +1631,11 @@ fn every_declared_parameter_round_trips_a_cli_spelling() {
                     .unwrap_or_else(|| "57808275".to_string()),
                 ParamType::Integer => "7".to_string(),
                 ParamType::Boolean => "true".to_string(),
-                ParamType::StringArray => "57808275".to_string(),
+                ParamType::StringArray => param
+                    .enum_values
+                    .as_ref()
+                    .and_then(|values| values.first().cloned())
+                    .unwrap_or_else(|| "57808275".to_string()),
                 ParamType::Object => "{}".to_string(),
             };
             let value = param
@@ -1645,7 +1667,11 @@ fn every_declared_parameter_round_trips_a_cli_spelling() {
                         .unwrap_or_else(|| "57808275".to_string()),
                     ParamType::Integer => "7".to_string(),
                     ParamType::Boolean => "true".to_string(),
-                    ParamType::StringArray => "57808275".to_string(),
+                    ParamType::StringArray => param
+                        .enum_values
+                        .as_ref()
+                        .and_then(|values| values.first().cloned())
+                        .unwrap_or_else(|| "57808275".to_string()),
                     ParamType::Object => "{}".to_string(),
                 };
                 (
@@ -2037,4 +2063,138 @@ fn include_self_is_a_client_only_parameter() {
         .as_str()
         .expect("description")
         .contains("excludes the calling task's own events by default"));
+}
+
+/// The raw-input tool's advertised key vocabulary is the shared Rust table, not
+/// a second list that happens to agree today.
+///
+/// Two surfaces read this vocabulary — the MCP schema an agent picks names out
+/// of, and the server that turns a name into bytes — and they are in different
+/// crates. A name that is in one and not the other is a tool call that
+/// validates and then 400s, or a key an agent never learns exists.
+#[test]
+fn raw_input_key_vocabulary_matches_the_shared_terminal_key_table() {
+    use kanna_runtime_defaults::terminal_keys::{
+        terminal_key_names, CTRL_LETTERS_WITH_NAMED_EQUIVALENTS,
+    };
+
+    let catalog = bundled_catalog();
+    let keys = catalog
+        .find_param("kanna_send_task_raw_input", "keys")
+        .expect("keys parameter");
+    assert_eq!(keys.param_type, ParamType::StringArray);
+    assert_eq!(keys.location, ParamLoc::Body);
+    let advertised = keys
+        .enum_values
+        .clone()
+        .expect("keys declares a vocabulary");
+    assert_eq!(advertised, terminal_key_names());
+
+    // The redundant spellings stay out of the advertised list: `enter`
+    // declares a submission boundary and `ctrl-m` would not, so offering both
+    // would let the same keystroke mean two different things to the composer.
+    for letter in CTRL_LETTERS_WITH_NAMED_EQUIVALENTS {
+        assert!(
+            !advertised.contains(&format!("ctrl-{letter}")),
+            "ctrl-{letter} duplicates a named key"
+        );
+    }
+    for required in [
+        "escape",
+        "enter",
+        "tab",
+        "backspace",
+        "up",
+        "down",
+        "left",
+        "right",
+    ] {
+        assert!(
+            advertised.iter().any(|name| name == required),
+            "{required} missing"
+        );
+    }
+
+    // The description has to carry the vocabulary too: an agent reads the
+    // description long before a schema validator tells it what it got wrong.
+    let description = keys.description.clone().expect("keys description");
+    for name in &advertised {
+        assert!(description.contains(name.as_str()), "{name} undocumented");
+    }
+}
+
+/// A closed vocabulary on a list constrains its items.
+///
+/// Declared on the array itself, the schema would say the array must *equal*
+/// one of the strings, which no client can satisfy — and the CLI, which never
+/// sees a JSON-Schema validator, would reject a perfectly good list.
+#[test]
+fn a_list_parameters_vocabulary_constrains_its_items() {
+    let catalog = bundled_catalog();
+    let tools = catalog.tools_list_value();
+    let tool = tools
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_send_task_raw_input")
+        .expect("raw input tool");
+    let keys = &tool["inputSchema"]["properties"]["keys"];
+    assert_eq!(keys["type"], "array");
+    assert!(
+        keys.get("enum").is_none(),
+        "vocabulary must not sit on the array"
+    );
+    assert_eq!(keys["items"]["type"], "string");
+    assert_eq!(keys["items"]["enum"][0], "escape");
+
+    let rejected = resolve_request(
+        &catalog,
+        "kanna_send_task_raw_input",
+        &json!({ "task_id": "task-1", "keys": ["down", "arrow-up"] }),
+    )
+    .expect_err("an unknown key name must be refused");
+    assert!(rejected.contains("arrow-up"), "{rejected}");
+
+    resolve_request(
+        &catalog,
+        "kanna_send_task_raw_input",
+        &json!({ "task_id": "task-1", "keys": ["down", "enter"] }),
+    )
+    .expect("a list of known keys resolves");
+}
+
+/// The two input tools must read as different things, because using the wrong
+/// one is the whole failure this route exists to prevent.
+#[test]
+fn raw_input_description_separates_keys_from_delivered_messages() {
+    let catalog = bundled_catalog();
+    let description = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_send_task_raw_input")
+        .map(|tool| tool.description.clone())
+        .expect("raw input tool");
+
+    // The incident's own sequence, and the two other examples the surface owes
+    // a caller: a bare Escape and explicit bytes with nothing appended.
+    assert!(
+        description.contains("keys [\"escape\"]"),
+        "escape example missing"
+    );
+    assert!(
+        description.contains("keys [\"down\", \"enter\"]"),
+        "down-then-enter example missing"
+    );
+    assert!(
+        description.contains("bytes \"1b5b42\""),
+        "raw bytes example missing"
+    );
+
+    // Honest about what it is not.
+    assert!(description.contains("NOT recorded in kanna_task_inputs"));
+    assert!(description.contains("task.raw_input_delivered"));
+    assert!(description.contains("not an approval mechanism"));
+    assert!(description.contains("do NOT resend"));
+    // Terminal-mode limits are stated rather than a universal claim implied.
+    assert!(description.contains("DECCKM"));
 }

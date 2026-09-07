@@ -1,4 +1,5 @@
 pub mod session_id;
+pub mod terminal_keys;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

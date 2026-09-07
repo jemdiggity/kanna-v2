@@ -48,6 +48,18 @@
     "idePlaceholder": "code, cursor, idea...",
     "defaultAgent": "Default agent"
   },
+  "mobileAccess": {
+    "installTitle": "Get the Kanna mobile app",
+    "installQrAlt": "Kanna mobile app download QR code",
+    "installHint": "Scan with your iPhone camera, then come back here to pair",
+    "installLinkLabel": "App download link",
+    "copyLink": "Copy link",
+    "linkCopied": "Copied",
+    "installUnconfigured": "Install link not configured for this build.",
+    "installQrError": "Could not render the app download QR code.",
+    "pairingQrLabel": "Pairing QR code",
+    "pairingQrAlt": "Mobile pairing QR code"
+  },
   "shortcuts": {
     "title": "Keyboard Shortcuts",
     "showOnStartup": "Don't show on startup",

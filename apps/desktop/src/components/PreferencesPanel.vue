@@ -34,6 +34,7 @@ interface MobileServerStatusResponse {
   desktopName?: string
   state?: string
   pairingCode?: string | null
+  environment?: string
 }
 
 interface PairingSessionResponse {
@@ -70,6 +71,7 @@ const tabs: Array<'general' | 'account' | 'mobile' | 'developer'> = isDev
   ? ['general', 'account', 'mobile', 'developer']
   : ['general', 'account', 'mobile']
 const mobileDesktopName = ref("This desktop")
+const mobileEnvironment = ref("development")
 const mobileDesktopId = ref("")
 const mobileServerStatus = ref<MobileServerStatus>("stopped")
 const pairingCode = ref<string | null>(null)
@@ -128,6 +130,7 @@ async function refreshMobileAccess() {
   try {
     const status = await invoke<MobileServerStatusResponse>("mobile_server_status")
     mobileDesktopId.value = status.desktopId?.trim() ?? ""
+    mobileEnvironment.value = status.environment?.trim() || "development"
     if (status.desktopName) {
       mobileDesktopName.value = status.desktopName
     }
@@ -493,6 +496,7 @@ defineExpose({ cycleTab })
       <div v-if="activeTab === 'mobile'" class="prefs-body">
         <MobileAccessPanel
           :desktop-name="mobileDesktopName"
+          :environment="mobileEnvironment"
           :server-status="mobileServerStatus"
           :pairing-code="pairingCode"
           :pairing-payload="pairingPayload"

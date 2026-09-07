@@ -19,6 +19,10 @@ import { e2eInvokeHistory } from "./e2eInvokeHistory";
 import { e2eEventHistory } from "./e2eEventHistory";
 import { createE2ERemoteCompanionApi } from "./e2eRemoteCompanion";
 import {
+  getE2EMobileInstallUrl,
+  setE2EMobileInstallUrl,
+} from "./utils/mobileInstallLinks";
+import {
   getSharedStreamClient,
   resetSharedStreamClientForTests,
 } from "./composables/desktopStreamClient";
@@ -223,7 +227,7 @@ try {
 
   if (import.meta.env.DEV) {
     const appWithSetupState = app as typeof app & AppWithSetupState;
-    window.__KANNA_E2E__ = {
+    const e2eHook: KannaE2EHook = {
       ready: false,
       startupOverlaysSettled: false,
       get setupState() {
@@ -285,6 +289,12 @@ try {
       serverWork: e2eServerWork,
       terminalStreams: e2eTerminalStreams,
     };
+    Object.defineProperty(e2eHook, "mobileInstallUrl", {
+      configurable: true,
+      get: getE2EMobileInstallUrl,
+      set: setE2EMobileInstallUrl,
+    });
+    window.__KANNA_E2E__ = e2eHook;
   }
 
   app.mount("#app");
