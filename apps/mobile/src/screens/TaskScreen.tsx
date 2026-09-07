@@ -1298,7 +1298,9 @@ export function TaskScreen({
         {activeInputDeliveryStatus ? (
           <View
             accessibilityLiveRegion="polite"
-            accessibilityLabel="Task input delivery status"
+            accessibilityLabel={composerInputStatusMessage(
+              activeInputDeliveryStatus
+            )}
             style={[
               styles.taskInputStatus,
               activeInputDeliveryStatus.status === "failed" ||
