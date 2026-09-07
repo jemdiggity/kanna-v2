@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run --maxWorkers=2 src/desktopPairing.test.ts src/harness.test.ts src/scriptedAgent.test.ts src/staging.test.ts src/vitestArgs.test.ts",
+    "test": "vitest run --maxWorkers=2 src/desktopPairing.test.ts src/harness.test.ts src/scriptedAgent.test.ts src/serverSql.test.ts src/staging.test.ts src/vitestArgs.test.ts",
     "test:remote-e2e": "tsx src/run.ts --dev",
     "typecheck": "tsc --noEmit",
     "smoke": "vitest run --maxWorkers=2 src/remote-harness.smoke.test.ts"
