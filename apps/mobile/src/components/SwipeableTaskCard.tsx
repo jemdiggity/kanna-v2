@@ -7,7 +7,6 @@ import {
   StyleSheet,
   Text,
   View,
-  type LayoutAnimationConfig,
   type LayoutChangeEvent,
   type PanResponderGestureState
 } from "react-native";
@@ -25,18 +24,6 @@ import {
 } from "./taskRowSwipe";
 
 const TASK_ROW_DEFAULT_EXIT_DISTANCE = 600;
-
-/**
- * The reorder a pin causes. `Presets.spring` runs for 700ms, which reads as
- * lag on a row whose state has already changed; this is the same physical
- * motion over the time the eye actually needs to follow one row past another.
- */
-const PIN_REORDER_LAYOUT_ANIMATION: LayoutAnimationConfig = {
-  duration: 260,
-  create: { type: "easeInEaseOut", property: "opacity" },
-  update: { type: "spring", springDamping: 0.9 },
-  delete: { type: "easeInEaseOut", property: "opacity" }
-};
 
 /**
  * A committed pin is confirmed in the hand as well as on the screen. Haptics
@@ -395,9 +382,11 @@ export function SwipeableTaskCard({
     if (!onTogglePin) return;
     if (holdActionThroughClose) setClosingFromPinned(pinned);
     confirmCommitWithHaptics();
-    if (!reduceMotionRef.current) {
-      LayoutAnimation.configureNext(PIN_REORDER_LAYOUT_ANIMATION);
-    }
+    // Deliberately no `LayoutAnimation` here. The row's new place in the list
+    // is a fact the moment the finger lifts, and animating the reorder means
+    // the row is still travelling for as long as the animation runs — which
+    // is the delay this row is supposed to have stopped having. The swipe
+    // closing over the action is the motion; the position is not animated.
     void togglePin();
   };
   commitPinRef.current = () => commitPin(true);

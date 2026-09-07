@@ -419,11 +419,9 @@ describe("SwipeableTaskCard", () => {
 
     expect(onTogglePin).toHaveBeenCalledWith(true);
     expect(nativeHarness.animationKinds).toContain("spring");
-    // The list is told to animate the reorder the pin causes, over the time
-    // the eye needs rather than the 700ms of the stock spring preset.
-    expect(nativeHarness.layoutPresets).toContainEqual(
-      expect.objectContaining({ duration: 260 })
-    );
+    // The row's new place in the list is not animated: an animated reorder is
+    // time the row spends still travelling after the pin is already a fact.
+    expect(nativeHarness.layoutPresets).toEqual([]);
     // Nothing rests open: the row is back where it started, with no revealed
     // button waiting for a second tap.
     expect(rowTranslation(renderer)).toBe(0);
