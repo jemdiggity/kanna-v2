@@ -135,9 +135,9 @@ export type RustCacheEligibility =
  * Kache's per-invocation key is not the whole isolation boundary. Divergent
  * worktrees used to share the same repository store without a source-snapshot
  * salt, allowing concurrent index activity to restore an artifact selected for
- * another checkout. `applyRustCacheEnvironment` now adds that salt while
- * retaining one content-addressed store, and the cross-worktree publication and
- * restore paths are exercised against the real pinned binary in
+ * another checkout. Kanna's outer rustc wrapper refreshes that salt at compiler
+ * invocation time while retaining one content-addressed store, and the cross-
+ * worktree publication and restore paths are exercised against the real pinned binary in
  * `tests/rust-cache.integration.test.ts`.
  */
 export function resolveRustCacheEligibility(input: {
@@ -201,6 +201,8 @@ export function stripRustCacheEnvironment(env: NodeJS.ProcessEnv): NodeJS.Proces
     Object.entries(env).filter(
       ([key]) =>
         !key.startsWith("KACHE_") &&
+        key !== "KANNA_KACHE_BINARY" &&
+        key !== "KANNA_RUST_CACHE_REPO_ROOT" &&
         !(RUST_CACHE_ENVIRONMENT_KEYS as readonly string[]).includes(key)
     )
   );

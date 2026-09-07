@@ -145,7 +145,7 @@ describeMac("kache Cargo wiring", () => {
         join(homeDir, "Library", "Caches", "kanna", "rust-kache", repositoryIdentity(repoRoot))
       );
       expect(invocation.localOnly).toBe("1");
-      expect(invocation.keySalt).toMatch(/^kanna-source-v1:[0-9a-f]{64}$/);
+      expect(invocation.keySalt).toMatch(/^kanna-source-v2:[0-9a-f]{64}$/);
       expect(invocation.cacheExecutables).toBe("0");
       expect(invocation.verifyRestores).toBe("always");
       expect(invocation.maxSize).toBe("10GiB");
@@ -154,7 +154,8 @@ describeMac("kache Cargo wiring", () => {
       expect(invocation.incrementalFlag).toBe(false);
     }
 
-    expect(cache.env.RUSTC_WRAPPER).toBe(binary);
+    expect(cache.env.RUSTC_WRAPPER).not.toBe(binary);
+    expect(cache.env.KANNA_KACHE_BINARY).toBe(binary);
     // Cargo still creates the layout directory; it must stay empty, because
     // incremental state is the disk cost hermetic caching trades away.
     const incremental = join(repoRoot, ".build", "cargo-build", "debug", "incremental");
@@ -538,15 +539,9 @@ describeRealKache("pinned kache selects cache keys per source revision", () => {
     await run("git", ["-c", "user.name=Kanna", "-c", "user.email=kanna@example.invalid", "commit", "-qm", "revision 1"], {
       cwd: repoRoot
     });
-    writeRevision(repoRoot, 2);
-    await run("git", ["add", "."], { cwd: repoRoot });
-    await run("git", ["-c", "user.name=Kanna", "-c", "user.email=kanna@example.invalid", "commit", "-qm", "revision 2"], {
-      cwd: repoRoot
-    });
-
     const firstRoot = join(root, "worktree-1");
     const secondRoot = join(root, "worktree-2");
-    await run("git", ["worktree", "add", "--quiet", "--detach", firstRoot, "HEAD~1"], {
+    await run("git", ["worktree", "add", "--quiet", "--detach", firstRoot, "HEAD"], {
       cwd: repoRoot
     });
     await run("git", ["worktree", "add", "--quiet", "--detach", secondRoot, "HEAD"], {
@@ -567,17 +562,18 @@ describeRealKache("pinned kache selects cache keys per source revision", () => {
       throw new Error("pinned cache unexpectedly inactive");
     }
 
-    // Sharing remains intact at the blob/index layer, but the full source
-    // snapshot participates in every logical key. This is the boundary the old
-    // repository-only configuration lacked.
+    // Model two already-running `kd dev up` processes: both environments are
+    // resolved while their bytes are identical, then one checkout is edited.
     expect(firstCache.state.store).toBe(secondCache.state.store);
-    expect(firstCache.env.KACHE_KEY_SALT).not.toBe(secondCache.env.KACHE_KEY_SALT);
+    expect(firstCache.env.KACHE_KEY_SALT).toBe(secondCache.env.KACHE_KEY_SALT);
+    writeRevision(secondRoot, 2);
 
     const build = (worktree: string, env: NodeJS.ProcessEnv) =>
       run("cargo", ["build"], { cwd: worktree, env });
     await Promise.all([build(firstRoot, firstCache.env), build(secondRoot, secondCache.env)]);
     expect(await run(join(firstRoot, ".build", "debug", "probe"), [])).toBe("1");
     expect(await run(join(secondRoot, ".build", "debug", "probe"), [])).toBe("2");
+    expect(defaultsEntries(await listCacheEntries(firstCache.state.store))).toHaveLength(2);
 
     // Exercise concurrent restores too, not only concurrent publication.
     rmSync(join(firstRoot, ".build"), { recursive: true, force: true });
@@ -585,6 +581,7 @@ describeRealKache("pinned kache selects cache keys per source revision", () => {
     await Promise.all([build(firstRoot, firstCache.env), build(secondRoot, secondCache.env)]);
     expect(await run(join(firstRoot, ".build", "debug", "probe"), [])).toBe("1");
     expect(await run(join(secondRoot, ".build", "debug", "probe"), [])).toBe("2");
+    expect(totalHits(await listCacheEntries(firstCache.state.store))).toBeGreaterThan(0);
   }, 300_000);
 
   it("never serves an artifact compiled from a different revision", async () => {

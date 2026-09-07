@@ -8,9 +8,10 @@ import {
   readlinkSync,
   realpathSync,
   renameSync,
-  rmSync
+  rmSync,
+  writeFileSync
 } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { CommandRunner } from "./process";
@@ -166,6 +167,80 @@ export function resolveRustCacheStorePath(input: RustCacheRuntimeInput): string 
   return resolveRustCacheStore(input.homeDir, repositoryIdentity(input.repoRoot));
 }
 
+function rustCacheWrapperPath(binary: string): string {
+  return join(dirname(binary), "kanna-kache-wrapper.cjs");
+}
+
+/**
+ * Cargo can be a long-lived descendant of `kd dev up`, so an environment
+ * computed while kd starts cannot describe the sources Cargo sees later. This
+ * tiny outer wrapper fingerprints the checkout immediately before every rustc
+ * invocation and then delegates to the pinned kache binary. Kache still owns
+ * locking and atomic blob publication in the shared store; divergent source
+ * snapshots cannot address the same mutable index entry, while identical
+ * snapshots retain cross-worktree hits.
+ */
+function ensureRustCacheWrapper(binary: string): string {
+  const wrapper = rustCacheWrapperPath(binary);
+  const contents = `#!/usr/bin/env node
+const { createHash } = require("node:crypto");
+const { execFileSync, spawnSync } = require("node:child_process");
+const { lstatSync, readFileSync, readlinkSync } = require("node:fs");
+const { join } = require("node:path");
+
+const repoRoot = process.env.KANNA_RUST_CACHE_REPO_ROOT;
+const kache = process.env.KANNA_KACHE_BINARY;
+if (!repoRoot || !kache) process.exit(86);
+const hash = createHash("sha256");
+const gitBuffer = (args) => execFileSync("git", args, {
+  cwd: repoRoot, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"]
+});
+let paths;
+try {
+  hash.update(gitBuffer(["rev-parse", "HEAD^{tree}"]).toString("utf8").trim());
+  hash.update("\\0");
+  const changed = gitBuffer(["diff", "--name-only", "-z", "HEAD"]);
+  const untracked = gitBuffer(["ls-files", "--others", "--exclude-standard", "-z"]);
+  paths = [...new Set(Buffer.concat([changed, untracked]).toString("utf8").split("\\0").filter(Boolean))].sort();
+} catch {
+  // Unborn repositories have no tree object; hash their complete index and
+  // working tree. This is also the conservative path for malformed fixtures.
+  paths = gitBuffer(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+    .toString("utf8").split("\\0").filter(Boolean).sort();
+}
+for (const relativePath of paths) {
+  hash.update(relativePath); hash.update("\\0");
+  const path = join(repoRoot, relativePath);
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) { hash.update("symlink\\0"); hash.update(readlinkSync(path)); }
+    else if (stat.isFile()) { hash.update(stat.mode & 0o111 ? "executable\\0" : "file\\0"); hash.update(readFileSync(path)); }
+    else {
+      hash.update("directory\\0");
+      try { hash.update(execFileSync("git", ["rev-parse", "HEAD"], { cwd: path, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()); }
+      catch { hash.update("unresolved"); }
+    }
+  } catch { hash.update("missing"); }
+  hash.update("\\0");
+}
+process.env.KACHE_KEY_SALT = "kanna-source-v2:" + hash.digest("hex");
+const result = spawnSync(kache, process.argv.slice(2), { stdio: "inherit", env: process.env });
+if (result.error) { console.error(result.error.message); process.exit(1); }
+process.exit(result.status == null ? 1 : result.status);
+`;
+  try {
+    if (!existsSync(wrapper) || readFileSync(wrapper, "utf8") !== contents) {
+      const temporary = `${wrapper}.${process.pid}.${randomUUID()}.tmp`;
+      writeFileSync(temporary, contents, { mode: 0o755 });
+      renameSync(temporary, wrapper);
+    }
+    chmodSync(wrapper, 0o755);
+  } catch (error) {
+    throw new Error(`could not install the Kanna kache wrapper: ${String(error)}`);
+  }
+  return wrapper;
+}
+
 let warnedMissingBinary = false;
 
 /**
@@ -224,14 +299,17 @@ export function applyRustCacheEnvironment(
   }
 
   const store = resolveRustCacheStorePath(input);
+  const wrapper = ensureRustCacheWrapper(paths.binary);
   return {
     env: {
       ...base,
       ...buildRustCacheEnvironment({
-        binary: paths.binary,
+        binary: wrapper,
         store,
         sourceIdentity: sourceIdentity(input.repoRoot)
-      })
+      }),
+      KANNA_KACHE_BINARY: paths.binary,
+      KANNA_RUST_CACHE_REPO_ROOT: canonicalPath(input.repoRoot)
     },
     state: { active: true, store, binary: paths.binary }
   };

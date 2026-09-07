@@ -244,7 +244,8 @@ describe("rust cache environment application", () => {
       binary,
       store: resolveRustCacheStorePath({ repoRoot, homeDir, env: {} })
     });
-    expect(result.env.RUSTC_WRAPPER).toBe(binary);
+    expect(result.env.RUSTC_WRAPPER).not.toBe(binary);
+    expect(result.env.KANNA_KACHE_BINARY).toBe(binary);
     expect(result.env.KACHE_CACHE_DIR).toBe(
       resolveRustCacheStorePath({ repoRoot, homeDir, env: {} })
     );
@@ -280,7 +281,8 @@ describe("rust cache environment application", () => {
       arch: "arm64"
     });
     expect(result.state.active).toBe(true);
-    expect(result.env.RUSTC_WRAPPER).toBe(binary);
+    expect(result.env.RUSTC_WRAPPER).not.toBe(binary);
+    expect(result.env.KANNA_KACHE_BINARY).toBe(binary);
   });
 
   it("stays inert when opted out, in CI, or off a supported host", () => {
@@ -362,7 +364,8 @@ describe("rust cache environment application", () => {
       arch: "arm64"
     });
     expect(result.state.active).toBe(true);
-    expect(result.env.RUSTC_WRAPPER).toBe(binary);
+    expect(result.env.RUSTC_WRAPPER).not.toBe(binary);
+    expect(result.env.KANNA_KACHE_BINARY).toBe(binary);
     expect(result.env.RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
     expect(result.env.CARGO_BUILD_RUSTC_WRAPPER).toBeUndefined();
     expect(result.env.CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
