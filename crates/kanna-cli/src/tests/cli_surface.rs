@@ -112,6 +112,121 @@ fn advance_stage_accepts_only_declared_operator_or_manager_sources() {
     assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
 }
 
+/// The transfer surface an agent reaches for when a task has to change
+/// machines. The manager who needed it on 2026-09-06 found no such command and
+/// posted a scraped peer id at the raw HTTP route instead, so these spellings —
+/// and the direction each one implies — are the contract.
+#[test]
+fn transfer_commands_name_a_machine_and_state_their_direction() {
+    let push = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "push",
+        "--task-id",
+        "task-1",
+        "--to-machine",
+        "desktop-studio",
+        "--transport",
+        "lan",
+        "--intent-key",
+        "retry-1",
+        // A push runs where the task lives, so it is routable at a sibling.
+        "--machine-id",
+        "desktop-laptop",
+    ]);
+    assert!(
+        push.is_ok(),
+        "{:?}",
+        push.err().map(|error| error.to_string())
+    );
+
+    let pull = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "pull",
+        "--source-task-id",
+        "task-1",
+        "--from-machine",
+        "peer-primary",
+    ]);
+    assert!(
+        pull.is_ok(),
+        "{:?}",
+        pull.err().map(|error| error.to_string())
+    );
+
+    // A pull always runs on the machine the task moves to; routing one
+    // elsewhere would be a different operation, so the argument does not exist.
+    let routed_pull = match crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "pull",
+        "--source-task-id",
+        "task-1",
+        "--from-machine",
+        "peer-primary",
+        "--machine-id",
+        "desktop-studio",
+    ]) {
+        Ok(_) => panic!("a pull cannot be routed to another machine"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        routed_pull.kind(),
+        clap::error::ErrorKind::UnknownArgument,
+        "{routed_pull}"
+    );
+
+    // Transports are the sidecar's own vocabulary, refused at parse time rather
+    // than travelling to the server as a typo.
+    for transport in ["auto", "lan", "cloud"] {
+        assert!(crate::Cli::try_parse_from([
+            "kanna-cli",
+            "task",
+            "push",
+            "--task-id",
+            "task-1",
+            "--to-machine",
+            "desktop-studio",
+            "--transport",
+            transport,
+        ])
+        .is_ok());
+    }
+    let invalid = match crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "push",
+        "--task-id",
+        "task-1",
+        "--to-machine",
+        "desktop-studio",
+        "--transport",
+        "carrier-pigeon",
+    ]) {
+        Ok(_) => panic!("transports are the sidecar's own vocabulary"),
+        Err(error) => error,
+    };
+    assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
+
+    // A destination is required: there is no implicit "the other machine".
+    let missing =
+        match crate::Cli::try_parse_from(["kanna-cli", "task", "push", "--task-id", "task-1"]) {
+            Ok(_) => panic!("there is no implicit \"the other machine\""),
+            Err(error) => error,
+        };
+    assert_eq!(
+        missing.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+
+    assert!(crate::Cli::try_parse_from(["kanna-cli", "machine", "transfer-peers"]).is_ok());
+    assert!(
+        crate::Cli::try_parse_from(["kanna-cli", "task", "transfers", "--task-id", "task-1",])
+            .is_ok()
+    );
+}
+
 #[test]
 fn parses_new_repo_and_task_subcommands() {
     let cli = crate::Cli::try_parse_from([

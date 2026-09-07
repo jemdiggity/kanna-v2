@@ -24,6 +24,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_info",
             "kanna_list_machines",
             "kanna_guide",
+            "kanna_list_transfer_peers",
             "kanna_list_repos",
             "kanna_add_repo",
             "kanna_reconcile_repo_metadata",
@@ -36,6 +37,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_set_task_workflow",
             "kanna_task_logs",
             "kanna_task_inputs",
+            "kanna_task_transfers",
             "kanna_search_tasks",
             "kanna_list_repo_tasks",
             "kanna_list_agents",
@@ -47,6 +49,8 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_close_task",
             "kanna_rename_task",
             "kanna_advance_stage",
+            "kanna_push_task",
+            "kanna_pull_task",
             "kanna_rerun_stage",
             "kanna_resume_task",
             "kanna_block_task",
@@ -804,6 +808,38 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "prompt": "fix it"
             }),
         ),
+        (
+            "kanna_list_transfer_peers",
+            json!({}),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/transfers/peers",
+            json!({}),
+        ),
+        (
+            "kanna_task_transfers",
+            json!({ "task_id": "task-1" }),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/transfers",
+            json!({}),
+        ),
+        (
+            "kanna_push_task",
+            json!({ "task_id": "task-1", "to_machine": "desktop-studio", "transport": "lan" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/actions/push-to-peer",
+            json!({ "targetMachine": "desktop-studio", "transport": "lan" }),
+        ),
+        (
+            "kanna_pull_task",
+            json!({ "source_task_id": "task-1", "from_machine": "peer-primary" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/transfers/actions/pull-task",
+            json!({ "sourceTaskId": "task-1", "sourceMachine": "peer-primary" }),
+        ),
     ];
 
     for (name, args, method, kind, path, body) in cases {
@@ -839,6 +875,109 @@ fn resolves_expected_requests_for_every_bundled_tool() {
     assert_eq!(wait_spec.timeout_secs, MAX_WAIT_TIMEOUT_SECS);
     assert_eq!(wait_spec.poll_secs, 1);
     assert_eq!(wait_spec.until, WaitUntil::Closed);
+}
+
+/// The transfer surface's whole hazard is that its calls succeed long before
+/// anything moves. A manager once read a `scheduled: true` from the raw server
+/// API as a completed move while the transfer was dying on a relay socket, so
+/// every one of these declarations has to say outright that it schedules work,
+/// and has to name the surface that answers the real question.
+#[test]
+fn transfer_tools_refuse_to_read_as_a_completed_move() {
+    let catalog = bundled_catalog();
+    let describe = |name: &str| {
+        catalog
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("{name} must be a catalog tool"))
+            .description
+            .clone()
+    };
+
+    for name in ["kanna_push_task", "kanna_pull_task"] {
+        let description = describe(name);
+        assert!(
+            description.contains("DOES NOT MOVE THE TASK"),
+            "{name} must say so in terms nothing can skim past: {description}"
+        );
+        assert!(
+            description.contains("kanna_task_transfers"),
+            "{name} must name the surface that reports the durable outcome"
+        );
+        assert!(
+            description.contains("moved:false"),
+            "{name} must name the response field that states it"
+        );
+    }
+
+    // Direction is the other thing a caller cannot guess. A push runs where the
+    // task lives, so it is routable; a pull runs where the task is going, so
+    // routing it elsewhere would be a different operation entirely and the
+    // argument is deliberately absent.
+    let push = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_push_task")
+        .expect("push tool");
+    assert!(push
+        .params
+        .iter()
+        .any(|param| param.name == "machine_id" && param.location == ParamLoc::Routing));
+    let pull = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_pull_task")
+        .expect("pull tool");
+    assert!(
+        !pull.params.iter().any(|param| param.name == "machine_id"),
+        "a pull always runs on the machine it moves the task to"
+    );
+    assert!(resolve_request(
+        &catalog,
+        "kanna_pull_task",
+        &json!({
+            "source_task_id": "task-1",
+            "from_machine": "peer-primary",
+            "machine_id": "desktop-studio",
+        }),
+    )
+    .expect_err("routing a pull is not a thing")
+    .contains("unknown argument: machine_id"),);
+
+    // Destinations are named by identity the server owns, so no agent surface
+    // asks for a peer's key, endpoint, or relay credential.
+    for name in ["kanna_push_task", "kanna_pull_task"] {
+        let tool = catalog
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .expect("tool");
+        for param in &tool.params {
+            assert!(
+                !param.name.contains("token")
+                    && !param.name.contains("public_key")
+                    && !param.name.contains("secret")
+                    && !param.name.contains("endpoint"),
+                "{name} must not ask an agent for transport credentials: {}",
+                param.name
+            );
+        }
+    }
+
+    // The credential that fails a cloud transfer belongs to the desktop app,
+    // so the tools that can hit it say where it comes from.
+    assert!(describe("kanna_list_transfer_peers").contains("signed-in desktop app"));
+    assert!(describe("kanna_push_task").contains("credential"));
+    assert!(describe("kanna_pull_task").contains("credential"));
+
+    let transfers = describe("kanna_task_transfers");
+    for state in ["pending", "completed", "failed", "rejected"] {
+        assert!(
+            transfers.contains(state),
+            "kanna_task_transfers must document its {state} verdict"
+        );
+    }
 }
 
 /// The multi-task wait blocks server-side, so its window is bound by the same
@@ -1308,7 +1447,8 @@ fn preserves_validation_error_strings() {
     assert!(unknown_tool.starts_with("unknown tool: kanna_unknown"));
     assert!(
         unknown_tool.contains(
-            "available tools: kanna_info, kanna_list_machines, kanna_guide, kanna_list_repos,"
+            "available tools: kanna_info, kanna_list_machines, kanna_guide, \
+             kanna_list_transfer_peers, kanna_list_repos,"
         ),
         "unknown tool error should list available tools: {unknown_tool}"
     );

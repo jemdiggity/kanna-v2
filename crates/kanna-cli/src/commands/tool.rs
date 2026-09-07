@@ -472,28 +472,34 @@ pub(crate) async fn run(command: ToolCommands) {
 }
 
 pub(crate) async fn run_machine(command: MachineCommands) {
-    match command {
+    let (name, args, server_url) = match command {
         MachineCommands::List { server_url } => {
-            let catalog = load_tool_catalog_from_current_dir().unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
-                process::exit(1);
-            });
-            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let (_, machines) = call_catalog_tool(
-                &base_url,
-                &catalog,
-                "kanna_list_machines",
-                &serde_json::json!({}),
-            )
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
-                process::exit(1);
-            });
-            if let Err(error) = print_json(&machines) {
-                eprintln!("Error: {error}");
-                process::exit(1);
-            }
+            ("kanna_list_machines", serde_json::json!({}), server_url)
         }
+        MachineCommands::TransferPeers {
+            machine_id,
+            server_url,
+        } => {
+            let mut args = serde_json::json!({});
+            if let (Some(object), Some(machine_id)) = (args.as_object_mut(), machine_id) {
+                object.insert("machine_id".to_string(), Value::String(machine_id));
+            }
+            ("kanna_list_transfer_peers", args, server_url)
+        }
+    };
+    let catalog = load_tool_catalog_from_current_dir().unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        process::exit(1);
+    });
+    let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+    let (_, machines) = call_catalog_tool(&base_url, &catalog, name, &args)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            process::exit(1);
+        });
+    if let Err(error) = print_json(&machines) {
+        eprintln!("Error: {error}");
+        process::exit(1);
     }
 }

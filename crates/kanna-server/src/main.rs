@@ -32,6 +32,7 @@ mod transfer_artifact;
 mod transfer_control;
 mod transfer_engine;
 mod transfer_sidecar;
+mod transfer_targets;
 mod visual_companion;
 mod workspace_commands;
 mod worktree_cleanup;
