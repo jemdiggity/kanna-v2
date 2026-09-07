@@ -95,7 +95,10 @@ function crateUniverseDirectDependencies(repository: string, packagePath: string
 
 function catalogManifestDependencies(): string[] {
   const manifest = parseTomlFile("crates/kanna-tool-catalog/Cargo.toml");
-  const dependencies = manifest.dependencies;
+  const dependencies = {
+    ...expectRecord(manifest.dependencies, "kanna-tool-catalog Cargo.toml [dependencies]"),
+    ...expectRecord(manifest["dev-dependencies"], "kanna-tool-catalog Cargo.toml [dev-dependencies]"),
+  };
   if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
     throw new Error("kanna-tool-catalog Cargo.toml has no [dependencies] table");
   }
