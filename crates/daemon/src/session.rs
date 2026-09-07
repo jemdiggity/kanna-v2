@@ -3338,6 +3338,46 @@ mod tests {
     /// frame. Those intermediate frames used to publish Idle on the 500 ms
     /// status cadence, forcing the server and desktop to process a false state
     /// edge while terminal output was already competing with typing.
+    /// The first reported incident, driven through the publication path rather
+    /// than the matcher: a Claude session latched at `idle` that starts
+    /// working must publish `Busy` off its own output, with no attach, no
+    /// selection and nobody clicking it. 2.1.263 draws no `esc to interrupt`,
+    /// so before the working footer became a signal this frame published
+    /// nothing and the session stayed `idle` through the whole turn.
+    #[tokio::test]
+    async fn captured_claude_working_frame_publishes_busy_while_unattached() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/claude/working-footer-2.1.263-171x65.json"
+        ))
+        .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Idle).unwrap();
+        record.status_observed = true;
+        let handle = Arc::new(SessionHandle::new(record));
+
+        let published = handle
+            .mirror_output_at(
+                fixture["serialized"].as_str().unwrap().as_bytes(),
+                false,
+                Instant::now(),
+                Duration::from_millis(0),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            published.status,
+            Some(SessionStatus::Busy),
+            "the frame must publish a Busy transition off output alone"
+        );
+        // `emit_status_changed` is what commits a published transition in
+        // production; committing it here proves the session leaves `idle`.
+        assert!(handle.update_status(published.status.unwrap()).await);
+        assert_eq!(handle.status().await, SessionStatus::Busy);
+    }
+
     #[tokio::test]
     async fn unbracketed_claude_repaint_cannot_publish_idle_until_output_settles() {
         let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Busy).unwrap();

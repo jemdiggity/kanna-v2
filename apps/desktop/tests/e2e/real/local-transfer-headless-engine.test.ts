@@ -6,6 +6,8 @@ import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { localProcessFetch } from "../../../../../tests/remote-e2e/src/localProcessFetch";
+import { serverSql, waitForSql } from "../../../../../tests/remote-e2e/src/serverSql";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
@@ -43,10 +45,6 @@ const SOURCE_TRANSCRIPT = [
   "",
 ].join("\n");
 
-interface SqlRow {
-  [column: string]: unknown;
-}
-
 /**
  * Claude keys transcripts by the session's working directory, replacing every
  * character outside `[A-Za-z0-9]` with `-`. Mirrored here independently of the
@@ -61,36 +59,6 @@ function transcriptPathFor(worktreePath: string): string {
     ? realpathSync(worktreePath)
     : join(realpathSync(dirname(worktreePath)), basename(worktreePath));
   return join(homedir(), ".claude/projects", claudeProjectSlug(resolved), `${SOURCE_SESSION_ID}.jsonl`);
-}
-
-async function serverSql(baseUrl: string, sql: string, params: unknown[] = []): Promise<SqlRow[]> {
-  const response = await fetch(`${baseUrl}/v1/e2e/sql`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sql, params, query: true }),
-  });
-  if (!response.ok) {
-    throw new Error(`e2e sql failed (${response.status}): ${await response.text()}`);
-  }
-  return ((await response.json()) as { rows: SqlRow[] }).rows;
-}
-
-async function waitForSql(
-  baseUrl: string,
-  sql: string,
-  params: unknown[],
-  accept: (rows: SqlRow[]) => boolean,
-  label: string,
-  timeoutMs = 120_000,
-): Promise<SqlRow[]> {
-  const deadline = Date.now() + timeoutMs;
-  let last: SqlRow[] = [];
-  while (Date.now() < deadline) {
-    last = await serverSql(baseUrl, sql, params).catch(() => last);
-    if (accept(last)) return last;
-    await sleep(200);
-  }
-  throw new Error(`timed out waiting for ${label}: ${JSON.stringify(last)}`);
 }
 
 /**
@@ -111,7 +79,7 @@ async function killServerOnPort(baseUrl: string): Promise<void> {
   }
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
-    const alive = await fetch(`${baseUrl}/v1/status`).then(() => true).catch(() => false);
+    const alive = await localProcessFetch(`${baseUrl}/v1/status`).then(() => true).catch(() => false);
     if (!alive) return;
     await sleep(100);
   }
@@ -122,7 +90,9 @@ async function restartServer(client: WebDriverClient, baseUrl: string): Promise<
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     await tauriInvoke(client, "ensure_mobile_server").catch(() => undefined);
-    const ready = await fetch(`${baseUrl}/v1/status`).then((response) => response.ok).catch(() => false);
+    const ready = await localProcessFetch(`${baseUrl}/v1/status`)
+      .then((response) => response.ok)
+      .catch(() => false);
     if (ready) return;
     await sleep(500);
   }

@@ -287,6 +287,12 @@ pub struct SnapshotPipelineItem {
     pub has_running_post: i64,
     pub queued_input_count: i64,
     pub queued_input_reason: Option<String>,
+    /// The runtime dimension, carried so a freshly loaded window renders work
+    /// in progress without waiting for the next live change.
+    pub runtime_state: Option<String>,
+    /// The read dimension, derived exactly as [`crate::http_api::AppState`]
+    /// derives it for the live frame.
+    pub read_state: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -32,8 +32,11 @@ import {
 import { assertPlaywrightChromiumAvailable } from "./playwrightPreflight";
 import { createPortAllocator } from "./runPorts";
 import {
+  advanceAppStartupDeadline,
+  APP_READY_TIMEOUT_MS,
   classifyAppStartup,
   describeAppStartupFailure,
+  WEBDRIVER_START_TIMEOUT_MS,
   WRONG_URL_GRACE_MS,
   type AppStartupProbe,
 } from "./runStartup";
@@ -249,13 +252,17 @@ async function captureDesktopPane(sessionName: string): Promise<string> {
   });
 }
 
-async function waitForApp(instance: InstanceConfig, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+async function waitForApp(instance: InstanceConfig): Promise<void> {
+  let timing = {
+    deadline: Date.now() + WEBDRIVER_START_TIMEOUT_MS,
+    webdriverObserved: false,
+  };
   let probe: AppStartupProbe | null = null;
   let wrongUrlSince: number | null = null;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < timing.deadline) {
     probe = await probeApp(instance.baseUrl);
+    timing = advanceAppStartupDeadline(timing, probe, Date.now(), APP_READY_TIMEOUT_MS);
     const state = classifyAppStartup(probe, instance.devUrl);
     if (state === "ready") return;
     if (state === "wrong-url") {
@@ -512,6 +519,7 @@ async function main(): Promise<void> {
         webDriverPortEnvValue: secondaryWebDriverPort,
       })
     : null;
+  let runningInstances: RunningInstances | null = null;
 
   function buildPerfOutputPath(testTarget: string): string {
     const perfSuffix = sanitizeSuffix(testTarget.replace(/^tests\/e2e\//, ""));
@@ -591,8 +599,11 @@ async function main(): Promise<void> {
         isolateAgentProviders,
       }),
     });
+    // Record ownership before readiness checks so a startup failure still tears down
+    // the tmux session and daemon that `kd dev up` already created.
+    runningInstances = { primary, secondary: null };
     console.log(`[e2e] waiting for primary app at ${primary.baseUrl}`);
-    await waitForApp(primary, 10 * 60_000);
+    await waitForApp(primary);
     console.log(`[e2e] primary app ready at ${primary.baseUrl}`);
     await pauseForAppReady("primary");
 
@@ -615,8 +626,9 @@ async function main(): Promise<void> {
           isolateAgentProviders,
         }),
       });
+      runningInstances = { primary, secondary: secondaryInstance };
       console.log(`[e2e] waiting for secondary app at ${secondaryInstance.baseUrl}`);
-      await waitForApp(secondaryInstance, 10 * 60_000);
+      await waitForApp(secondaryInstance);
       console.log(`[e2e] secondary app ready at ${secondaryInstance.baseUrl}`);
       await pauseForAppReady("secondary");
     }
@@ -976,7 +988,6 @@ async function main(): Promise<void> {
     });
   }
 
-  let runningInstances: RunningInstances | null = null;
   let runningMockAgentProviderIsolation: boolean | null = null;
   let lastTargetWasReal = false;
   const cleanupAppDataHooks: Array<() => Promise<void>> = [];

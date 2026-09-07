@@ -656,6 +656,13 @@ mod tests {
                     agent_type: Some("pty".into()),
                     agent_provider: "codex".into(),
                     activity: activity.into(),
+                    runtime_state: None,
+                    read_state: if activity == "unread" {
+                        "unread"
+                    } else {
+                        "read"
+                    }
+                    .into(),
                     activity_revision: 7,
                     blocker_revision: 11,
                     transition_revision: Some("run-7".into()),

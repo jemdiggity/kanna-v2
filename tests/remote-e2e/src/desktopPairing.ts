@@ -1,3 +1,5 @@
+import { localProcessFetch, type LocalProcessFetch } from "./localProcessFetch";
+
 export interface DesktopPairingSession {
   code: string;
   desktopId: string;
@@ -10,7 +12,7 @@ export interface DesktopPairingSession {
 
 export async function createDesktopPairingSession(
   baseUrl: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: LocalProcessFetch = localProcessFetch,
 ): Promise<DesktopPairingSession> {
   const response = await fetchImpl(`${baseUrl}/v1/pairing/sessions`, {
     method: "POST",

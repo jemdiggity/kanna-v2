@@ -14,6 +14,7 @@ import {
 } from "../../../apps/mobile/src/lib/transports/lanTransport";
 import type { TaskInputAttachment } from "../../../apps/mobile/src/lib/api/types";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
+import { localProcessFetch } from "./localProcessFetch";
 import {
   collectTerminalEvents,
   createScriptedTask,
@@ -62,7 +63,8 @@ async function storedAttachments(
   }
 }
 
-const nodeFetch: FetchLike = async (input, init) => fetch(input, init);
+const nodeFetch: FetchLike = async (input, init) =>
+  localProcessFetch(input, init);
 
 function createLanClient(harness: RemoteHarness) {
   return createLanTransport(

@@ -40,6 +40,7 @@ import {
   startRemoteHarness,
   type RemoteHarness
 } from "./harness";
+import { localProcessFetch } from "./localProcessFetch";
 import {
   collectTerminalEvents,
   createScriptedTask,
@@ -793,7 +794,7 @@ async function makeTaskUnread(
   taskId: string
 ): Promise<void> {
   for (const status of ["busy", "idle"] as const) {
-    const response = await fetch(
+    const response = await localProcessFetch(
       `${harness.lanBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/runtime-status`,
       {
         method: "POST",

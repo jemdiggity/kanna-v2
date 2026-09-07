@@ -168,7 +168,7 @@ describe("test orchestration", () => {
     expect(root.scripts?.["test:tui-fidelity"])
       .toBe("pnpm --filter @kanna/tui-fidelity test:tui-fidelity");
     expect(remote.scripts?.test).toBe(
-      "vitest run --maxWorkers=2 src/desktopPairing.test.ts src/harness.test.ts src/scriptedAgent.test.ts src/staging.test.ts src/vitestArgs.test.ts",
+      "vitest run --maxWorkers=2 src/desktopPairing.test.ts src/harness.test.ts src/scriptedAgent.test.ts src/serverSql.test.ts src/staging.test.ts src/vitestArgs.test.ts",
     );
     expect(remote.scripts?.["test:remote-e2e"]).toBe("tsx src/run.ts --dev");
     expect(fidelity.scripts).not.toHaveProperty("test");
