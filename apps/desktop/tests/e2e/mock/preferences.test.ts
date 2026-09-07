@@ -16,6 +16,16 @@ describe("preferences", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
+    await client.executeSync(`
+      if (window.__KANNA_E2E__) {
+        window.__KANNA_E2E__.mobileInstallUrl = "https://kanna.build/mobile";
+      }
+      return true;
+    `);
+    const configuredInstallUrl = await client.executeSync<string>(
+      `return window.__KANNA_E2E__?.mobileInstallUrl || "";`,
+    );
+    expect(configuredInstallUrl).toBe("https://kanna.build/mobile");
   });
 
   afterAll(async () => {
@@ -94,6 +104,20 @@ describe("preferences", () => {
 
     await client.waitForElement('[data-testid="mobile-access-panel"]', 2_000);
     await client.waitForText(".prefs-panel", "Mobile Access", 2_000);
+    await client.waitForElement('[data-testid="mobile-access-install-qr"]', 2_000);
+    await client.waitForElement('[data-testid="mobile-access-install-label"]', 2_000);
+
+    await client.click(await client.findElement('[data-testid="mobile-access-start-pairing"]'));
+    await client.waitForElement('[data-testid="mobile-access-pairing-qr"]', 2_000);
+    await client.waitForElement('[data-testid="mobile-access-pairing-qr-label"]', 2_000);
+
+    const labels = await client.executeSync<string[]>(`
+      return Array.from(document.querySelectorAll(
+        '[data-testid="mobile-access-install-label"], [data-testid="mobile-access-pairing-qr-label"]',
+      ))
+        .map((element) => element.textContent?.trim() || "");
+    `);
+    expect(labels).toEqual(["Get the Kanna mobile app", "Pairing QR code"]);
   });
 
   it("persists app and terminal code theme preferences", async () => {

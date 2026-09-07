@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { renderPairingQr } from "../utils/pairingQr";
+import { renderPairingQr, renderQrCode } from "../utils/pairingQr";
+import { getMobileInstallLink } from "../utils/mobileInstallLinks";
 import type { MobilePushRegistrationStatus } from "../types/mobilePushRegistration";
 
 type ServerStatus = "running" | "stopped" | "error";
 
 const props = defineProps<{
   desktopName: string;
+  environment?: string;
   serverStatus: ServerStatus;
   pairingCode: string | null;
   pairingPayload: string | null;
@@ -17,6 +19,40 @@ const props = defineProps<{
   pushRegistration?: MobilePushRegistrationStatus | null;
   pushRegistrationLoading?: boolean;
 }>();
+
+const installLink = computed(() => getMobileInstallLink(props.environment ?? "development"));
+const installQrUrl = ref<string | null>(null);
+const installQrError = ref(false);
+const installLinkCopied = ref(false);
+let installQrGeneration = 0;
+
+watch(
+  installLink,
+  async (link) => {
+    const generation = ++installQrGeneration;
+    installQrUrl.value = null;
+    installQrError.value = false;
+    if (!link) return;
+
+    try {
+      const url = await renderQrCode(link);
+      if (generation === installQrGeneration) installQrUrl.value = url;
+    } catch {
+      if (generation === installQrGeneration) installQrError.value = true;
+    }
+  },
+  { immediate: true },
+);
+
+async function copyInstallLink() {
+  if (!installLink.value) return;
+  try {
+    await navigator.clipboard.writeText(installLink.value);
+    installLinkCopied.value = true;
+  } catch (error) {
+    console.error("[MobileAccessPanel] failed to copy mobile install link:", error);
+  }
+}
 
 const emit = defineEmits<{
   (e: "start-pairing"): void;
@@ -173,24 +209,69 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="pairing-area">
-      <div v-if="pairingCode && !pairingExpired" class="pairing-session">
-        <img
-          v-if="pairingQrUrl"
-          :src="pairingQrUrl"
-          alt="Mobile pairing QR code"
-          class="pairing-qr"
-          data-testid="mobile-access-pairing-qr"
-        />
-        <span v-else-if="pairingQrError" class="qr-error">{{ pairingQrError }}</span>
-        <div class="pairing-code">
-          <span class="label">Pairing code</span>
-          <code
-            class="code"
-            data-testid="mobile-access-pairing-code"
-          >{{ pairingCode }}</code>
-          <span class="expiry">Expires in five minutes</span>
+      <section class="qr-section install-section" data-testid="mobile-access-install">
+        <h4 class="qr-label" data-testid="mobile-access-install-label">
+          {{ $t('mobileAccess.installTitle') }}
+        </h4>
+        <template v-if="installLink">
+          <img
+            v-if="installQrUrl"
+            :src="installQrUrl"
+            :alt="$t('mobileAccess.installQrAlt')"
+            class="install-qr qr-image"
+            data-testid="mobile-access-install-qr"
+          />
+          <span
+            v-else-if="installQrError"
+            class="qr-error"
+            data-testid="mobile-access-install-error"
+          >{{ $t('mobileAccess.installQrError') }}</span>
+          <span class="label install-link-label">{{ $t('mobileAccess.installLinkLabel') }}</span>
+          <div class="install-link-row">
+            <a
+              :href="installLink"
+              target="_blank"
+              rel="noreferrer"
+              class="install-link"
+              data-testid="mobile-access-install-link"
+            >{{ installLink }}</a>
+            <button
+              type="button"
+              class="secondary-action copy-install-link"
+              data-testid="mobile-access-install-copy"
+              @click="copyInstallLink"
+            >{{ installLinkCopied ? $t('mobileAccess.linkCopied') : $t('mobileAccess.copyLink') }}</button>
+          </div>
+          <p class="install-hint">{{ $t('mobileAccess.installHint') }}</p>
+        </template>
+        <p v-else class="install-unconfigured" data-testid="mobile-access-install-unconfigured">
+          {{ $t('mobileAccess.installUnconfigured') }}
+        </p>
+      </section>
+
+      <section v-if="pairingCode && !pairingExpired" class="qr-section pairing-section">
+        <h4 class="qr-label" data-testid="mobile-access-pairing-qr-label">
+          {{ $t('mobileAccess.pairingQrLabel') }}
+        </h4>
+        <div class="pairing-session">
+          <img
+            v-if="pairingQrUrl"
+            :src="pairingQrUrl"
+            :alt="$t('mobileAccess.pairingQrAlt')"
+            class="pairing-qr"
+            data-testid="mobile-access-pairing-qr"
+          />
+          <span v-else-if="pairingQrError" class="qr-error">{{ pairingQrError }}</span>
+          <div class="pairing-code">
+            <span class="label">Pairing code</span>
+            <code
+              class="code"
+              data-testid="mobile-access-pairing-code"
+            >{{ pairingCode }}</code>
+            <span class="expiry">Expires in five minutes</span>
+          </div>
         </div>
-      </div>
+      </section>
       <div v-else class="pairing-code">
         <span class="label">Pairing code</span>
         <span class="placeholder">No pairing session active</span>
@@ -342,9 +423,67 @@ onBeforeUnmount(() => {
 .pairing-area {
   margin-top: 14px;
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: 12px;
+}
+
+.qr-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 0;
+}
+
+.install-section {
+  border-bottom: 1px solid var(--kn-border-default);
+}
+
+.qr-label {
+  align-self: stretch;
+  margin: 0;
+  color: var(--kn-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.qr-image {
+  display: block;
+  width: min(100%, 320px);
+  height: auto;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--kn-bg-panel);
+}
+
+.install-link-row {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 8px;
+}
+
+.install-link {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--kn-accent);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.copy-install-link {
+  flex: none;
+}
+
+.install-hint,
+.install-unconfigured {
+  align-self: stretch;
+  margin: 0;
+  color: var(--kn-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .pairing-session {
@@ -352,6 +491,14 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.pairing-section {
+  align-items: stretch;
+}
+
+.pairing-section .pairing-session {
+  justify-content: center;
 }
 
 .pairing-qr {

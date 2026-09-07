@@ -48,6 +48,18 @@
     "idePlaceholder": "code, cursor, idea...",
     "defaultAgent": "デフォルトエージェント"
   },
+  "mobileAccess": {
+    "installTitle": "Kannaモバイルアプリを入手",
+    "installQrAlt": "KannaモバイルアプリのダウンロードQRコード",
+    "installHint": "iPhoneのカメラでスキャンしてから、ここに戻ってペアリングしてください",
+    "installLinkLabel": "アプリのダウンロードリンク",
+    "copyLink": "リンクをコピー",
+    "linkCopied": "コピーしました",
+    "installUnconfigured": "このビルドのインストールリンクは設定されていません。",
+    "installQrError": "アプリのダウンロードQRコードを表示できませんでした。",
+    "pairingQrLabel": "ペアリングQRコード",
+    "pairingQrAlt": "モバイルペアリングQRコード"
+  },
   "shortcuts": {
     "title": "キーボードショートカット",
     "showOnStartup": "起動時に表示しない",

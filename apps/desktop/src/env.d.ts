@@ -111,6 +111,8 @@ interface KannaE2EHook {
   terminalOutputPerf: KannaTerminalOutputPerfE2EApi;
   resetStreamClient?: () => void;
   failNextInvoke?: string;
+  /** Optional install URL used by the mock desktop E2E to exercise the configured state. */
+  mobileInstallUrl?: string;
   serverWork?: KannaServerWorkE2EApi;
   terminalStreams?: KannaTerminalStreamsE2EApi;
   invokes?: {
