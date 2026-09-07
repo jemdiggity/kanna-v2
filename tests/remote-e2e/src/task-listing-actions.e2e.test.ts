@@ -330,9 +330,9 @@ describe("remote task listing, creation, and actions E2E", () => {
 
   it("launches, reuses, and honestly refuses a repository singleton command over the LAN route", async () => {
     // The route the phone's More tab uses. Its 503 was not a transport
-    // failure: the LAN request arrived and the desktop's own account-wide
+    // failure: the LAN request arrived and the desktop's own repository-scoped
     // singleton arbitration refused it, because the relay could not answer
-    // the account directory. This pins all three outcomes on the real route —
+    // singleton directory. This pins all three outcomes on the real route —
     // create, reuse, and refuse without creating a rival.
     const commandTask = await createScriptedTask(harness, {
       displayName: "Repo command singleton"
@@ -407,7 +407,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     // now shows instead of a bare status code, and it names the machine that
     // could not be read.
     expect((refusal as Error).message).toContain("(503)");
-    expect((refusal as Error).message).toContain("account directory");
+    expect((refusal as Error).message).toContain("repository singleton directory");
     expect((refusal as Error).message).toContain("stranded-directory-desktop");
     expect((refusal as Error).message).toContain("no singleton was created");
     expect(await openManagers()).toEqual([]);
