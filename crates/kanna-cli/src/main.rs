@@ -727,6 +727,13 @@ pub(crate) enum TaskCommands {
         #[arg(long = "exclude-task-id", value_delimiter = ',')]
         exclude_task_id: Vec<String>,
 
+        /// Drop these event types from the chosen scope; repeat or
+        /// comma-separate. A filter, not a scope, so it never invalidates a
+        /// cursor. A manager watching runtime state passes
+        /// `task.activity_changed` so a human reading a task never wakes it.
+        #[arg(long = "exclude-event-type", value_delimiter = ',')]
+        exclude_event_type: Vec<String>,
+
         /// Keep the calling task's own events in a repository-scoped wait
         /// issued from a task session (disables the automatic self-exclusion
         /// only; explicit --exclude-task-id values still apply)

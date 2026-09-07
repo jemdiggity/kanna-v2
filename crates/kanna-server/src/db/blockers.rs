@@ -1,5 +1,6 @@
-use super::{pipeline_items::update_open_pipeline_item_activity, Db};
+use super::{pipeline_items::update_open_pipeline_item_activity, Db, TaskEventKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
+use serde_json::json;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -50,18 +51,83 @@ impl Db {
         blocked_item_id: &str,
         blocker_item_id: &str,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
-            (blocked_item_id, blocker_item_id),
-        )?;
-        Ok(())
+        self.in_immediate_transaction_if_needed(|db| {
+            db.conn.execute(
+                "INSERT OR IGNORE INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
+                (blocked_item_id, blocker_item_id),
+            )?;
+            db.sync_blocked_event(blocked_item_id)
+        })
     }
 
     pub fn remove_all_task_blockers(&self, blocked_item_id: &str) -> Result<(), rusqlite::Error> {
+        self.in_immediate_transaction_if_needed(|db| {
+            db.conn.execute(
+                "DELETE FROM task_blocker WHERE blocked_item_id = ?",
+                [blocked_item_id],
+            )?;
+            db.sync_blocked_event(blocked_item_id)
+        })
+    }
+
+    /// Publish the derived blocked state of `task_id` if it moved since the
+    /// last time managers were told, inside the caller's transaction.
+    ///
+    /// Blocked is not a stored flag: it is `count_open_task_blockers > 0`, so
+    /// it flips both when the task's own `task_blocker` rows are rewritten and
+    /// when a blocker resolves underneath it. `blocked_event_baseline` is what
+    /// makes an *edge* out of that predicate; without it the only alternative
+    /// is a watcher diffing snapshots, which is exactly what the event feed
+    /// exists to replace. Closed tasks are skipped — nothing depends on the
+    /// blocked state of work that is over.
+    pub(crate) fn sync_blocked_event(&self, task_id: &str) -> Result<(), rusqlite::Error> {
+        let baseline: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT blocked_event_baseline FROM pipeline_item
+                 WHERE id = ? AND closed_at IS NULL",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(baseline) = baseline else {
+            return Ok(());
+        };
+        let blocker_task_ids = self.list_open_task_blocker_ids(task_id)?;
+        let blocked = !blocker_task_ids.is_empty();
+        if baseline == i64::from(blocked) {
+            return Ok(());
+        }
         self.conn.execute(
-            "DELETE FROM task_blocker WHERE blocked_item_id = ?",
-            [blocked_item_id],
+            "UPDATE pipeline_item SET blocked_event_baseline = ? WHERE id = ?",
+            (i64::from(blocked), task_id),
         )?;
+        self.append_task_event(
+            task_id,
+            if blocked {
+                TaskEventKind::TaskBlocked
+            } else {
+                TaskEventKind::TaskUnblocked
+            },
+            json!({
+                "blocked": blocked,
+                "blockerTaskIds": blocker_task_ids,
+            }),
+        )
+    }
+
+    /// Republish the blocked state of every task that depends on
+    /// `blocker_item_id`, after a write that can change whether this blocker
+    /// counts as resolved. The write sites are exactly the ones the
+    /// `task_blocker_resolution_revision` trigger watches — `closed_at`,
+    /// `stage`, and `pr_url` — so the two stay in step by construction.
+    pub(crate) fn sync_blocked_events_for_dependents(
+        &self,
+        blocker_item_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        for blocked_item_id in self.list_tasks_blocked_by(blocker_item_id)? {
+            self.sync_blocked_event(&blocked_item_id)?;
+        }
         Ok(())
     }
 
@@ -132,6 +198,7 @@ impl Db {
             )?;
         }
         update_open_pipeline_item_activity(&transaction, &task_id, "idle", None, None)?;
+        self.sync_blocked_event(&task_id)?;
         transaction.commit()?;
         Ok(task_id)
     }

@@ -50,7 +50,9 @@ pub(crate) use repos::RepoOrderInput;
 #[allow(unused_imports)]
 pub use stage_runs::{FinishedStageRun, StageTrigger};
 #[allow(unused_imports)]
-pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
+pub use task_events::{
+    appended as task_event_appended, TaskEvent, TaskEventFilters, TaskEventKind, TaskEventScope,
+};
 #[allow(unused_imports)]
 pub use task_inputs::{RawInputWriteRecord, TaskInputRecord, TaskInputSource};
 #[allow(unused_imports)]
@@ -129,6 +131,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "061_stage_run_trigger",
     "062_contextless_completion_attempt",
     "063_lifecycle_operation_intent",
+    "064_blocked_state_events",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1957,6 +1960,33 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
+    run_migration(conn, "064_blocked_state_events", |conn| {
+        // Blocked display state is derived from `task_blocker` plus each
+        // blocker's own resolution, so the only way to publish an *edge* is to
+        // remember what was last published. Backfill it from the current
+        // predicate so upgrading a database never announces a blocker every
+        // existing dependent has had all along.
+        add_column(
+            conn,
+            "pipeline_item",
+            "blocked_event_baseline",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute(
+            "UPDATE pipeline_item
+             SET blocked_event_baseline = (
+                 SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END
+                 FROM task_blocker blocker
+                 JOIN pipeline_item blocker_item ON blocker_item.id = blocker.blocker_item_id
+                 WHERE blocker.blocked_item_id = pipeline_item.id
+                   AND blocker_item.closed_at IS NULL
+                   AND NOT (blocker_item.stage = 'pr' AND blocker_item.pr_url IS NOT NULL)
+             )",
+            [],
+        )?;
+        Ok(())
+    })?;
+
     Ok(())
 }
 
@@ -2205,6 +2235,27 @@ impl Db {
                 }
                 Err(error)
             }
+        }
+    }
+
+    /// Run `operation` inside one immediate transaction, joining the caller's
+    /// transaction when there already is one.
+    ///
+    /// Writes that append a task event must commit the event with the state it
+    /// describes, and they are called both standalone and from inside a larger
+    /// mutation. `BEGIN IMMEDIATE` is not nestable in SQLite, so this is the
+    /// one place that decides which of the two situations it is in.
+    pub(crate) fn in_immediate_transaction_if_needed<T, E>(
+        &self,
+        operation: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<rusqlite::Error>,
+    {
+        if self.conn.is_autocommit() {
+            self.with_immediate_transaction(operation)
+        } else {
+            operation(self)
         }
     }
 

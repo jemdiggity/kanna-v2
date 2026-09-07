@@ -574,7 +574,7 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
     assert_eq!(
         db.list_non_busy_task_runtime_states(
             &crate::db::TaskEventScope::Tasks(vec!["child-a".to_string(),]),
-            &[],
+            &crate::db::TaskEventFilters::default(),
             None,
             10
         )
@@ -591,7 +591,7 @@ async fn level_triggered_activity_wait_returns_an_already_idle_task_immediately(
     assert_eq!(response["waitOutcome"], "events");
     assert_eq!(response["events"].as_array().map(Vec::len), Some(1));
     let event = &response["events"][0];
-    assert_eq!(event["type"], "task.runtime_settled");
+    assert_eq!(event["type"], "task.runtime_changed");
     assert_eq!(event["synthetic"], true);
     assert_eq!(event["payload"]["currentState"], true);
     assert_eq!(event["payload"]["runtimeState"], "idle");
@@ -1117,6 +1117,181 @@ fn runtime_settled_event_uses_fixed_debounce_and_suppresses_short_idle_blip() {
     );
 }
 
+/// The manager dimension is the daemon's, not the sidebar's. Every runtime
+/// edge must reach a watcher, the deprecated settled alias must accompany the
+/// busy-to-non-busy subset, and a human merely reading a task's output — which
+/// moves `activity` from `unread` to `idle` and nothing else — must not wake a
+/// watcher that asked for the runtime signal.
+#[test]
+fn runtime_changed_publishes_every_edge_and_never_the_read_state_flip() {
+    let (_, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    let start = db.latest_task_event_seq().expect("event head");
+
+    let settle = |db: &Db| {
+        db.connection_for_e2e_tests()
+            .execute(
+                "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds')
+                 WHERE id = 'child-a'",
+                [],
+            )
+            .expect("age runtime state through the fixed debounce");
+        db.flush_debounced_activity_events(300)
+            .expect("flush shared debounce");
+    };
+
+    // Entering busy is published at once: a turn shorter than the window must
+    // not vanish.
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("busy");
+    for next in ["waiting", "idle", "busy", "exited"] {
+        db.update_pipeline_item_runtime_status("child-a", next, None)
+            .expect("runtime edge");
+        settle(&db);
+    }
+
+    // A human reading the task: the read dimension moves, the runtime one does
+    // not.
+    db.update_pipeline_item_activity("child-a", "unread")
+        .expect("unread");
+    db.flush_debounced_activity_events(0)
+        .expect("publish the unread display state");
+    assert!(db
+        .mark_pipeline_item_read_if_unchanged("child-a", None)
+        .expect("mark read"));
+    db.flush_debounced_activity_events(0)
+        .expect("flush the read-state flip");
+
+    let head = db.latest_task_event_seq().expect("event head after edges");
+    let events = db
+        .list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec!["child-a".to_string()]),
+            start,
+            head,
+            50,
+        )
+        .expect("runtime events");
+    let runtime = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "task.runtime_changed" || event.event_type == "task.runtime_settled"
+        })
+        .map(|event| {
+            (
+                event.event_type.as_str(),
+                event.payload["previousRuntimeState"].clone(),
+                event.payload["runtimeState"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        runtime,
+        vec![
+            ("task.runtime_changed", json!(null), json!("busy")),
+            ("task.runtime_changed", json!("busy"), json!("waiting")),
+            ("task.runtime_settled", json!("busy"), json!("waiting")),
+            ("task.runtime_changed", json!("waiting"), json!("idle")),
+            ("task.runtime_changed", json!("idle"), json!("busy")),
+            ("task.runtime_changed", json!("busy"), json!("exited")),
+            ("task.runtime_settled", json!("busy"), json!("exited")),
+        ],
+        "every runtime edge publishes, and the deprecated alias covers exactly \
+         the busy-to-non-busy subset"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "task.activity_changed"),
+        "the read-state flip is still reported on the display dimension"
+    );
+}
+
+/// `excludeEventTypes` must keep the wait asleep, not wake it with a row the
+/// caller will discard.
+#[tokio::test]
+async fn a_manager_excluding_the_display_dimension_does_not_wake_on_a_read_state_flip() {
+    let (router, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    let watch = "/v1/task-events?taskIds=child-a&localOnly=true\
+                 &excludeEventTypes=task.activity_changed,task.runtime_settled";
+    let watch = watch.replace(char::is_whitespace, "");
+
+    let tail = get_json_body(&router, &format!("{watch}&from=now&timeoutSecs=0")).await;
+    let cursor = cursor_of(&tail);
+
+    // A person opens the task in the desktop. Nothing about the agent changed.
+    db.update_pipeline_item_activity("child-a", "unread")
+        .expect("unread");
+    assert!(db
+        .mark_pipeline_item_read_if_unchanged("child-a", None)
+        .expect("mark read"));
+    db.flush_debounced_activity_events(0)
+        .expect("flush the read-state flip");
+
+    let quiet = get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=1")).await;
+    assert_eq!(quiet["waitOutcome"], "timeout");
+    assert_eq!(event_pairs(&quiet), Vec::new());
+
+    // The agent starting work does wake it.
+    db.update_pipeline_item_runtime_status("child-a", "busy", None)
+        .expect("busy");
+    let woken = get_json_body(
+        &router,
+        &format!("{watch}&cursor={}&timeoutSecs=2", cursor_of(&quiet)),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&woken),
+        vec![("child-a".to_string(), "task.runtime_changed".to_string())]
+    );
+    assert_eq!(woken["events"][0]["payload"]["runtimeState"], "busy");
+}
+
+/// Blocked state is derived from other tasks' rows, so both the direct rewrite
+/// and a blocker resolving underneath a dependent must publish an edge.
+#[tokio::test]
+async fn blocked_edges_publish_for_a_rewrite_and_for_a_blocker_resolving() {
+    let (router, db_path) = events_router();
+    let db = Db::open(&db_path).expect("open db");
+    let watch =
+        "/v1/task-events?taskIds=child-a&localOnly=true&excludeEventTypes=task.activity_changed";
+    let tail = get_json_body(&router, &format!("{watch}&from=now&timeoutSecs=0")).await;
+
+    db.replace_task_blockers_atomically("child-a", &["child-b".to_string()])
+        .expect("block child-a on child-b");
+    let blocked = get_json_body(
+        &router,
+        &format!("{watch}&cursor={}&timeoutSecs=2", cursor_of(&tail)),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&blocked),
+        vec![("child-a".to_string(), "task.blocked".to_string())]
+    );
+    assert_eq!(blocked["events"][0]["payload"]["blocked"], true);
+    assert_eq!(
+        blocked["events"][0]["payload"]["blockerTaskIds"],
+        json!(["child-b"])
+    );
+
+    // Nobody touched child-a's blocker rows; its blocker simply finished.
+    db.close_pipeline_item("child-b").expect("close blocker");
+    let unblocked = get_json_body(
+        &router,
+        &format!("{watch}&cursor={}&timeoutSecs=2", cursor_of(&blocked)),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&unblocked),
+        vec![("child-a".to_string(), "task.unblocked".to_string())]
+    );
+    assert_eq!(unblocked["events"][0]["payload"]["blocked"], false);
+    assert_eq!(
+        unblocked["events"][0]["payload"]["blockerTaskIds"],
+        json!([])
+    );
+}
+
 /// One orchestrator, three children, events arriving in three different
 /// relationships to its polling: before the first call, while a call is
 /// blocked, and in the gap between two calls. Every event must arrive, in
@@ -1445,11 +1620,12 @@ async fn local_surface_aggregates_peer_repo_events_and_resumes_after_reconnect()
         event_pairs(&first),
         vec![
             ("remote-child".into(), "run.started".into()),
+            ("remote-child".into(), "task.runtime_changed".into()),
             ("remote-child".into(), "task.activity_changed".into()),
         ]
     );
     assert_eq!(first["events"][0]["machineId"], "desktop-peer-events");
-    assert_eq!(first["events"][1]["machineId"], "desktop-peer-events");
+    assert_eq!(first["events"][2]["machineId"], "desktop-peer-events");
     assert_eq!(first["machineErrors"], json!([]));
     let first_cursor = cursor_of(&first);
 
@@ -1925,7 +2101,7 @@ async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flic
         &source_router,
         &source,
         &format!(
-            "/v1/task-events?repoId=repo-start-source&cursor={}&timeoutSecs=5",
+            "/v1/task-events?repoId=repo-start-source&excludeEventTypes=task.runtime_changed&cursor={}&timeoutSecs=5",
             cursor_of(&initial)
         ),
     )
@@ -3990,7 +4166,8 @@ async fn a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block() {
     db.update_pipeline_item_runtime_status("child-a", "waiting", Some("How should I publish?"))
         .expect("waiting again");
 
-    let body = get_json_body(&router, "/v1/task-events?taskIds=child-a&timeoutSecs=1").await;
+    let watch = "/v1/task-events?taskIds=child-a&excludeEventTypes=task.runtime_changed";
+    let body = get_json_body(&router, &format!("{watch}&timeoutSecs=1")).await;
     let events = body["events"].as_array().expect("events");
     assert_eq!(event_pairs(&body).len(), 1);
     assert_eq!(events[0]["type"], serde_json::json!("task.awaiting_input"));
@@ -4006,10 +4183,7 @@ async fn a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block() {
         .expect("waiting a second time");
     let next = get_json_body(
         &router,
-        &format!(
-            "/v1/task-events?taskIds=child-a&timeoutSecs=1&cursor={}",
-            cursor_of(&body)
-        ),
+        &format!("{watch}&timeoutSecs=1&cursor={}", cursor_of(&body)),
     )
     .await;
     assert_eq!(
@@ -4050,7 +4224,7 @@ async fn every_provider_emits_debounced_activity_transitions_in_both_directions(
     let started = std::time::Instant::now();
     let body = get_json_body(
         &router,
-        "/v1/task-events?taskIds=child-a,child-b,child-c&timeoutSecs=15",
+        "/v1/task-events?taskIds=child-a,child-b,child-c&excludeEventTypes=task.runtime_changed&timeoutSecs=15",
     )
     .await;
     // The failure this guards is the wait blocking for its full 15s window,

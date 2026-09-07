@@ -63,7 +63,9 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     assert!(guide.contains("Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
     assert!(guide.contains("Advancing follows the next stage policy"));
     assert!(guide.contains("`task.awaiting_input` is a confirmed interactive prompt"));
-    assert!(guide.contains("`task.activity_changed` is the provider-neutral fallback"));
+    assert!(guide.contains("`task.runtime_changed` is the manager signal"));
+    assert!(guide.contains("`task.blocked` / `task.unblocked` are the other manager edge"));
+    assert!(guide.contains("`task.activity_changed` is the human read/unread display dimension"));
     assert!(guide.contains("a task's state has two dimensions"));
     assert!(guide.contains("prompt-only changes while a task remains stopped are visible only"));
     assert!(guide.contains("kanna-cli task watch --repo-id <repo-id>"));
@@ -360,7 +362,7 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
         .contains("stage-complete"));
     assert!(guide["workflow"]["eventSupervision"]
         .as_array()
-        .is_some_and(|lines| lines.len() == 5));
+        .is_some_and(|lines| lines.len() == 6));
     let tool_names = guide["tools"]
         .as_array()
         .unwrap()

@@ -71,6 +71,15 @@ describe("scripted remote E2E agent", () => {
     expect(source).toContain("bypass permissions on");
   });
 
+  it("reaches the waiting and exited runtime verdicts from sentinel input", () => {
+    const source = scriptedClaudeStatusAgentSource();
+
+    // The exact marker `headless_terminal.rs` classifies as Waiting.
+    expect(source).toContain("Do you want to allow this command?");
+    expect(source).toContain("*ask-permission*");
+    expect(source).toContain("*quit-now*");
+  });
+
   it("can prime a retained terminal snapshot with a unique final sentinel", () => {
     const configurableSource = scriptedAgentSource as unknown as (options: {
       snapshotHistory: { sentinel: string };

@@ -3446,12 +3446,21 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
         .prompt
         .contains("including blocked tasks with no session yet"));
     assert!(definition.prompt.contains("`include_closed: true`"));
+    assert!(definition.prompt.contains("`task.runtime_changed`"));
+    assert!(definition
+        .prompt
+        .contains("`task.blocked` / `task.unblocked`"));
     assert!(definition.prompt.contains("`task.runtime_settled`"));
     assert!(definition.prompt.contains("`task.awaiting_advance`"));
     assert!(definition.prompt.contains("`payload.currentTask`"));
     assert!(definition.prompt.contains("event-time stage"));
     assert!(definition.prompt.contains("task.awaiting_input"));
-    assert!(definition.prompt.contains("task.activity_changed"));
+    assert!(definition
+        .prompt
+        .contains("`task.activity_changed` is the human read/unread display dimension"));
+    assert!(definition
+        .prompt
+        .contains("exclude_event_types: [\"task.activity_changed\"]"));
     assert!(definition.prompt.contains("no_live_agent_session"));
     assert!(definition.prompt.contains("delivery_uncertain"));
     assert!(definition.prompt.contains("kanna_resume_task"));

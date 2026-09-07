@@ -1238,7 +1238,11 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.revision_requested",
         "task.closed",
         "task.awaiting_input",
+        "task.runtime_changed",
+        "task.runtime_settled",
         "task.activity_changed",
+        "task.blocked",
+        "task.unblocked",
         "task.merge_signaled",
         "task.merge_handoff_missing",
         "task.input_delivered",
@@ -1251,6 +1255,13 @@ fn wait_events_documents_every_event_type_the_server_emits() {
             "kanna_wait_events must document the {event_type} event"
         );
     }
+
+    assert!(
+        description.contains("previousRuntimeState, runtimeState and latestRunFinishedWithoutCompletion")
+            && description.contains("never encodes human read/unread state")
+            && description.contains("exclude_event_types"),
+        "kanna_wait_events must point managers at the runtime signal and how to drop display noise: {description}"
+    );
 
     assert!(
         description.contains("server-debounced")

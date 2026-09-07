@@ -1196,19 +1196,42 @@ cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
-- `task.runtime_settled` is the manager-grade activity signal. It is based only
-  on the daemon runtime dimension, never the sidebar's human `read`/`unread`
-  state. After transitioning from `busy`, a task must remain `idle`, `waiting`,
-  or `exited` for the fixed 10-second server debounce before the event is
-  appended; a busy→idle→busy blip inside that window emits nothing. It is unconditional —
-  no waiting-prompt snippet, provider heuristic, or worktree timestamp gates
-  it. Runtime settling extends the existing `activity_event_debounce_loop` and
+- `task.runtime_changed` is the manager-grade signal, and it covers **every**
+  runtime edge — `busy`, `waiting`, `idle`, `exited`. It is based only on the
+  daemon runtime dimension, never the sidebar's human `read`/`unread` state, so
+  a person reading a task's output cannot appear in it at all. Its payload is
+  `previousRuntimeState`, `runtimeState`, and `latestRunFinishedWithoutCompletion`
+  (true when the session is `idle` or `exited` while its latest run is still
+  `running` — a task parked without a stage verdict). It is unconditional — no
+  waiting-prompt snippet, provider heuristic, or worktree timestamp gates it.
+  The debounce is deliberately asymmetric, and
+  `pipeline_item.runtime_event_baseline` holds the last value managers were
+  told:
+  - **Entering `busy` publishes immediately**, inside
+    `update_pipeline_item_runtime_status` — the same write that changes
+    `runtime_status`. An agent turn starting is an unambiguous positive daemon
+    verdict, and damping it would silently drop every turn shorter than the
+    window.
+  - **Every non-busy value is damped.** It must hold for the fixed 10-second
+    server debounce before it is published, so a busy→idle→busy blip inside
+    that window emits nothing at all — returning to `busy` discards the pending
+    candidate rather than publishing it. A change between two non-busy
+    candidates restarts the same window and keeps the published baseline, so
+    the eventual edge is measured from what managers were actually told.
+  Runtime publication extends the existing `activity_event_debounce_loop` and
   `flush_debounced_activity_events` transaction; there is no second debounce
-  worker or snapshot-diff detector. With `includeCurrentActivity=true`, the
-  wait is also level-triggered:
+  worker or snapshot-diff detector.
+- `task.runtime_settled` is the **deprecated** busy→non-busy subset of
+  `task.runtime_changed`. It is appended in the same transaction as the event
+  that supersedes it, so the two can never disagree, and it exists only so
+  deployed watchers keyed on it keep working. New callers watch
+  `task.runtime_changed`; `kanna-cli task watch` suppresses the alias as
+  redundant with an event already in the batch.
+- With `includeCurrentActivity=true`, the wait is also level-triggered:
   every scoped task whose current non-busy state has already survived that
-  debounce is returned immediately as a synthetic `task.runtime_settled`
-  response row without consuming or inventing a sequence number. The durable
+  debounce is returned immediately as a synthetic `task.runtime_changed`
+  response row without consuming or inventing a sequence number. It uses daemon
+  runtime state only, never human read/unread activity. The durable
   sequence checkpoint remains independent, so restart cannot miss parked work
   and synthetic state cannot weaken the append-log ordering contract. Synthetic
   rows share the response limit with durable events. The opaque cursor also
@@ -1223,7 +1246,11 @@ cursor-based, not snapshot-diffed:
   terminal context, but managers use the level-triggered runtime-settled wait
   as the general primitive because an agent can stop at its composer without
   exiting.
-- `task.activity_changed` is the provider-neutral settled display transition.
+- `task.activity_changed` is the provider-neutral settled display transition —
+  the **human** read/unread dimension, not the manager one. A person opening a
+  task in the desktop moves `unread` to `idle` and fires it, which is why a
+  manager watches `task.runtime_changed` instead and drops this one with
+  `excludeEventTypes`. It is unchanged for desktop and mobile consumers.
   Every activity direction (`working`, `idle`, or `unread`) is eligible for
   every provider; no waiting-prompt placeholder is required. The server waits
   for `activity_event_debounce_seconds` (20 seconds by default in
@@ -1234,6 +1261,17 @@ cursor-based, not snapshot-diffed:
   idle task whose latest run remains without a stage-completion verdict, so a
   manager can advance it without a private polling/debounce loop. The
   aggregated `ks1.` feed adds `machineId` in the usual way.
+- `task.blocked` and `task.unblocked` report the task's derived blocked state:
+  `count_open_task_blockers > 0`, where a blocker resolves by closing or by
+  parking at `pr` with a PR recorded. Because the predicate reads other tasks'
+  rows, the edge is published both when a task's own `task_blocker` rows are
+  rewritten and when a blocker resolves underneath it — `pipeline_item.blocked_event_baseline`
+  is what turns the predicate into an edge, and the publishing write sites are
+  exactly the ones the `task_blocker_resolution_revision` trigger already
+  watches (`closed_at`, `stage`, `pr_url`) plus the blocker-table writes
+  themselves. `payload.blocked` is the new state and `payload.blockerTaskIds`
+  lists the still-unresolved blockers (empty on `task.unblocked`). Closed tasks
+  publish nothing: nothing depends on the blocked state of finished work.
 - `task.input_delivered` announces a message delivered into a task's agent
   session from outside it. `payload.source` is the caller-declared author
   (`operator`, `manager`, `unspecified`); historical retained events may carry
@@ -1303,6 +1341,19 @@ It is evaluated per read against `pipeline_item.parent_task_id`, so a task
 created or adopted mid-watch is in scope at the next checkpoint. It covers
 direct children only and excludes the parent's own events, which makes it
 exactly the set `GET /v1/tasks/{task_id}` reports as `childTaskIds`.
+
+`excludeEventTypes` (comma-separated event type names) is the second filter
+over whichever scope was chosen. It exists because a manager that must wake,
+inspect and discard a `task.activity_changed` row has not been spared anything:
+the point of the exclusion is that the wait does **not** return, so filtering
+happens in SQL rather than after the read. Like `excludeTaskIds` it is not part
+of any cursor, so a checkpoint issued under one list resumes under another, and
+an unrecognized type name drops nothing. It is forwarded verbatim to every
+machine leg of an aggregate wait, and it also suppresses the synthetic
+`includeCurrentActivity` rows when the type they are reported as is excluded —
+a synthetic row states the same fact as the durable event it is named after.
+A repository-scoped manager watch is `excludeTaskIds=<own id>` plus
+`excludeEventTypes=task.activity_changed`.
 
 `excludeTaskIds` (comma-separated task ids or branch names) is a filter over
 whichever scope was chosen, never a scope of its own. It drops those tasks'

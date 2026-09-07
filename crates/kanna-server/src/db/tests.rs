@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "063_lifecycle_operation_intent");
+    assert_eq!(latest_migration, "064_blocked_state_events");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -1648,6 +1648,11 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
                   pipeline_item_id TEXT NOT NULL,
                   env_name TEXT NOT NULL
                 );
+                CREATE TABLE task_blocker (
+                  blocked_item_id TEXT NOT NULL,
+                  blocker_item_id TEXT NOT NULL,
+                  PRIMARY KEY (blocked_item_id, blocker_item_id)
+                );
                 CREATE TABLE task_event (
                   seq INTEGER PRIMARY KEY AUTOINCREMENT,
                   task_id TEXT NOT NULL,
@@ -1712,6 +1717,11 @@ fn close_pipeline_item_sets_closed_at_without_changing_stage() {
               port INTEGER PRIMARY KEY,
               pipeline_item_id TEXT NOT NULL,
               env_name TEXT NOT NULL
+            );
+            CREATE TABLE task_blocker (
+              blocked_item_id TEXT NOT NULL,
+              blocker_item_id TEXT NOT NULL,
+              PRIMARY KEY (blocked_item_id, blocker_item_id)
             );
             CREATE TABLE task_event (
               seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2504,6 +2514,10 @@ fn activity_changed_events_are_debounced_provider_neutral_and_bidirectional() {
             10,
         )
         .expect("list activity events");
+    let events = events
+        .into_iter()
+        .filter(|event| event.event_type == "task.activity_changed")
+        .collect::<Vec<_>>();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].event_type, "task.activity_changed");
     assert_eq!(
@@ -2752,6 +2766,70 @@ fn count_open_task_blockers_treats_pr_stage_with_pr_url_as_resolved() {
     assert_eq!(
         db.count_open_task_blockers("dependent-1").expect("count"),
         0
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The blocked edge follows the same predicate `count_open_task_blockers`
+/// uses, so recording the blocker's PR — a write to the *blocker*, not to the
+/// dependent's `task_blocker` rows — is what releases the dependent.
+#[test]
+fn recording_a_blockers_pr_publishes_the_dependents_unblocked_edge() {
+    let path = Db::test_db_path("blocked-events-pr-resolution");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "blocker-1",
+        "repo-1",
+        "prerequisite",
+        Some("Prerequisite"),
+        "pr",
+        "2026-07-01T00:00:00Z",
+    )
+    .expect("blocker");
+    db.insert_test_pipeline_item(
+        "dependent-1",
+        "repo-1",
+        "build on it",
+        Some("Dependent"),
+        "in progress",
+        "2026-07-01T00:01:00Z",
+    )
+    .expect("dependent");
+
+    db.insert_task_blocker("dependent-1", "blocker-1")
+        .expect("blocker row");
+    // A second identical write is not another edge.
+    db.insert_task_blocker("dependent-1", "blocker-1")
+        .expect("repeat blocker row");
+    db.update_pipeline_item_pr("blocker-1", Some(7), "https://github.com/acme/repo/pull/7")
+        .expect("set pr");
+    // Re-reporting the same PR resolves nothing new.
+    db.update_pipeline_item_pr("blocker-1", Some(7), "https://github.com/acme/repo/pull/7")
+        .expect("replay pr");
+
+    let events = db
+        .list_task_events(
+            &super::TaskEventScope::Tasks(vec!["dependent-1".to_string()]),
+            0,
+            i64::MAX,
+            20,
+        )
+        .expect("blocked events");
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| (event.event_type.as_str(), event.payload["blocked"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("task.blocked", serde_json::json!(true)),
+            ("task.unblocked", serde_json::json!(false)),
+        ]
+    );
+    assert_eq!(
+        events[0].payload["blockerTaskIds"],
+        serde_json::json!(["blocker-1"])
     );
 
     let _ = std::fs::remove_file(path);
@@ -3186,6 +3264,7 @@ fn task_event_type_names_are_stable() {
             "task.awaiting_input",
             "task.awaiting_advance",
             "task.runtime_settled",
+            "task.runtime_changed",
             "task.activity_changed",
             "task.merge_signaled",
             "task.merge_handoff_missing",
@@ -3195,6 +3274,8 @@ fn task_event_type_names_are_stable() {
             "task.teardown_failed",
             "task.lifecycle_operation_retired",
             "task.transfer_finalizing",
+            "task.blocked",
+            "task.unblocked",
         ]
     );
 }
