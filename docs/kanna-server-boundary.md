@@ -1489,8 +1489,11 @@ answered.
   matching row into `task_input`, preserving boundaries, source, and order.
   `SessionList.pending_logical_input_count` reconciles missed release events
   only against held rows owned by that same incarnation. A row owned by a
-  replaced or exited session becomes `delivery_uncertain`; it is not promoted
-  from the replacement's pending count.
+  replaced or exited session is retired; it is not promoted from the
+  replacement's pending count. Retirement deletes the queue row and appends
+  `task.input_delivery_expired`, carrying the old PID, queue id, prior state,
+  and reason. It deliberately creates no `task_input` row because the old
+  incarnation never proved delivery.
 - **Interrupted preparation is ambiguous, not delivery evidence.** A server
   restart converts any leftover `preparing` reservation to
   `delivery_uncertain`: the server cannot prove whether the daemon accepted and
@@ -1499,8 +1502,9 @@ answered.
   HTTP held-state update, because that edge itself proves acceptance. Reconnect
   never makes that inference. An uncertain row remains a FIFO barrier for its
   incarnation: later release evidence cannot be attributed past it, because
-  the event may describe the ambiguous slot itself. Uncertain rows remain
-  sender-visible rather than being expired or discarded silently.
+  the event may describe the ambiguous slot itself. It remains sender-visible
+  while that incarnation lives; exit or replacement expires it observably as
+  described above, so it cannot wedge a later PTY incarnation's queue.
 - **Uncertain deliveries are not recorded.** A `delivery_uncertain` response
   means the bytes may or may not have reached the PTY; a row asserting the agent
   was told something it may never have heard is a worse record than a missing

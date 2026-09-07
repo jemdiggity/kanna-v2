@@ -289,13 +289,13 @@ fn reconcile_queued_task_input_incarnations(
     let db = crate::db::Db::open(&state.config().db_path)
         .map_err(|error| format!("db error: {error}"))?;
     let owners = db
-        .pending_task_input_incarnations()
+        .queued_task_input_incarnations()
         .map_err(|error| format!("db error: {error}"))?;
     let mut changed = false;
     for (task_id, session_pid) in owners {
         if live.get(task_id.as_str()).copied() != Some(session_pid) {
             changed |= db
-                .mark_pending_task_inputs_uncertain_for_incarnation(&task_id, session_pid)
+                .expire_task_inputs_for_incarnation(&task_id, session_pid)
                 .map_err(|error| format!("db error: {error}"))?
                 > 0;
         }
@@ -303,7 +303,7 @@ fn reconcile_queued_task_input_incarnations(
     Ok(changed)
 }
 
-fn mark_queued_task_input_incarnation_uncertain(
+fn expire_queued_task_input_incarnation(
     state: &http_api::AppState,
     session_id: &str,
     session_pid: u32,
@@ -316,7 +316,7 @@ fn mark_queued_task_input_incarnation_uncertain(
     else {
         return Ok(false);
     };
-    db.mark_pending_task_inputs_uncertain_for_incarnation(&task_id, session_pid)
+    db.expire_task_inputs_for_incarnation(&task_id, session_pid)
         .map(|changed| changed > 0)
         .map_err(|error| format!("db error: {error}"))
 }
@@ -559,17 +559,76 @@ pub(crate) async fn terminal_state_watcher_once(
             DaemonEvent::SessionCreated { session_id } => {
                 match control.send_command(&DaemonCommand::List).await {
                     Ok(DaemonEvent::SessionList { sessions }) => {
-                        if let Some(session) = sessions.iter().find(|session| {
+                        let replacement = sessions.iter().find(|session| {
                             session.session_id == session_id
                                 && session.kind == kanna_daemon::protocol::SessionKind::Pty
                                 && matches!(
                                     session.state,
                                     kanna_daemon::protocol::SessionState::Active
                                 )
-                        }) {
-                            live_session_pids.insert(session_id, session.pid);
+                        });
+                        if let Some(session) = replacement {
+                            live_session_pids.insert(session_id.clone(), session.pid);
                         }
-                        if reconcile_queued_task_input_incarnations(state, &sessions)? {
+                        let mut changed = reconcile_queued_task_input_incarnations(state, &sessions)?;
+                        // A replacement deliberately reuses the task/session id, so the
+                        // old task projection cannot be cleared by identity alone. The
+                        // new daemon handle begins unblocked and therefore has no false
+                        // edge to publish; its List snapshot is authoritative for this
+                        // new PTY incarnation just as the startup List is for adoption.
+                        if let Some(session) = replacement {
+                            match apply_watcher_runtime_status(
+                                state,
+                                &session.session_id,
+                                session.status,
+                                None,
+                            ) {
+                                Ok(Some(result)) => changed |= result.changed,
+                                Ok(None) => {}
+                                Err(error) => log::warn!(
+                                    "failed to reconcile replacement terminal status for {}: {error}",
+                                    session.session_id
+                                ),
+                            }
+                            match apply_watcher_input_blocked(
+                                state,
+                                &session.session_id,
+                                session.logical_input_blocked,
+                            ) {
+                                Ok(blocked_changed) => changed |= blocked_changed,
+                                Err(error) => log::warn!(
+                                    "failed to reconcile replacement blocked input for {}: {error}",
+                                    session.session_id
+                                ),
+                            }
+                            if let Some(pending_count) = session.pending_logical_input_count {
+                                match reconcile_released_task_inputs(
+                                    state,
+                                    &session.session_id,
+                                    session.pid,
+                                    pending_count,
+                                ) {
+                                    Ok(queue_changed) => changed |= queue_changed,
+                                    Err(error) => log::warn!(
+                                        "failed to reconcile replacement queued input for {}: {error}",
+                                        session.session_id
+                                    ),
+                                }
+                            }
+                            match persist_composer(
+                                state,
+                                &session.session_id,
+                                session.composer_text.as_deref(),
+                                session.composer_attestation,
+                            ) {
+                                Ok(composer_changed) => changed |= composer_changed,
+                                Err(error) => log::warn!(
+                                    "failed to reconcile replacement composer for {}: {error}",
+                                    session.session_id
+                                ),
+                            }
+                        }
+                        if changed {
                             state.publish_state_changed(
                                 kanna_agent_protocol::StateChangeScope::Tasks,
                             );
@@ -686,7 +745,7 @@ pub(crate) async fn terminal_state_watcher_once(
                 resume_session_id,
             } => {
                 if let Some(session_pid) = live_session_pids.remove(&session_id) {
-                    match mark_queued_task_input_incarnation_uncertain(
+                    match expire_queued_task_input_incarnation(
                         state,
                         &session_id,
                         session_pid,
@@ -932,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_and_exit_leave_old_incarnation_delivery_uncertain() {
+    fn replacement_and_exit_expire_old_incarnation_input_observably() {
         let unique = unique_name("terminal-watcher-replaced-incarnation");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
@@ -978,17 +1037,26 @@ mod tests {
             Some("sending")
         );
         drop(db);
-        assert!(mark_queued_task_input_incarnation_uncertain(&state, "task-child", 99).unwrap());
+        assert!(expire_queued_task_input_incarnation(&state, "task-child", 99).unwrap());
 
         let db = Db::open(&config.db_path).unwrap();
         assert!(db.list_task_inputs("task-child", 10).unwrap().is_empty());
-        assert_eq!(
-            db.queued_task_input_reason("task-child")
-                .unwrap()
-                .as_deref(),
-            Some("delivery_uncertain")
-        );
-        assert_eq!(db.count_queued_task_inputs("task-child").unwrap(), 3);
+        assert_eq!(db.queued_task_input_reason("task-child").unwrap(), None);
+        assert_eq!(db.count_queued_task_inputs("task-child").unwrap(), 0);
+        let expired = db
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                db.latest_task_event_seq().unwrap(),
+                100,
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "task.input_delivery_expired")
+            .collect::<Vec<_>>();
+        assert_eq!(expired.len(), 3);
+        assert_eq!(expired[0].payload["sessionPid"], 42);
+        assert_eq!(expired[2].payload["sessionPid"], 99);
         let _ = std::fs::remove_file(config.db_path);
     }
 
@@ -1156,7 +1224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_replacement_and_exit_surface_uncertainty_without_delivery() {
+    async fn watcher_replacement_and_exit_expire_without_false_delivery() {
         let unique = unique_name("terminal-watcher-replacement-exit-wiring");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
@@ -1214,20 +1282,25 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             let db = Db::open(&config.db_path).unwrap();
-            if db.count_held_task_inputs("task-child", 42).unwrap() == 0 {
+            if db.count_queued_task_inputs("task-child").unwrap() == 0 {
                 assert!(db.list_task_inputs("task-child", 10).unwrap().is_empty());
-                assert_eq!(db.count_queued_task_inputs("task-child").unwrap(), 2);
-                assert_eq!(
-                    db.queued_task_input_reason("task-child")
-                        .unwrap()
-                        .as_deref(),
-                    Some("delivery_uncertain")
-                );
+                let expired = db
+                    .list_task_events(
+                        &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                        0,
+                        db.latest_task_event_seq().unwrap(),
+                        100,
+                    )
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| event.event_type == "task.input_delivery_expired")
+                    .count();
+                assert_eq!(expired, 2);
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "watcher did not surface uncertainty for the exited incarnation"
+                "watcher did not expire input owned by dead incarnations"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1798,6 +1871,129 @@ mod tests {
         drop(listener);
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn replacement_snapshot_clears_old_hold_and_expires_its_queue() {
+        let unique = unique_name("terminal-watcher-replacement-clears-input-hold");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        db.update_pipeline_item_input_blocked(
+            "task-child",
+            Some(http_api::INPUT_BLOCKED_INHERITED_DRAFT),
+        )
+        .unwrap();
+        let queue_id = db
+            .prepare_queued_task_input(
+                "task-child",
+                42,
+                crate::db::TaskInputSource::Manager,
+                "outcome became uncertain before replacement",
+            )
+            .unwrap()
+            .unwrap();
+        db.mark_queued_task_input_uncertain(queue_id, "terminal never settled")
+            .unwrap();
+        drop(db);
+
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let server = tokio::spawn(async move {
+            let (subscriber_stream, _) = listener.accept().await.unwrap();
+            let (subscriber_read, mut subscriber_write) = subscriber_stream.into_split();
+            let mut subscriber_reader = BufReader::new(subscriber_read);
+            let mut line = String::new();
+            subscriber_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::Subscribe
+            ));
+            write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
+
+            let (control_stream, _) = listener.accept().await.unwrap();
+            let (control_read, mut control_write) = control_stream.into_split();
+            let mut control_reader = BufReader::new(control_read);
+            line.clear();
+            control_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut control_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        logical_input_blocked: true,
+                        composer_attestation: ComposerAttestation::Unknown,
+                        ..active_pty_session("task-child", 42, 0)
+                    }],
+                },
+            )
+            .await;
+
+            write_event(
+                &mut subscriber_write,
+                &DaemonEvent::SessionCreated {
+                    session_id: "task-child".to_string(),
+                },
+            )
+            .await;
+            line.clear();
+            control_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut control_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        composer_attestation: ComposerAttestation::NotTyped,
+                        ..active_pty_session("task-child", 99, 0)
+                    }],
+                },
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            write_event(&mut subscriber_write, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config.clone()),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let db = Db::open(&config.db_path).unwrap();
+        assert_eq!(
+            db.get_pipeline_item_input_blocked("task-child").unwrap(),
+            None
+        );
+        assert_eq!(db.count_queued_task_inputs("task-child").unwrap(), 0);
+        let events = db
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                db.latest_task_event_seq().unwrap(),
+                100,
+            )
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event_type == "task.input_blocked" && event.payload["inputBlocked"].is_null()
+        }));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "task.input_delivery_expired")
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(config.db_path);
     }
 
     /// The seam between the daemon's ledger and the API. Both ends are proven

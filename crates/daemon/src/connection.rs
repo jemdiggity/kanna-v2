@@ -42,9 +42,9 @@ use crate::{agent_runtime, headless_terminal, pty};
 fn inherited_draft_state_unknown_message(session_id: &str) -> String {
     format!(
         "logical input refused for session {session_id}: this daemon inherited the session and \
-         its composer holds text it never saw typed, so submitting would append to someone \
-         else's unsent line; open that session's terminal and submit or clear the line. An empty \
-         composer unblocks itself with no human."
+         cannot yet prove that its current composer is clear, so submitting could append to an \
+         unsent line; inspect the terminal's derived composer state. A composer attested empty \
+         unblocks itself with no human, and replacing the PTY discards this incarnation's hold."
     )
 }
 
