@@ -182,6 +182,8 @@ fi
       printf 'SCRIPT_READY\\n'
     fi
     printf 'SCRIPT_HEARTBEAT %s\\n' "$heartbeat"
+    printf '\\033[3;1HRELAY_GRID_CELL'
+    printf '\\033[4;1H'
   done
 ) &
 heartbeat_pid=$!`
@@ -190,6 +192,13 @@ heartbeat_pid=$!`
   return `#!/bin/sh
 ${snapshotHistory}${terminalModePrelude}
 printf 'SCRIPT_READY\\n'
+
+# Keep one cell and the cursor at deterministic viewport coordinates so real
+# rendered-grid tests can distinguish source-grid hydration from arbitrary
+# in-bounds cursor state. ANSI coordinates are one-based: the marker is at
+# row 3/column 1 and the cursor rests at row 4/column 1.
+printf '\\033[3;1HRELAY_GRID_CELL'
+printf '\\033[4;1H'
 
 heartbeat=0
 ${heartbeatLoop}

@@ -98,6 +98,7 @@ interface TerminalInspection {
   mentionedFiles?: TerminalFileMentionHistory;
   rows: number | null;
   text: string;
+  visibleRows?: string[];
 }
 
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<

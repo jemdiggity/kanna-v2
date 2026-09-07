@@ -18,7 +18,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{broadcast, mpsc, watch, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -695,6 +695,11 @@ fn auth_ok_frame() -> ServerFrame {
 #[cfg(test)]
 fn auth_ok_frame_for(companion_access: bool) -> ServerFrame {
     auth_ok_frame_with_terminal_geometry(companion_access, true)
+}
+
+#[cfg(test)]
+fn auth_ok_frame_without_terminal_geometry(companion_access: bool) -> ServerFrame {
+    auth_ok_frame_with_terminal_geometry(companion_access, false)
 }
 
 fn auth_ok_frame_with_terminal_geometry(
@@ -1895,6 +1900,7 @@ impl TerminalControlCommand {
 struct TerminalControlHandle {
     session_id: Option<String>,
     pending_resize: Option<(u16, u16)>,
+    bind_tx: Option<oneshot::Sender<String>>,
     tx: mpsc::Sender<TerminalControlCommand>,
     cancel_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -1954,31 +1960,57 @@ async fn run_terminal_control(
     task_id: String,
     initial_session_id: Option<String>,
     mut command_rx: mpsc::Receiver<TerminalControlCommand>,
+    session_bind_rx: Option<oneshot::Receiver<String>>,
     mut cancel_rx: watch::Receiver<bool>,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
+    let mut pending_command = None;
     let session_id = match initial_session_id {
         Some(session_id) => session_id,
         None => {
-            let resolved = tokio::select! {
+            let Some(mut session_bind_rx) = session_bind_rx else {
+                return;
+            };
+            let first = tokio::select! {
                 biased;
                 _ = terminal_control_cancelled(&mut cancel_rx) => return,
-                resolved = resolve_task_session_id(
-                    state.config().db_path.clone(),
-                    task_id.clone(),
-                ) => resolved,
-            };
-            match resolved {
-                Ok(session_id) => session_id,
-                Err(message) => {
-                    tokio::select! {
-                        biased;
-                        _ = terminal_control_cancelled(&mut cancel_rx) => return,
-                        _ = send_task_error(&frame_tx, &task_id, "no_session", message) => {}
+                bound = &mut session_bind_rx => {
+                    match bound {
+                        Ok(session_id) => session_id,
+                        Err(_) => return,
                     }
-                    return;
                 }
-            }
+                command = command_rx.recv() => {
+                    let Some(command) = command else { return; };
+                    pending_command = Some(command.clone());
+                    if matches!(command, TerminalControlCommand::Register { .. }) {
+                        tokio::select! {
+                            biased;
+                            _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                            bound = &mut session_bind_rx => match bound {
+                                Ok(session_id) => session_id,
+                                Err(_) => return,
+                            },
+                        }
+                    } else {
+                        match resolve_task_session_id(
+                            state.config().db_path.clone(),
+                            task_id.clone(),
+                        ).await {
+                            Ok(session_id) => session_id,
+                            Err(message) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                                    _ = send_task_error(&frame_tx, &task_id, "no_session", message) => {}
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+            first
         }
     };
     let daemon_dir = state.config().daemon_dir.clone();
@@ -1993,16 +2025,18 @@ async fn run_terminal_control(
     // attached for output. Keep the first command pending across definite
     // connect failures; after the first connection, reconnect proactively so
     // handoff recovery is ready before the next keypress.
-    let mut pending_command = Some(tokio::select! {
-        biased;
-        _ = terminal_control_cancelled(&mut cancel_rx) => return,
-        command = command_rx.recv() => {
-            let Some(command) = command else {
-                return;
-            };
-            command
-        }
-    });
+    if pending_command.is_none() {
+        pending_command = Some(tokio::select! {
+            biased;
+            _ = terminal_control_cancelled(&mut cancel_rx) => return,
+            command = command_rx.recv() => {
+                let Some(command) = command else {
+                    return;
+                };
+                command
+            }
+        });
+    }
 
     loop {
         let connected = tokio::select! {
@@ -2031,11 +2065,6 @@ async fn run_terminal_control(
         if geometry_daemon_pid != Some(connected_pid) {
             geometry_daemon_pid = Some(connected_pid);
             geometry_supported = None;
-            // Do not advertise or forward geometry authority while the new
-            // daemon generation is still being probed. Legacy resize remains
-            // available for old peers, but viewer registration/takeover must
-            // fail closed during this window.
-            state.set_terminal_geometry_supported(false);
         }
         let (mut daemon_reader, mut daemon_writer) = client.into_split();
         retry_attempt = 0;
@@ -2061,7 +2090,6 @@ async fn run_terminal_control(
                 Ok(Ok(DaemonEvent::TerminalGeometryReady { version }))
                     if version == kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION
             ));
-            state.set_terminal_geometry_supported(geometry_supported.unwrap_or(false));
             if !geometry_supported.unwrap_or(false) {
                 // The probe consumes a connection that an old daemon cannot
                 // keep alive. Reconnect once and send only legacy commands;
@@ -2524,18 +2552,26 @@ impl StreamConn {
         session_id: Option<String>,
     ) -> TerminalControlHandle {
         let (tx, command_rx) = mpsc::channel(TERMINAL_CONTROL_QUEUE_CAPACITY);
+        let (bind_tx, bind_rx) = if session_id.is_none() {
+            let (bind_tx, bind_rx) = oneshot::channel();
+            (Some(bind_tx), Some(bind_rx))
+        } else {
+            (None, None)
+        };
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let task = tokio::spawn(run_terminal_control(
             self.state.clone(),
             task_id,
             session_id.clone(),
             command_rx,
+            bind_rx,
             cancel_rx,
             self.frame_tx.clone(),
         ));
         TerminalControlHandle {
             session_id,
             pending_resize: None,
+            bind_tx,
             tx,
             cancel_tx,
             task,
@@ -2543,17 +2579,18 @@ impl StreamConn {
     }
 
     async fn replace_terminal_control_route(&mut self, task_id: &str, session_id: String) {
-        // Registration is intentionally sent before Attach by clients so the
-        // first measured dimensions and the attachment are one control
-        // lifetime. The first registration creates a task-routed worker with
-        // no resolved session id; keep that worker and its queued registration
-        // when Attach later binds the same task to a session.
-        if self
-            .terminal_controls
-            .get(task_id)
-            .is_some_and(|control| control.session_id.is_none())
-        {
-            return;
+        // Registration is intentionally sent before Attach by clients. Bind
+        // the preserved pre-attach worker to the exact session resolved by
+        // Attach before it can forward the queued registration; it must not
+        // independently resolve a possibly replaced task session.
+        if let Some(control) = self.terminal_controls.get_mut(task_id) {
+            if control.session_id.is_none() {
+                control.session_id = Some(session_id.clone());
+                if let Some(bind_tx) = control.bind_tx.take() {
+                    let _ = bind_tx.send(session_id);
+                }
+                return;
+            }
         }
         let route_matches = self
             .terminal_controls
@@ -6226,6 +6263,7 @@ mod tests {
             capabilities: vec![
                 KspCapability::CompanionEventEpoch,
                 KspCapability::TermInputBoundary,
+                KspCapability::TerminalGeometry,
             ],
         }
     }
@@ -8126,7 +8164,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(outbound_rx.recv().await, Some(auth_ok_frame()));
+        assert_eq!(
+            outbound_rx.recv().await,
+            Some(auth_ok_frame_without_terminal_geometry(true))
+        );
         drop(incoming_tx);
         let _ = task.await;
     }
@@ -8677,7 +8718,10 @@ mod tests {
         let url = fixture.serve().await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &legacy_client_auth_frame()).await;
-        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            auth_ok_frame_without_terminal_geometry(true)
+        );
 
         let event_frame = |event_id: &str, attachment_epoch| {
             let mut event = KspCompanionFixture::event(event_id);
@@ -8838,7 +8882,10 @@ mod tests {
 
         let mut first = ws_connect(&url).await;
         send_frame(&mut first, &legacy_client_auth_frame()).await;
-        assert_eq!(recv_frame(&mut first).await, auth_ok_frame());
+        assert_eq!(
+            recv_frame(&mut first).await,
+            auth_ok_frame_without_terminal_geometry(true)
+        );
         send_frame(&mut first, &attach(1)).await;
         assert!(matches!(
             recv_frame(&mut first).await,
@@ -8891,7 +8938,10 @@ mod tests {
 
         let mut retry = ws_connect(&url).await;
         send_frame(&mut retry, &legacy_client_auth_frame()).await;
-        assert_eq!(recv_frame(&mut retry).await, auth_ok_frame());
+        assert_eq!(
+            recv_frame(&mut retry).await,
+            auth_ok_frame_without_terminal_geometry(true)
+        );
         send_frame(&mut retry, &attach(2)).await;
         assert!(matches!(
             recv_frame(&mut retry).await,
@@ -9846,7 +9896,10 @@ mod tests {
         let url = serve_router(crate::http_api::router(Arc::new(AppState::new(config)))).await;
         let mut socket = ws_connect(&url).await;
         send_frame(&mut socket, &legacy_client_auth_frame()).await;
-        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+        assert_eq!(
+            recv_frame(&mut socket).await,
+            auth_ok_frame_without_terminal_geometry(false)
+        );
 
         for frame in [
             ClientFrame::TermInput {
@@ -10646,9 +10699,10 @@ mod tests {
             .terminal_controls
             .get("task-before-attach")
             .expect("pre-attach registration worker retained");
-        assert!(
-            control.session_id.is_none(),
-            "route binding must not retire the worker holding registration"
+        assert_eq!(
+            control.session_id.as_deref(),
+            Some("session-bound-at-attach"),
+            "the preserved worker must be fenced to Attach's resolved session"
         );
         conn.shutdown().await;
     }
@@ -11692,7 +11746,10 @@ mod tests {
             &mut socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::AgentHistoryWindow],
+                capabilities: vec![
+                    KspCapability::AgentHistoryWindow,
+                    KspCapability::TerminalGeometry,
+                ],
             },
         )
         .await;
@@ -11867,7 +11924,10 @@ mod tests {
             &mut socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::AgentHistoryWindow],
+                capabilities: vec![
+                    KspCapability::AgentHistoryWindow,
+                    KspCapability::TerminalGeometry,
+                ],
             },
         )
         .await;
@@ -11949,7 +12009,10 @@ mod tests {
             &mut socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::AgentHistoryWindow],
+                capabilities: vec![
+                    KspCapability::AgentHistoryWindow,
+                    KspCapability::TerminalGeometry,
+                ],
             },
         )
         .await;
@@ -12005,7 +12068,10 @@ mod tests {
             &mut socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::AgentHistoryWindow],
+                capabilities: vec![
+                    KspCapability::AgentHistoryWindow,
+                    KspCapability::TerminalGeometry,
+                ],
             },
         )
         .await;
@@ -12154,7 +12220,10 @@ mod tests {
             &mut first_socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::AgentHistoryWindow],
+                capabilities: vec![
+                    KspCapability::AgentHistoryWindow,
+                    KspCapability::TerminalGeometry,
+                ],
             },
         )
         .await;
@@ -12225,7 +12294,10 @@ mod tests {
             &mut resumed_socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::AgentHistoryWindow],
+                capabilities: vec![
+                    KspCapability::AgentHistoryWindow,
+                    KspCapability::TerminalGeometry,
+                ],
             },
         )
         .await;
@@ -12993,7 +13065,10 @@ mod tests {
             &mut socket,
             &ClientFrame::Auth {
                 credential: None,
-                capabilities: vec![KspCapability::TermInputBoundary],
+                capabilities: vec![
+                    KspCapability::TermInputBoundary,
+                    KspCapability::TerminalGeometry,
+                ],
             },
         )
         .await;
@@ -13120,7 +13195,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             outbound_rx.recv().await.expect("auth ok frame"),
-            auth_ok_frame(),
+            auth_ok_frame_without_terminal_geometry(true),
         );
         incoming_tx
             .send(
@@ -13235,7 +13310,7 @@ mod tests {
             .await
             .unwrap();
         let frame = outbound_rx.recv().await.expect("auth ok frame");
-        assert_eq!(frame, auth_ok_frame());
+        assert_eq!(frame, auth_ok_frame_without_terminal_geometry(true));
         drop(incoming_tx);
         let _ = task.await;
     }
@@ -13286,6 +13361,7 @@ mod tests {
                 KspCapability::CompanionEventEpoch,
                 KspCapability::TermInputBoundary,
                 KspCapability::TermScrollbackWindow,
+                KspCapability::TerminalGeometry,
             ],
         }
     }

@@ -24,6 +24,12 @@ pub(crate) struct ObservedSingletonTask {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct TerminalGeometryCapability {
+    pub(crate) daemon_pid: u32,
+    pub(crate) supported: bool,
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
 
 /// Marker for an in-process HTTP invoke whose caller was authenticated before
@@ -50,11 +56,10 @@ pub struct AppState {
     pub(crate) companion_resources: crate::ksp::CompanionResources,
     pub(crate) terminal_taps: crate::ksp::TerminalTapRegistry,
     pub(crate) agent_histories: crate::ksp::AgentHistoryRegistry,
-    /// Whether the daemon generation serving this server understands the
-    /// viewer-controller protocol. This is deliberately independent of the
-    /// client's KSP capability claim: during a rolling upgrade the server may
-    /// be new while its daemon is still old.
-    pub(crate) terminal_geometry_supported: Arc<AtomicBool>,
+    /// Capability negotiated with the daemon generation currently serving the
+    /// server. The generation and result are published together so a KSP auth
+    /// never observes a worker's transient probe state.
+    pub(crate) terminal_geometry_capability: Arc<StdMutex<TerminalGeometryCapability>>,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     pub(super) repo_checkouts: Arc<StdMutex<HashMap<String, RepoCheckoutOperation>>>,
@@ -383,7 +388,15 @@ impl AppState {
             companion_resources: crate::ksp::CompanionResources::default(),
             terminal_taps: crate::ksp::TerminalTapRegistry::default(),
             agent_histories: crate::ksp::AgentHistoryRegistry::default(),
-            terminal_geometry_supported: Arc::new(AtomicBool::new(cfg!(test))),
+            terminal_geometry_capability: Arc::new(StdMutex::new(TerminalGeometryCapability {
+                // Test state starts enabled, and a real daemon PID is always
+                // non-zero. The value is replaced before production auth.
+                daemon_pid: 1,
+                // The listener is not started until runtime has probed the
+                // real daemon. Unit-test connections retain the old test-only
+                // enabled default until a generation is installed.
+                supported: cfg!(test),
+            })),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             repo_checkouts: Arc::new(StdMutex::new(HashMap::new())),
@@ -434,12 +447,28 @@ impl AppState {
     }
 
     pub(crate) fn terminal_geometry_supported(&self) -> bool {
-        self.terminal_geometry_supported.load(Ordering::Acquire)
+        let capability = self.terminal_geometry_capability();
+        capability.daemon_pid != 0 && capability.supported
     }
 
-    pub(crate) fn set_terminal_geometry_supported(&self, supported: bool) {
-        self.terminal_geometry_supported
-            .store(supported, Ordering::Release);
+    pub(crate) fn terminal_geometry_capability(&self) -> TerminalGeometryCapability {
+        let capability = self
+            .terminal_geometry_capability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .to_owned();
+        capability
+    }
+
+    pub(crate) fn set_terminal_geometry_capability(&self, daemon_pid: u32, supported: bool) {
+        let mut capability = self
+            .terminal_geometry_capability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *capability = TerminalGeometryCapability {
+            daemon_pid,
+            supported,
+        };
     }
 
     pub fn publish_state_changed(&self, scope: StateChangeScope) {

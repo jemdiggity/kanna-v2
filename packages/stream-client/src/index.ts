@@ -452,6 +452,14 @@ export class StreamClient {
       handlers,
       resume: null,
     });
+    const registration = this.terminalViewerRegistrations.get(taskId);
+    if (
+      registration &&
+      registration.sentCols === undefined &&
+      (!this.authed || this.supportsCapability("terminal_geometry"))
+    ) {
+      this.sendTerminalViewerRegistration(registration, taskId);
+    }
     this.sendFrame({ type: "attach", task_id: taskId, kind: "terminal", from_seq: 0 });
   }
 
@@ -534,6 +542,16 @@ export class StreamClient {
   detach(taskId: string, kind: StreamKind): void {
     const attachment = this.attachments.get(attachmentKey(taskId, kind));
     this.attachments.delete(attachmentKey(taskId, kind));
+    if (kind === "terminal") {
+      const registration = this.terminalViewerRegistrations.get(taskId);
+      if (registration) {
+        // A terminal attachment is a viewer lifetime. The next attachment
+        // must register again even when it keeps the same measured size.
+        registration.sentCols = undefined;
+        registration.sentRows = undefined;
+        registration.flushScheduled = false;
+      }
+    }
     if (kind === "companion") {
       this.clearPendingCompanionEvents(taskId);
       this.dropCompanionChunkAssembly(taskId);
@@ -638,20 +656,7 @@ export class StreamClient {
     // before Attach. Subsequent measurements are latest-value-wins and are
     // coalesced in one microtask, keeping a resize burst out of the ordered
     // input queue without weakening the registration-before-attach fence.
-    const send = () => {
-      registration.sentCols = registration.cols;
-      registration.sentRows = registration.rows;
-      this.sendFrame({
-        type: "term_viewer_register",
-        task_id: taskId,
-        viewer_id: registration.viewerId,
-        role: registration.role,
-        generation: registration.generation,
-        cols: registration.cols,
-        rows: registration.rows,
-        visible: registration.visible,
-      });
-    };
+    const send = () => this.sendTerminalViewerRegistration(registration, taskId);
     if (!current || !this.authed) {
       send();
       return;
@@ -667,6 +672,26 @@ export class StreamClient {
       }
       send();
     });
+  }
+
+  private sendTerminalViewerRegistration(
+    registration: TerminalViewerRegistration,
+    taskId: string,
+  ): void {
+    const sent = this.sendFrame({
+        type: "term_viewer_register",
+        task_id: taskId,
+        viewer_id: registration.viewerId,
+        role: registration.role,
+        generation: registration.generation,
+        cols: registration.cols,
+        rows: registration.rows,
+        visible: registration.visible,
+      });
+    if (sent) {
+      registration.sentCols = registration.cols;
+      registration.sentRows = registration.rows;
+    }
   }
 
   takeTerminalControl(taskId: string): void {
@@ -1641,7 +1666,7 @@ export class StreamClient {
     if (!this.authed || !this.socket) {
       // Attachment state is re-sent from the registry on auth. Neither edge
       // of that state transition belongs in the reconnect replay queue.
-      if (frame.type !== "attach" && frame.type !== "detach") {
+      if (frame.type !== "attach" && frame.type !== "detach" && frame.type !== "term_viewer_register") {
         this.sendQueue.push(frame);
       }
       return false;

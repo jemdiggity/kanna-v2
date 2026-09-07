@@ -354,6 +354,14 @@ export async function verifyRelayPtyRenderedGridAndCursor(
       if (lastInspection.kind !== "rendered") return false;
       const cursorColumn = lastInspection.cursorColumn;
       const cursorRow = lastInspection.cursorRow;
+      const expectedCell = fixture.expectedCell;
+      const expectedCursor = fixture.expectedCursor;
+      const renderedCell = expectedCell && lastInspection.visibleRows
+        ? lastInspection.visibleRows[expectedCell.row]?.slice(
+            expectedCell.column,
+            expectedCell.column + expectedCell.text.length,
+          )
+        : undefined;
       return (
         lastInspection.cols === fixture.expectedCols &&
         lastInspection.rows === fixture.expectedRows &&
@@ -365,7 +373,10 @@ export async function verifyRelayPtyRenderedGridAndCursor(
         cursorColumn >= 0 &&
         cursorColumn < fixture.expectedCols &&
         cursorRow >= 0 &&
-        cursorRow < fixture.expectedRows
+        cursorRow < fixture.expectedRows &&
+        (!expectedCell || renderedCell === expectedCell.text) &&
+        (!expectedCursor ||
+          (cursorColumn === expectedCursor.column && cursorRow === expectedCursor.row))
       );
     },
     {
@@ -373,7 +384,8 @@ export async function verifyRelayPtyRenderedGridAndCursor(
       timeout: SCREEN_TIMEOUT_MS,
       timeoutMsg:
         `Expected the mobile WebView to render ${fixture.expectedCols}x${fixture.expectedRows} ` +
-        `with a valid cursor; last inspection ${JSON.stringify(lastInspection)}`,
+        `with cursor ${JSON.stringify(fixture.expectedCursor)} and cell ` +
+        `${JSON.stringify(fixture.expectedCell)}; last inspection ${JSON.stringify(lastInspection)}`,
     },
   );
 }

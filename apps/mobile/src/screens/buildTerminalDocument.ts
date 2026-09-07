@@ -1381,7 +1381,11 @@ export function buildTerminalDocument({
               overflow: terminalFileMentionOverflow
             },
             rows: Number.parseInt(root.dataset.kannaRows || "", 10) || null,
-            text: renderedTerminalText()
+            text: renderedTerminalText(),
+            visibleRows: Array.from({ length: term.rows }, (_, row) => {
+              const line = term.buffer.active.getLine(term.buffer.active.baseY + row);
+              return line ? line.translateToString(true) : "";
+            })
           }
         }));
       }` : ""}
