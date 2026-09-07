@@ -1620,6 +1620,7 @@ async fn handle_stream_channels(
     auth_mode: AuthMode,
     companion_access: bool,
 ) {
+    let mut terminal_geometry_changed = state.subscribe_terminal_geometry_changes();
     let mut state_change_task = None;
     let mut conn = StreamConn {
         state,
@@ -1643,7 +1644,24 @@ async fn handle_stream_channels(
         companion_access,
     };
 
-    while let Some(message) = incoming_rx.recv().await {
+    loop {
+        let message = tokio::select! {
+            biased;
+            changed = terminal_geometry_changed.changed(), if conn.authed => {
+                if changed.is_err() {
+                    break;
+                }
+                // The auth response is generation-scoped. Retire this socket
+                // on every generation/verdict change so both old and new
+                // clients re-authenticate instead of retaining a stale
+                // geometry capability during the successor probe.
+                break;
+            }
+            message = incoming_rx.recv() => {
+                let Some(message) = message else { break; };
+                message
+            }
+        };
         if is_relay_tunnel_control_message(&message) {
             continue;
         }
@@ -1901,9 +1919,142 @@ struct TerminalControlHandle {
     session_id: Option<String>,
     pending_resize: Option<(u16, u16)>,
     bind_tx: Option<oneshot::Sender<String>>,
-    tx: mpsc::Sender<TerminalControlCommand>,
+    queue: TerminalControlQueue,
     cancel_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
+}
+
+struct QueuedTerminalControl {
+    sequence: u64,
+    command: TerminalControlCommand,
+}
+
+/// Terminal input remains ordered and bounded, while geometry is a latest
+/// value. A reconnecting daemon must not let viewport measurements consume
+/// the 256-entry input budget or make input report terminal_busy.
+struct TerminalControlQueue {
+    tx: mpsc::Sender<QueuedTerminalControl>,
+    geometry: Arc<Mutex<Option<QueuedTerminalControl>>>,
+    geometry_ready: Arc<Notify>,
+    next_sequence: Arc<AtomicU64>,
+}
+
+struct TerminalControlReceiver {
+    rx: mpsc::Receiver<QueuedTerminalControl>,
+    geometry: Arc<Mutex<Option<QueuedTerminalControl>>>,
+    geometry_ready: Arc<Notify>,
+    pending: Option<QueuedTerminalControl>,
+    closed: bool,
+}
+
+#[derive(Debug)]
+enum TerminalControlSendError {
+    Full,
+    Closed,
+}
+
+impl TerminalControlCommand {
+    fn is_geometry(&self) -> bool {
+        matches!(self, Self::Resize { .. } | Self::Register { .. })
+    }
+}
+
+impl TerminalControlQueue {
+    fn new() -> (Self, TerminalControlReceiver) {
+        let (tx, rx) = mpsc::channel(TERMINAL_CONTROL_QUEUE_CAPACITY);
+        let geometry = Arc::new(Mutex::new(None));
+        let geometry_ready = Arc::new(Notify::new());
+        let queue = Self {
+            tx,
+            geometry: Arc::clone(&geometry),
+            geometry_ready: Arc::clone(&geometry_ready),
+            next_sequence: Arc::new(AtomicU64::new(0)),
+        };
+        let receiver = TerminalControlReceiver {
+            rx,
+            geometry,
+            geometry_ready,
+            pending: None,
+            closed: false,
+        };
+        (queue, receiver)
+    }
+
+    fn try_send(&self, command: TerminalControlCommand) -> Result<(), TerminalControlSendError> {
+        let queued = QueuedTerminalControl {
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            command,
+        };
+        if queued.command.is_geometry() {
+            let mut geometry = self
+                .geometry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *geometry = Some(queued);
+            drop(geometry);
+            self.geometry_ready.notify_one();
+            Ok(())
+        } else {
+            self.tx.try_send(queued).map_err(|error| match error {
+                TrySendError::Full(_) => TerminalControlSendError::Full,
+                TrySendError::Closed(_) => TerminalControlSendError::Closed,
+            })
+        }
+    }
+}
+
+impl TerminalControlReceiver {
+    fn take_ready(&mut self) -> Option<TerminalControlCommand> {
+        if self.pending.is_none() && !self.closed {
+            match self.rx.try_recv() {
+                Ok(command) => self.pending = Some(command),
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                Err(mpsc::error::TryRecvError::Disconnected) => self.closed = true,
+            }
+        }
+        let geometry_sequence = self
+            .geometry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|queued| queued.sequence);
+        match (self.pending.as_ref(), geometry_sequence) {
+            (None, None) => None,
+            (Some(_), None) => self.pending.take().map(|queued| queued.command),
+            (None, Some(_)) => self
+                .geometry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .map(|queued| queued.command),
+            (Some(pending), Some(geometry)) if geometry < pending.sequence => self
+                .geometry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .map(|queued| queued.command),
+            (Some(_), Some(_)) => self.pending.take().map(|queued| queued.command),
+        }
+    }
+
+    async fn recv(&mut self) -> Option<TerminalControlCommand> {
+        loop {
+            if let Some(command) = self.take_ready() {
+                return Some(command);
+            }
+            if self.closed {
+                return None;
+            }
+            let notified = self.geometry_ready.notified();
+            tokio::select! {
+                command = self.rx.recv() => match command {
+                    Some(command) => self.pending = Some(command),
+                    None => self.closed = true,
+                },
+                _ = notified => {},
+            }
+        }
+    }
 }
 
 async fn terminal_control_cancelled(cancel_rx: &mut watch::Receiver<bool>) {
@@ -1959,7 +2110,7 @@ async fn run_terminal_control(
     state: Arc<AppState>,
     task_id: String,
     initial_session_id: Option<String>,
-    mut command_rx: mpsc::Receiver<TerminalControlCommand>,
+    mut command_rx: TerminalControlReceiver,
     session_bind_rx: Option<oneshot::Receiver<String>>,
     mut cancel_rx: watch::Receiver<bool>,
     frame_tx: mpsc::Sender<ServerFrame>,
@@ -2551,7 +2702,7 @@ impl StreamConn {
         task_id: String,
         session_id: Option<String>,
     ) -> TerminalControlHandle {
-        let (tx, command_rx) = mpsc::channel(TERMINAL_CONTROL_QUEUE_CAPACITY);
+        let (queue, command_rx) = TerminalControlQueue::new();
         let (bind_tx, bind_rx) = if session_id.is_none() {
             let (bind_tx, bind_rx) = oneshot::channel();
             (Some(bind_tx), Some(bind_rx))
@@ -2572,7 +2723,7 @@ impl StreamConn {
             session_id,
             pending_resize: None,
             bind_tx,
-            tx,
+            queue,
             cancel_tx,
             task,
         }
@@ -2648,11 +2799,11 @@ impl StreamConn {
             .terminal_controls
             .get(&task_id)
             .expect("terminal control inserted")
-            .tx
+            .queue
             .try_send(command);
         match send_result {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
+            Err(TerminalControlSendError::Full) => {
                 let frame_tx = self.frame_tx.clone();
                 tokio::spawn(async move {
                     send_task_error(
@@ -2664,7 +2815,7 @@ impl StreamConn {
                     .await;
                 });
             }
-            Err(TrySendError::Closed(_)) => {
+            Err(TerminalControlSendError::Closed) => {
                 if let Some(control) = self.terminal_controls.remove(&task_id) {
                     let _ = control.cancel_tx.send(true);
                     control.task.abort();
@@ -9776,6 +9927,151 @@ mod tests {
             Some("shell-repo-repo-1".to_string()),
         );
         assert_eq!(direct_terminal_session_id("task-1"), None);
+    }
+
+    #[tokio::test]
+    async fn terminal_geometry_slot_is_bounded_and_ordered_around_input() {
+        let (queue, mut receiver) = TerminalControlQueue::new();
+        for cols in 1..=1024 {
+            queue
+                .try_send(TerminalControlCommand::Register {
+                    viewer_id: "viewer".into(),
+                    role: TerminalViewerRole::Remote,
+                    generation: 1,
+                    cols,
+                    rows: 24,
+                    visible: true,
+                })
+                .expect("geometry uses the latest-value slot");
+        }
+        for index in 0..TERMINAL_CONTROL_QUEUE_CAPACITY {
+            queue
+                .try_send(TerminalControlCommand::Input {
+                    data: vec![index as u8],
+                    kind: TerminalInputKind::Draft,
+                })
+                .expect("geometry must not consume input capacity");
+        }
+        assert!(matches!(
+            queue.try_send(TerminalControlCommand::Input {
+                data: vec![0xff],
+                kind: TerminalInputKind::Draft,
+            }),
+            Err(TerminalControlSendError::Full)
+        ));
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TerminalControlCommand::Register { cols: 1024, .. })
+        ));
+        for index in 0..TERMINAL_CONTROL_QUEUE_CAPACITY {
+            assert!(matches!(
+                receiver.recv().await,
+                Some(TerminalControlCommand::Input { data, .. }) if data == vec![index as u8]
+            ));
+        }
+
+        let (queue, mut receiver) = TerminalControlQueue::new();
+        queue
+            .try_send(TerminalControlCommand::Register {
+                viewer_id: "viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 1,
+                cols: 80,
+                rows: 24,
+                visible: true,
+            })
+            .unwrap();
+        queue
+            .try_send(TerminalControlCommand::Input {
+                data: b"input".to_vec(),
+                kind: TerminalInputKind::Draft,
+            })
+            .unwrap();
+        queue
+            .try_send(TerminalControlCommand::Register {
+                viewer_id: "viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 1,
+                cols: 120,
+                rows: 40,
+                visible: true,
+            })
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TerminalControlCommand::Input { data, .. }) if data == b"input"
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TerminalControlCommand::Register {
+                cols: 120,
+                rows: 40,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn ksp_reconnects_across_geometry_replacement_skew() {
+        let state = Arc::new(AppState::new(test_config(
+            "ksp-geometry-replacement-skew",
+            "KSP Geometry Replacement Skew",
+        )));
+        state.set_terminal_geometry_capability(100, true);
+
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut frame_rx) = outbound_frame_channel(8);
+        let active = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            frame_tx,
+            companion_tx,
+            Arc::clone(&state),
+            AuthMode::AllowEmpty,
+            true,
+        ));
+        incoming_tx
+            .send(serde_json::to_string(&client_auth_frame()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(frame_rx.recv().await, Some(auth_ok_frame()));
+
+        // A disconnect invalidates the old true verdict before the successor
+        // is probed. The already-authenticated socket must retire too.
+        state.invalidate_terminal_geometry_capability(100);
+        tokio::time::timeout(Duration::from_secs(1), active)
+            .await
+            .expect("active KSP connection did not retire")
+            .expect("active KSP task panicked");
+
+        // Authenticate during an old->new probe window: the connection sees
+        // the conservative old-daemon verdict and must not receive geometry
+        // authority. Publishing the successor verdict then retires it for a
+        // fresh handshake.
+        state.set_terminal_geometry_capability(101, false);
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut frame_rx) = outbound_frame_channel(8);
+        let probing = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            frame_tx,
+            companion_tx,
+            Arc::clone(&state),
+            AuthMode::AllowEmpty,
+            true,
+        ));
+        incoming_tx
+            .send(serde_json::to_string(&client_auth_frame()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            frame_rx.recv().await,
+            Some(auth_ok_frame_without_terminal_geometry(true))
+        );
+        state.set_terminal_geometry_capability(102, true);
+        tokio::time::timeout(Duration::from_secs(1), probing)
+            .await
+            .expect("probe-window KSP connection did not retire")
+            .expect("probe-window KSP task panicked");
     }
 
     #[tokio::test]

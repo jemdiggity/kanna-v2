@@ -2925,15 +2925,43 @@ describe("StreamClient", () => {
     client.sendTermResize("task-pty", 42, 18);
     client.sendTermResize("task-pty", 43, 18);
     client.sendTermResize("task-pty", 44, 19);
-    await Promise.resolve();
+    vi.advanceTimersByTime(50);
 
     expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toEqual([
       expect.objectContaining({ cols: 42, rows: 18 }),
       expect.objectContaining({ cols: 44, rows: 19 }),
     ]);
     client.sendTermResize("task-pty", 44, 19);
-    await Promise.resolve();
+    vi.advanceTimersByTime(50);
     expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toHaveLength(2);
+    client.close();
+  });
+
+  it("keeps geometry latest-value-only across event-loop turns", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+    client.attachTerminal("task-pty", { onOutput() {} });
+
+    client.sendTermResize("task-pty", 42, 18);
+    vi.advanceTimersByTime(10);
+    client.sendTermResize("task-pty", 43, 18);
+    vi.advanceTimersByTime(10);
+    client.sendTermResize("task-pty", 44, 19);
+
+    expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toEqual([
+      expect.objectContaining({ cols: 42, rows: 18 }),
+    ]);
+    vi.advanceTimersByTime(40);
+    expect(socket.sent.filter((frame) => frame.type === "term_viewer_register")).toEqual([
+      expect.objectContaining({ cols: 42, rows: 18 }),
+      expect.objectContaining({ cols: 44, rows: 19 }),
+    ]);
     client.close();
   });
 

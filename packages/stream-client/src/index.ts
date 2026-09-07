@@ -269,7 +269,8 @@ interface TerminalViewerRegistration {
   visible: boolean;
   sentCols?: number;
   sentRows?: number;
-  flushScheduled?: boolean;
+  /** One bounded latest-value flush while the socket/daemon catches up. */
+  flushTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface CompanionAttachment {
@@ -339,6 +340,7 @@ const MAX_PENDING_DECODE_BYTES =
 
 /** Delay before the single force-refresh retry after an auth-failure close. */
 const AUTH_RETRY_DELAY_MS = 250;
+const TERMINAL_GEOMETRY_FLUSH_DELAY_MS = 50;
 
 function defaultFactory(url: string): WebSocketLike {
   return new WebSocket(url) as unknown as WebSocketLike;
@@ -549,7 +551,10 @@ export class StreamClient {
         // must register again even when it keeps the same measured size.
         registration.sentCols = undefined;
         registration.sentRows = undefined;
-        registration.flushScheduled = false;
+        if (registration.flushTimer !== undefined) {
+          clearTimeout(registration.flushTimer);
+          registration.flushTimer = undefined;
+        }
       }
     }
     if (kind === "companion") {
@@ -653,25 +658,25 @@ export class StreamClient {
     }
 
     // The first registration is sent synchronously so callers can enqueue it
-    // before Attach. Subsequent measurements are latest-value-wins and are
-    // coalesced in one microtask, keeping a resize burst out of the ordered
-    // input queue without weakening the registration-before-attach fence.
+    // before Attach. Subsequent measurements occupy one bounded latest-value
+    // slot. The timer spans event-loop turns, so a reconnecting or slow
+    // daemon cannot receive one control frame per measurement and consume
+    // the ordered input budget.
     const send = () => this.sendTerminalViewerRegistration(registration, taskId);
     if (!current || !this.authed) {
       send();
       return;
     }
-    if (registration.flushScheduled) return;
-    registration.flushScheduled = true;
-    queueMicrotask(() => {
-      registration.flushScheduled = false;
+    if (registration.flushTimer !== undefined) return;
+    registration.flushTimer = setTimeout(() => {
+      registration.flushTimer = undefined;
       const latest = this.terminalViewerRegistrations.get(taskId);
       if (latest !== registration) return;
       if (latest.sentCols === latest.cols && latest.sentRows === latest.rows) {
         return;
       }
       send();
-    });
+    }, TERMINAL_GEOMETRY_FLUSH_DELAY_MS);
   }
 
   private sendTerminalViewerRegistration(
@@ -962,6 +967,10 @@ export class StreamClient {
               registration &&
               this.supportsCapability("terminal_geometry")
             ) {
+              if (registration.flushTimer !== undefined) {
+                clearTimeout(registration.flushTimer);
+                registration.flushTimer = undefined;
+              }
               this.rawSend({
                 type: "term_viewer_register",
                 task_id: taskId,

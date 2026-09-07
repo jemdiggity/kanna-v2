@@ -137,6 +137,11 @@ async fn maintain_protected_input_generations(
     loop {
         let previous_pid = daemon.connected_pid();
         let ended = daemon.wait_until_disconnected().await;
+        // No KSP connection may continue to advertise the old generation's
+        // geometry authority while the successor is being probed. The state
+        // update also wakes active KSP handlers so they reconnect and
+        // authenticate against the successor's verdict.
+        state.invalidate_terminal_geometry_capability(previous_pid);
         log::info!(
             "daemon pid {previous_pid} ended its protected-input generation ({ended}); \
              re-establishing the policy on its successor"
