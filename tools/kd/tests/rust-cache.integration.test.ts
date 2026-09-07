@@ -72,6 +72,7 @@ const { spawnSync } = require("node:child_process");
 const [rustc, ...args] = process.argv.slice(2);
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({
   cacheDir: process.env.KACHE_CACHE_DIR,
+  keySalt: process.env.KACHE_KEY_SALT,
   localOnly: process.env.KACHE_LOCAL_ONLY,
   cacheExecutables: process.env.KACHE_CACHE_EXECUTABLES,
   verifyRestores: process.env.KACHE_VERIFY_RESTORES,
@@ -144,6 +145,7 @@ describeMac("kache Cargo wiring", () => {
         join(homeDir, "Library", "Caches", "kanna", "rust-kache", repositoryIdentity(repoRoot))
       );
       expect(invocation.localOnly).toBe("1");
+      expect(invocation.keySalt).toMatch(/^kanna-source-v2:[0-9a-f]{64}$/);
       expect(invocation.cacheExecutables).toBe("0");
       expect(invocation.verifyRestores).toBe("always");
       expect(invocation.maxSize).toBe("10GiB");
@@ -152,12 +154,66 @@ describeMac("kache Cargo wiring", () => {
       expect(invocation.incrementalFlag).toBe(false);
     }
 
-    expect(cache.env.RUSTC_WRAPPER).toBe(binary);
+    expect(cache.env.RUSTC_WRAPPER).not.toBe(binary);
+    expect(cache.env.KANNA_KACHE_BINARY).toBe(binary);
     // Cargo still creates the layout directory; it must stay empty, because
     // incremental state is the disk cost hermetic caching trades away.
     const incremental = join(repoRoot, ".build", "cargo-build", "debug", "incremental");
     expect(existsSync(incremental) ? readdirSync(incremental) : []).toEqual([]);
     expect(existsSync(join(repoRoot, ".build", "debug", "libkd_kache_probe.rlib"))).toBe(true);
+  }, 120_000);
+
+  it("preserves Cargo's inherited GNU make jobserver descriptors through the generated wrapper", async () => {
+    const { root, repoRoot, homeDir } = await fixture();
+    const binary = resolveKachePaths(homeDir).binary;
+    const descriptorLog = join(root, "jobserver-descriptors.json");
+    mkdirSync(dirname(binary), { recursive: true });
+    writeFileSync(
+      binary,
+      `#!/usr/bin/env node
+const { fstatSync, writeFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const [rustc, ...args] = process.argv.slice(2);
+const match = process.env.CARGO_MAKEFLAGS?.match(/--jobserver-(?:auth|fds)=([0-9]+),([0-9]+)/);
+const descriptors = match?.slice(1).map(Number) ?? [];
+writeFileSync(${JSON.stringify(descriptorLog)}, JSON.stringify(descriptors.map((fd) => fstatSync(fd).isFIFO())));
+const stdio = ["inherit", "inherit", "inherit"];
+for (const descriptor of descriptors) {
+  while (stdio.length <= descriptor) stdio.push("ignore");
+  stdio[descriptor] = descriptor;
+}
+const result = spawnSync(rustc, args, { stdio });
+process.exit(result.status ?? 1);
+`,
+      { mode: 0o755 }
+    );
+    chmodSync(binary, 0o755);
+
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), KANNA_RUST_CACHE: "on", CI: "" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    const fifo = join(root, "jobserver.fifo");
+    await run("mkfifo", [fifo]);
+    const result = await nodeCommandRunner.run(
+      "/bin/sh",
+      ["-c", 'exec 8<>"$JOBSERVER_FIFO"; exec 9>&8; cargo build'],
+      {
+        cwd: repoRoot,
+        env: {
+          ...cache.env,
+          JOBSERVER_FIFO: fifo,
+          CARGO_MAKEFLAGS: "--jobserver-auth=8,9 -j"
+        }
+      }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("failed to connect to jobserver");
+    expect(JSON.parse(readFileSync(descriptorLog, "utf8")) as boolean[]).toEqual([true, true]);
   }, 120_000);
 
   it("builds directly against rustc when the cache is opted out", async () => {
@@ -527,6 +583,60 @@ function totalHits(entries: CacheEntry[]): number {
 }
 
 describeRealKache("pinned kache selects cache keys per source revision", () => {
+  it("isolates divergent concurrent worktrees inside the shared repository store", async () => {
+    const { root, repoRoot, homeDir } = await twoRevisionFixture();
+    linkPinnedKache(homeDir);
+
+    writeRevision(repoRoot, 1);
+    await run("git", ["add", "."], { cwd: repoRoot });
+    await run("git", ["-c", "user.name=Kanna", "-c", "user.email=kanna@example.invalid", "commit", "-qm", "revision 1"], {
+      cwd: repoRoot
+    });
+    const firstRoot = join(root, "worktree-1");
+    const secondRoot = join(root, "worktree-2");
+    await run("git", ["worktree", "add", "--quiet", "--detach", firstRoot, "HEAD"], {
+      cwd: repoRoot
+    });
+    await run("git", ["worktree", "add", "--quiet", "--detach", secondRoot, "HEAD"], {
+      cwd: repoRoot
+    });
+
+    const cacheFor = (worktree: string) =>
+      applyRustCacheEnvironment({
+        repoRoot: worktree,
+        homeDir,
+        env: { ...isolatedCargoEnv(), CI: "" },
+        platform: "darwin",
+        arch: process.arch
+      });
+    const firstCache = cacheFor(firstRoot);
+    const secondCache = cacheFor(secondRoot);
+    if (!firstCache.state.active || !secondCache.state.active) {
+      throw new Error("pinned cache unexpectedly inactive");
+    }
+
+    // Model two already-running `kd dev up` processes: both environments are
+    // resolved while their bytes are identical, then one checkout is edited.
+    expect(firstCache.state.store).toBe(secondCache.state.store);
+    expect(firstCache.env.KACHE_KEY_SALT).toBe(secondCache.env.KACHE_KEY_SALT);
+    writeRevision(secondRoot, 2);
+
+    const build = (worktree: string, env: NodeJS.ProcessEnv) =>
+      run("cargo", ["build"], { cwd: worktree, env });
+    await Promise.all([build(firstRoot, firstCache.env), build(secondRoot, secondCache.env)]);
+    expect(await run(join(firstRoot, ".build", "debug", "probe"), [])).toBe("1");
+    expect(await run(join(secondRoot, ".build", "debug", "probe"), [])).toBe("2");
+    expect(defaultsEntries(await listCacheEntries(firstCache.state.store))).toHaveLength(2);
+
+    // Exercise concurrent restores too, not only concurrent publication.
+    rmSync(join(firstRoot, ".build"), { recursive: true, force: true });
+    rmSync(join(secondRoot, ".build"), { recursive: true, force: true });
+    await Promise.all([build(firstRoot, firstCache.env), build(secondRoot, secondCache.env)]);
+    expect(await run(join(firstRoot, ".build", "debug", "probe"), [])).toBe("1");
+    expect(await run(join(secondRoot, ".build", "debug", "probe"), [])).toBe("2");
+    expect(totalHits(await listCacheEntries(firstCache.state.store))).toBeGreaterThan(0);
+  }, 300_000);
+
   it("never serves an artifact compiled from a different revision", async () => {
     const { repoRoot, homeDir } = await twoRevisionFixture();
     linkPinnedKache(homeDir);

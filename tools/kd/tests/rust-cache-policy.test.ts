@@ -121,10 +121,17 @@ describe("rust cache eligibility", () => {
 
 describe("rust cache environment", () => {
   it("configures a local-only, capped, executable-free store and disables incremental", () => {
-    expect(buildRustCacheEnvironment({ binary: "/tools/kache", store: "/store" })).toEqual({
+    expect(
+      buildRustCacheEnvironment({
+        binary: "/tools/kache",
+        store: "/store",
+        sourceIdentity: "source-a"
+      })
+    ).toEqual({
       RUSTC_WRAPPER: "/tools/kache",
       CARGO_INCREMENTAL: "0",
       KACHE_CACHE_DIR: "/store",
+      KACHE_KEY_SALT: "kanna-source-v1:source-a",
       KACHE_LOCAL_ONLY: "1",
       KACHE_CACHE_EXECUTABLES: "0",
       KACHE_VERIFY_RESTORES: "always",
@@ -137,7 +144,13 @@ describe("rust cache environment", () => {
     // store entry and the compiler's input, and it costs a digest per hit. Now
     // that every developer build is cached by default it gets cheaper to argue
     // away; this test exists so that argument has to be made out loud.
-    expect(buildRustCacheEnvironment({ binary: "/tools/kache", store: "/store" })).toMatchObject({
+    expect(
+      buildRustCacheEnvironment({
+        binary: "/tools/kache",
+        store: "/store",
+        sourceIdentity: "source-a"
+      })
+    ).toMatchObject({
       KACHE_VERIFY_RESTORES: "always"
     });
   });
