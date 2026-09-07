@@ -379,6 +379,11 @@
     "createConfig": "Create Config",
     "createConfigDesc": "Create or update .kanna/config.json"
   },
+  "mainTabs": {
+    "agent": "Agent",
+    "diff": "Diff",
+    "shell": "Shell"
+  },
   "terminalTabs": {
     "noSession": "No agent session active"
   },

@@ -28,29 +28,42 @@ export function isTopModal(z: number): boolean {
  *
  * Returns { zIndex, bringToFront } — call bringToFront() to move an
  * already-open modal to the top of the stack without remounting.
+ *
+ * `enabled: false` is for a view component rendered inline — as a main-area
+ * tab rather than an overlay. It keeps the base z-index and never joins the
+ * stack, because a tab that is merely open is not "on top of" the modals a
+ * user opened over it, and counting it as such breaks `isTopModal`.
  */
-export function useModalZIndex(): { zIndex: Ref<number>; bringToFront: () => void } {
+export function useModalZIndex(
+  options?: { enabled?: boolean },
+): { zIndex: Ref<number>; bringToFront: () => void } {
+  const enabled = options?.enabled !== false;
   const zIndex = ref(BASE);
 
   function bringToFront() {
+    if (!enabled) return;
     remove(zIndex.value);
     zIndex.value = push();
   }
 
   onMounted(() => {
+    if (!enabled) return;
     zIndex.value = push();
   });
 
   onUnmounted(() => {
+    if (!enabled) return;
     remove(zIndex.value);
   });
 
   // KeepAlive: re-push on activate so a re-shown modal goes to the top
   onActivated(() => {
+    if (!enabled) return;
     zIndex.value = push();
   });
 
   onDeactivated(() => {
+    if (!enabled) return;
     remove(zIndex.value);
   });
 

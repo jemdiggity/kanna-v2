@@ -5,7 +5,12 @@ import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
 import { useLessScroll } from "../composables/useLessScroll";
-import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
+import {
+  useShortcutContext,
+  registerContextShortcuts,
+  setContextShortcuts,
+  type ContextShortcut,
+} from "../composables/useShortcutContext";
 import { useInlineSearch } from "../composables/useInlineSearch";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { macOsTextInputAttrs } from "../utils/textInput";
@@ -18,7 +23,6 @@ import {
 } from "../stores/markdownPreviewMode";
 
 const { t } = useI18n();
-const { zIndex, bringToFront } = useModalZIndex();
 const { effectiveCodeTheme } = useThemeRuntime();
 const shikiTheme = computed(() => getShikiTheme(effectiveCodeTheme.value));
 
@@ -38,12 +42,23 @@ const props = withDefaults(
     initialLine?: number;
     initialMarkdownMode?: MarkdownPreviewMode;
     standalone?: boolean;
+    /**
+     * Rendered inline as a main-area tab instead of as an overlay. The tab
+     * host owns visibility and the shortcut context that follows the active
+     * tab, so this instance neither claims the context nor joins the modal
+     * z-index stack.
+     */
+    embedded?: boolean;
+    /** Embedded only: false while another tab is in front of this one. */
+    active?: boolean;
   }>(),
   {
     remoteContent: null,
     initialMarkdownMode: DEFAULT_MARKDOWN_PREVIEW_MODE,
   },
 );
+const { zIndex, bringToFront } = useModalZIndex({ enabled: !props.embedded });
+const isEmbeddedAndHidden = () => props.embedded === true && props.active === false;
 const isRemoteFile = computed(() =>
   props.remoteContent !== null || props.remoteContentLoader !== undefined
 );
@@ -56,7 +71,7 @@ const emit = defineEmits<{
 const contentRef = ref<HTMLElement | null>(null);
 const modalRef = ref<HTMLElement | null>(null);
 
-useShortcutContext("file");
+if (!props.embedded) useShortcutContext("file");
 
 const content = ref("");
 
@@ -74,7 +89,7 @@ const {
 const searchInputRef = ref<HTMLInputElement | null>(null);
 
 const showLineNumbers = ref(false);
-registerContextShortcuts("file", [
+const fileContextShortcuts: ContextShortcut[] = [
   { label: t('filePreview.shortcutSearch'), display: "/", groupKey: "shortcuts.groupSearch" },
   { label: t('filePreview.shortcutSearchAlt'), display: "⌘F", groupKey: "shortcuts.groupSearch" },
   { label: t('filePreview.shortcutNextPrevMatch'), display: "n / N", groupKey: "shortcuts.groupSearch" },
@@ -90,7 +105,17 @@ registerContextShortcuts("file", [
     ? [{ label: t('filePreview.shortcutOpenIDE'), display: "⌘O", groupKey: "shortcuts.groupActions" }]
     : []),
   { label: t('filePreview.shortcutClose'), display: "q", groupKey: "shortcuts.groupActions" },
-]);
+];
+registerContextShortcuts("file", fileContextShortcuts);
+// Several file tabs can be mounted at once. Whichever one the reader
+// brings forward owns the contextual shortcut list.
+watch(
+  () => props.active,
+  (active) => {
+    if (!props.embedded || !active) return;
+    setContextShortcuts("file", fileContextShortcuts);
+  },
+);
 const highlighted = ref("");
 const currentLang = ref("text");
 const loading = ref(true);
@@ -335,6 +360,7 @@ function handleSearchInputKeydown(e: KeyboardEvent) {
 }
 
 useLessScroll(contentRef, {
+  isActive: () => !isEmbeddedAndHidden(),
   extraHandler(e) {
     const isSearchFocusKey =
       (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === "/") ||
@@ -391,12 +417,28 @@ defineExpose({ zIndex, bringToFront, dismiss });
 
 onMounted(() => {
   loadFile();
+  if (isEmbeddedAndHidden()) return;
   nextTick(() => modalRef.value?.focus());
 });
+
+// An embedded preview stays mounted behind other tabs, so it takes focus when
+// it becomes the active one rather than only on mount.
+watch(
+  () => props.active,
+  (active) => {
+    if (!props.embedded || !active) return;
+    nextTick(() => modalRef.value?.focus());
+  },
+);
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized, standalone }" :style="{ zIndex }" @click.self="emit('close')">
+  <div
+    class="modal-overlay"
+    :class="{ maximized, standalone, embedded }"
+    :style="embedded ? undefined : { zIndex }"
+    @click.self="embedded || emit('close')"
+  >
     <div ref="modalRef" class="preview-modal" tabindex="-1">
       <div class="preview-header">
         <span class="file-path">{{ filePath }}</span>
@@ -475,7 +517,16 @@ onMounted(() => {
   background: none;
 }
 
-.standalone .preview-modal {
+.modal-overlay.embedded {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+  background: none;
+}
+
+.standalone .preview-modal,
+.embedded .preview-modal {
   width: 100%;
   height: 100%;
   border: none;

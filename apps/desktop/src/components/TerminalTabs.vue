@@ -9,6 +9,8 @@ const taskTerminalWarmCacheMax = 10;
 
 const props = defineProps<{
   sessionId: string | null;
+  /** False while another main-area tab is in front of the agent session. */
+  active?: boolean;
   agentType?: string;
   agentProvider?: AgentProvider;
   worktreePath?: string;
@@ -42,7 +44,7 @@ function buildSpawnOptions() {
         v-if="sessionId && agentType === 'pty'"
         :key="sessionId"
         :session-id="sessionId"
-        :active="true"
+        :active="active !== false"
         :spawn-options="buildSpawnOptions()"
         :kitty-keyboard="!!(spawnPtySession && worktreePath && prompt) && shouldEnableKittyKeyboard({ agentProvider })"
         :agent-provider="agentProvider"

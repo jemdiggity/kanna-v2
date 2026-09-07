@@ -50,6 +50,12 @@ pub struct AppState {
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
     transfer_sidecar: Arc<crate::transfer_sidecar::TransferSidecarSupervisor>,
+    /// Advisory lane for "show this in the desktop" commands. It is a third
+    /// instance of the sidecar's bounded log rather than a durable table
+    /// because a view request is only meaningful while a window is there to
+    /// honour it: nothing about the task changes, and a request nobody saw is
+    /// correctly forgotten.
+    desktop_view_commands: Arc<crate::transfer_sidecar::TransferEventLog>,
     transfer_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     cloud_transfer_proxies: crate::cloud_transfer_proxy::CloudTransferProxyState,
     pub(super) preview_sessions: super::preview::PreviewSessions,
@@ -331,6 +337,12 @@ impl AppState {
         Arc::clone(&self.transfer_sidecar)
     }
 
+    /// The lane the desktop drains for view commands. One process owns one
+    /// server, so this is single-consumer like the sidecar's own lanes.
+    pub(crate) fn desktop_view_commands(&self) -> Arc<crate::transfer_sidecar::TransferEventLog> {
+        Arc::clone(&self.desktop_view_commands)
+    }
+
     /// The transfer engine's durable work queue. Held here so an HTTP intent
     /// (push a task, approve or reject an incoming transfer) and the sidecar's
     /// own event reader append to the same queue the drain loop consumes.
@@ -383,6 +395,7 @@ impl AppState {
             config,
             local_task_events_token,
             transfer_sidecar,
+            desktop_view_commands: Arc::new(crate::transfer_sidecar::TransferEventLog::default()),
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
             preview_sessions: super::preview::PreviewSessions::default(),

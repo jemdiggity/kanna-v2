@@ -308,10 +308,12 @@ describe("modal tear-off", () => {
     expect(await visibleSelection(client)).toEqual(selectedAtDrag);
     await assertFullWindowModal(client, ".tree-modal", modalRect);
 
+    // The file the tree opens becomes a tab in the task's main area, and the
+    // tree stays where it is — a modal above the tabs — so the next file can
+    // be opened without reopening it.
     await clickTreeFile(client, CURRENT_FILE);
     await client.waitForText(".preview-modal .file-path", CURRENT_FILE, 5_000);
     await client.waitForText(".preview-modal", CURRENT_FILE_CONTENT.trim(), 5_000);
-    await client.pressShortcut(["Escape"]);
     await client.waitForElement(".tree-modal", 5_000);
 
     await client.switchToWindow(sourceHandle);

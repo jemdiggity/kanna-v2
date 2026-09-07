@@ -30,6 +30,7 @@ import type {
   TreeExplorerTearOffContext,
 } from "../modalTearOff";
 import type { WorkspaceTask } from "../workspace/types";
+import type { MainTabsController } from "./useMainTabs";
 import { createConfiguredDesktopRemoteTaskViewClient } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTaskViewClient } from "../services/desktopLanTerminal";
 import type {
@@ -67,6 +68,12 @@ interface UseAppModalsOptions {
   store: ReturnType<typeof useKannaStore>;
   windowWorkspace: WindowWorkspaceController;
   selectedWorkspaceTask?: ComputedRef<WorkspaceTask | null>;
+  /**
+   * The main content area's tabs. A file opened while a task is selected
+   * becomes a tab there; the ephemeral preview modal remains for the
+   * repo-scoped case, where there is no task tab set to open into.
+   */
+  mainTabs?: MainTabsController;
 }
 
 export function useAppModals({
@@ -74,6 +81,7 @@ export function useAppModals({
   store,
   windowWorkspace,
   selectedWorkspaceTask,
+  mainTabs,
 }: UseAppModalsOptions) {
   const transferredModalContext = ref<ModalTearOffContext | null>(
     windowWorkspace.bootstrap.tearOffContext ?? null,
@@ -541,6 +549,25 @@ export function useAppModals({
     fromTree = false,
     remoteContent?: string
   ) {
+    if (mainTabs?.scopeKey.value) {
+      // Remote content is a point-in-time snapshot from another machine; it
+      // cannot be re-loaded later, so it is excluded from preview recall.
+      if (remoteContent === undefined) rememberCurrentPreview(filePath, initialLine);
+      mainTabs.openTab({
+        kind: "file",
+        filePath,
+        initialLine,
+        remoteContent: remoteContent ?? null,
+      });
+      // The picker is a launcher: once the file has a tab the flow is over, so
+      // it is not left mounted waiting to be returned to. The tree explorer is
+      // a browser, and stays open above the tabs so several files can be sent
+      // there in a row; Escape dismisses it the way it dismisses any modal.
+      showFilePickerModal.value = false;
+      filePickerHidden.value = false;
+      return;
+    }
+
     previewFilePath.value = filePath;
     previewInitialLine.value = initialLine;
     previewRemoteContent.value = remoteContent ?? null;

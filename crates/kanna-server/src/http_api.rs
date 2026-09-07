@@ -4,6 +4,7 @@ mod blocking;
 mod cloud_desktops;
 mod cloud_relay;
 mod desktop;
+mod desktop_views;
 #[cfg(debug_assertions)]
 mod e2e_mobile_controls;
 #[cfg(debug_assertions)]

@@ -376,6 +376,11 @@
     "createConfig": "設定を作成",
     "createConfigDesc": ".kanna/config.json を作成または更新"
   },
+  "mainTabs": {
+    "agent": "エージェント",
+    "diff": "差分",
+    "shell": "シェル"
+  },
   "terminalTabs": {
     "noSession": "アクティブなエージェントセッションがありません"
   },

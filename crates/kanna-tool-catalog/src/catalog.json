@@ -196,6 +196,19 @@
       ]
     },
     {
+      "name": "kanna_open_file",
+      "description": "Ask the Kanna desktop to open one of a task's files in that task's main content area, as a tab beside its agent session. Use it to put a file in front of the person watching the task \u2014 the change you want reviewed, the config you are asking about \u2014 instead of pasting its contents into the terminal. The path is resolved inside the task's own workspace before anything is queued, so a path outside it, a missing file, one over 1 MiB, or one that is not UTF-8 text fails here with the reason. Delivery is advisory and the response says requested, never shown: the file is recorded against that task's tabs in every desktop window that is listening, and a window that is closed or not running loses the request rather than queuing it. It never changes which task the operator has selected \u2014 the tab is simply there when they look at that task.",
+      "method": "POST",
+      "path": "/v1/desktop/views/open",
+      "response": "json",
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}). The file is resolved in, and the tab opened against, this task.", "type": "string", "required": true, "location": "body", "key": "taskId" },
+        { "name": "path", "description": "Path of the file to open, relative to the task's workspace root.", "type": "string", "required": true, "location": "body" },
+        { "name": "line", "description": "Optional 1-based line to scroll to when the file opens.", "type": "integer", "required": false, "location": "body" }
+      ]
+    },
+    {
       "name": "kanna_task_logs",
       "description": "Fetch recent agent-session log lines for a Kanna task, oldest first.",
       "method": "GET",

@@ -6,7 +6,13 @@ import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-r
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { getVueState, tauriInvoke } from "../helpers/vue";
 
-type ModalKind = "diff" | "shell" | "tree" | "graph" | "picker" | "preview";
+/**
+ * The task's own views — diff, file, shell — are tabs in the main content
+ * area now, not overlays. What is left stacking is the modals that are still
+ * modals: the tree explorer, the commit graph and the file picker. They must
+ * keep layering above each other, and above the tabs.
+ */
+type ModalKind = "tree" | "graph" | "picker";
 
 interface ModalStackEntry {
   kind: ModalKind;
@@ -15,7 +21,7 @@ interface ModalStackEntry {
 
 function modalStackScript(): string {
   return `
-    const entries = Array.from(document.querySelectorAll(".modal-overlay"))
+    const entries = Array.from(document.querySelectorAll(".modal-overlay:not(.embedded)"))
       .filter((overlay) => {
         if (!(overlay instanceof HTMLElement)) return false;
         const style = getComputedStyle(overlay);
@@ -24,12 +30,9 @@ function modalStackScript(): string {
       })
       .map((overlay) => {
         const kind =
-          overlay.querySelector(".diff-modal") ? "diff" :
-          overlay.querySelector(".shell-modal") ? "shell" :
           overlay.querySelector(".tree-modal") ? "tree" :
           overlay.querySelector(".graph-modal") ? "graph" :
           overlay.querySelector(".picker-modal") ? "picker" :
-          overlay.querySelector(".preview-modal") ? "preview" :
           null;
         return kind ? { kind, zIndex: Number(getComputedStyle(overlay).zIndex) || 0 } : null;
       })
@@ -67,12 +70,26 @@ async function pressShortcut(
   await client.executeSync(buildGlobalKeydownScript(options));
 }
 
-async function openPreviewFromCurrentContext(client: WebDriverClient): Promise<void> {
-  await pressShortcut(client, { key: "p", meta: true });
-  await waitForTopModal(client, "picker");
-  const file = await client.waitForElement(".picker-modal .file-item", 5000);
-  await client.click(file);
-  await waitForTopModal(client, "preview");
+async function openTabIds(client: WebDriverClient): Promise<string[]> {
+  return await client.executeSync<string[]>(
+    `return Array.from(document.querySelectorAll('[data-testid="main-tab-bar"] [role="tab"]'))
+      .map((tab) => (tab.getAttribute("data-testid") || "").replace(/^main-tab-/, ""));`
+  );
+}
+
+async function waitForOpenTab(
+  client: WebDriverClient,
+  id: string,
+  timeoutMs = 8000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: string[] = [];
+  while (Date.now() < deadline) {
+    latest = await openTabIds(client);
+    if (latest.includes(id)) return;
+    await sleep(200);
+  }
+  throw new Error(`expected an open ${id} tab, got ${JSON.stringify(latest)}`);
 }
 
 describe("modal layering", () => {
@@ -126,47 +143,44 @@ describe("modal layering", () => {
     await client.deleteSession();
   });
 
-  it("opens preview modals from other preview modal contexts and stacks each new modal on top", async () => {
+  it("stacks the remaining modals above each other and above the task's tabs", async () => {
+    // The task's own views go to the tab bar, not onto the modal stack.
     await pressShortcut(client, { key: "d", meta: true });
-    let stack = await waitForTopModal(client, "diff");
-    expect(stack.map((entry) => entry.kind)).toEqual(["diff"]);
-
+    await waitForOpenTab(client, "diff");
     await pressShortcut(client, { key: "j", meta: true });
-    stack = await waitForTopModal(client, "shell");
-    expect(stack.map((entry) => entry.kind).slice(0, 2)).toEqual(["shell", "diff"]);
+    await waitForOpenTab(client, "shell");
+    expect(await modalStack(client)).toEqual([]);
 
     await pressShortcut(client, { key: "E", meta: true, shift: true });
-    stack = await waitForTopModal(client, "tree");
-    expect(stack.map((entry) => entry.kind).slice(0, 3)).toEqual(["tree", "shell", "diff"]);
+    let stack = await waitForTopModal(client, "tree");
+    expect(stack.map((entry) => entry.kind)).toEqual(["tree"]);
 
     await pressShortcut(client, { key: "g", meta: true });
     stack = await waitForTopModal(client, "graph");
-    expect(stack.map((entry) => entry.kind).slice(0, 4)).toEqual(["graph", "tree", "shell", "diff"]);
+    expect(stack.map((entry) => entry.kind).slice(0, 2)).toEqual(["graph", "tree"]);
 
-    await openPreviewFromCurrentContext(client);
+    await pressShortcut(client, { key: "p", meta: true });
+    stack = await waitForTopModal(client, "picker");
+    expect(stack.map((entry) => entry.kind).slice(0, 3)).toEqual(["picker", "graph", "tree"]);
+
+    // Picking a file hands it to the tab bar and takes the picker off the
+    // stack; the tree explorer is a browser, not a launcher, and stays.
+    const file = await client.waitForElement(".picker-modal .file-item", 5000);
+    await client.click(file);
+    await waitForTopModal(client, "graph");
     stack = await modalStack(client);
-    expect(stack[0]?.kind).toBe("preview");
-    expect(stack.map((entry) => entry.kind)).toContain("graph");
-    expect(stack.map((entry) => entry.kind)).toContain("shell");
+    expect(stack.map((entry) => entry.kind)).toEqual(["graph", "tree"]);
+    expect(await openTabIds(client)).toContain("diff");
+    expect(await openTabIds(client)).toContain("shell");
+    expect((await openTabIds(client)).some((id) => id.startsWith("file:"))).toBe(true);
 
-    await pressShortcut(client, { key: "d", meta: true });
-    stack = await waitForTopModal(client, "diff");
-    expect(stack[0]?.kind).toBe("diff");
-
-    await pressShortcut(client, { key: "j", meta: true });
-    stack = await waitForTopModal(client, "shell");
-    expect(stack[0]?.kind).toBe("shell");
-
-    await pressShortcut(client, { key: "E", meta: true, shift: true });
-    stack = await waitForTopModal(client, "tree");
-    expect(stack[0]?.kind).toBe("tree");
-
-    await pressShortcut(client, { key: "g", meta: true });
-    stack = await waitForTopModal(client, "graph");
-    expect(stack[0]?.kind).toBe("graph");
-
-    await openPreviewFromCurrentContext(client);
-    stack = await waitForTopModal(client, "preview");
-    expect(stack[0]?.kind).toBe("preview");
+    // Escape reaches the tabs only once every modal has declined it: the
+    // graph goes first, then the tree, and the tabs are still there.
+    await pressShortcut(client, { key: "Escape" });
+    await waitForTopModal(client, "tree");
+    await pressShortcut(client, { key: "Escape" });
+    await sleep(400);
+    expect(await modalStack(client)).toEqual([]);
+    expect(await openTabIds(client)).toContain("diff");
   });
 });

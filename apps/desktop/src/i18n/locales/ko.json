@@ -377,6 +377,11 @@
     "createConfig": "설정 생성",
     "createConfigDesc": ".kanna/config.json 생성 또는 업데이트"
   },
+  "mainTabs": {
+    "agent": "에이전트",
+    "diff": "변경 사항",
+    "shell": "셸"
+  },
   "terminalTabs": {
     "noSession": "활성 에이전트 세션 없음"
   },

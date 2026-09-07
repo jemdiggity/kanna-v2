@@ -13,6 +13,8 @@ import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { isTopModal } from "./useModalZIndex";
 import type { ShortcutContext } from "./useShortcutContext";
 import type { WorkspaceTask } from "../workspace/types";
+import type { MainTabsController } from "./useMainTabs";
+import MainPanel from "../components/MainPanel.vue";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
 import { openLatestTerminalFileLink } from "./terminalFileLinkRegistry";
@@ -31,6 +33,12 @@ interface UseAppKeyboardActionsOptions {
   selectedWorkspaceTask: ComputedRef<WorkspaceTask | null>;
   selectedWorkspaceTaskBlocked: ComputedRef<boolean>;
   currentShortcutContext: ComputedRef<ShortcutContext>;
+  /**
+   * The main content area's tabs. While a task is selected, the view
+   * shortcuts open, focus and close tabs there instead of raising a modal.
+   */
+  mainTabs: MainTabsController;
+  mainPanelRef: Ref<InstanceType<typeof MainPanel> | null>;
   showNewTaskModal: Ref<boolean>;
   showAddRepoModal: Ref<boolean>;
   addRepoInitialTab: Ref<"create" | "import">;
@@ -101,6 +109,8 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     selectedWorkspaceTask,
     selectedWorkspaceTaskBlocked,
     currentShortcutContext,
+    mainTabs,
+    mainPanelRef,
     showNewTaskModal,
     showAddRepoModal,
     addRepoInitialTab,
@@ -156,6 +166,28 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     handleEditBlockedTask,
   } = options;
 
+  // The Preferences panel owns tab cycling while it is open; otherwise the
+  // keys move between the main content area's tabs.
+  function cycleTabs(direction: -1 | 1) {
+    if (showPreferencesPanel.value) {
+      preferencesRef.value?.cycleTab(direction);
+      return;
+    }
+    mainTabs.cycleTab(direction);
+  }
+
+  /**
+   * Which shortcut list ⌘/ shows. It follows the active tab as well as the
+   * open modals, so a file tab still documents its own reading keys — but it
+   * deliberately does not narrow which shortcuts *fire*: a tab is a view, not
+   * a mode, and the task shortcuts stay live behind it.
+   */
+  function shortcutsDisplayContext(): ShortcutContext {
+    const modalContext = currentShortcutContext.value;
+    if (modalContext !== "main") return modalContext;
+    return mainTabs.activeTabContext.value ?? "main";
+  }
+
   // Keyboard shortcuts
   const keyboardActions = {
     newTask: () => {
@@ -199,6 +231,25 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (!opened) toast.info(t("toasts.noTerminalFileLink"));
     },
     toggleFilePreview: () => {
+      if (mainTabs.scopeKey.value) {
+        const activeTab = mainTabs.activeTab.value;
+        if (activeTab?.kind === "file") {
+          mainTabs.closeTab(activeTab.id);
+          return;
+        }
+        const openFileTab = mainTabs.tabs.value.find((tab) => tab.kind === "file");
+        if (openFileTab) {
+          mainTabs.activateTab(openFileTab.id);
+          return;
+        }
+        const recalled = getCurrentPreviewRecall();
+        if (recalled) {
+          openFilePreview(recalled.filePath, recalled.initialLine, false);
+          return;
+        }
+        showFilePickerOnTop();
+        return;
+      }
       if (showFilePreviewModal.value) {
         showFilePreviewModal.value = false;
         previewHidden.value = true;
@@ -307,6 +358,8 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       }
       if (showNewTaskModal.value) { showNewTaskModal.value = false; return true; }
       if (showAddRepoModal.value) { showAddRepoModal.value = false; return true; }
+      // Tabs are below every modal, so they get Escape only once none wanted it.
+      if (mainPanelRef.value?.dismissActiveTab?.()) return true;
     },
     openShell: () => {
       const workspaceTask = selectedWorkspaceTask.value;
@@ -315,6 +368,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
         return;
       }
       if (!store.selectedRepo || !store.currentItem) return;
+      if (mainTabs.scopeKey.value) {
+        mainTabs.toggleTab({ kind: "shell" });
+        return;
+      }
       if (showShellModal.value && !shellRepoRoot.value) {
         const z = shellModalRef.value?.zIndex ?? 0;
         if (isTopModal(z)) {
@@ -342,6 +399,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     },
     showDiff: () => {
       if (!store.selectedRepo && !selectedWorkspaceTask.value) return;
+      if (mainTabs.scopeKey.value) {
+        mainTabs.toggleTab({ kind: "diff" });
+        return;
+      }
       if (showDiffModal.value) {
         const z = diffModalRef.value?.zIndex ?? 0;
         if (isTopModal(z)) {
@@ -368,7 +429,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     },
     showShortcuts: () => {
       if (showShortcutsModal.value) {
-        if (shortcutsStartFull.value && currentShortcutContext.value !== "main") {
+        if (shortcutsStartFull.value && shortcutsDisplayContext() !== "main") {
           // Showing all in a modal context → switch to contextual
           shortcutsStartFull.value = false;
         } else {
@@ -412,8 +473,8 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     blockTask: () => { handleBlockTask(); },
     editBlockedTask: () => { handleEditBlockedTask(); },
     openPreferences: () => { showPreferencesPanel.value = !showPreferencesPanel.value; },
-    prevTab: () => { preferencesRef.value?.cycleTab(-1); },
-    nextTab: () => { preferencesRef.value?.cycleTab(1); },
+    prevTab: () => { cycleTabs(-1); },
+    nextTab: () => { cycleTabs(1); },
     focusSearch: () => { sidebarRef.value?.focusSearch(); },
   };
   useKeyboardShortcuts(keyboardActions, {

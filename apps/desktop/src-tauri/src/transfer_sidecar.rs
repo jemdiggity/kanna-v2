@@ -12,6 +12,11 @@
 //! pairing prompts, which need a human, and remote terminal frames, which need
 //! a terminal. Losing one costs a prompt nobody was there to answer, never a
 //! transfer step.
+//!
+//! The same long-poll shape carries `kanna-server`'s desktop view commands —
+//! an agent asking a window to open a file for the person watching the task.
+//! It is advisory for exactly the same reason: a window that is not there
+//! loses the request, and nothing about the task depended on it.
 
 use serde_json::Value;
 use std::time::Duration;
@@ -25,6 +30,7 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
         Some("terminal_event") => Some("transfer-terminal-event"),
         Some("sidecar_exited") => Some("transfer-sidecar-exited"),
         Some("companion_event") => Some("transfer-companion-event"),
+        Some("desktop_view_open") => Some("desktop-view-open"),
         _ => None,
     }
 }
@@ -125,6 +131,45 @@ pub fn spawn_transfer_companion_event_poller(app: AppHandle) {
                 }
                 Err(error) => {
                     eprintln!("[transfer-companion-events] poll failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
+}
+
+/// Long-poll the desktop view command lane and emit each command to every
+/// window as `desktop-view-open`. A lane of its own so a burst of terminal
+/// frames cannot delay a file the operator was just asked to look at.
+pub fn spawn_desktop_view_command_poller(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        crate::commands::mobile::wait_for_server_started(&app).await;
+        let client = reqwest::Client::new();
+        let mut position: Option<TransferEventPosition> = None;
+        loop {
+            match poll_transfer_event_route(
+                &app,
+                &client,
+                "/v1/desktop/view-commands",
+                position.as_ref(),
+            )
+            .await
+            {
+                Ok(batch) => {
+                    for event in batch.events {
+                        if forwarded_event_name(&event) == Some("desktop-view-open") {
+                            let _ = app.emit("desktop-view-open", &event);
+                        } else {
+                            eprintln!("[desktop-view-commands] unhandled command: {event}");
+                        }
+                    }
+                    position = Some(TransferEventPosition {
+                        cursor: batch.cursor,
+                        stream_id: batch.stream_id,
+                    });
+                }
+                Err(error) => {
+                    eprintln!("[desktop-view-commands] poll failed: {error}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }

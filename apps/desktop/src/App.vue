@@ -7,6 +7,7 @@ import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import AppModalLayer from "./components/AppModalLayer.vue";
 import type { AppModalLayerController } from "./components/AppModalLayer.types";
+import type { MainTabViewsController } from "./components/MainPanel.types";
 import { type KeyboardActions } from "./composables/useKeyboardShortcuts";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
 import { useRepoCommands } from "./composables/useRepoCommands";
@@ -15,6 +16,7 @@ import { useAppUpdate } from "./composables/useAppUpdate";
 import { useAppCloudWorkspace } from "./composables/useAppCloudWorkspace";
 import { useAppLifecycle } from "./composables/useAppLifecycle";
 import { useAppModals } from "./composables/useAppModals";
+import { mainTabScopeKeyForTask, useMainTabs } from "./composables/useMainTabs";
 import { useAppPreferences } from "./composables/useAppPreferences";
 import { useAppTaskTransfer } from "./composables/useAppTaskTransfer";
 import { useTransferFailureToasts } from "./composables/useTransferFailureToasts";
@@ -160,7 +162,36 @@ defineExpose({
   refreshLanTasks,
 });
 
-const appModals = useAppModals({ isMobile, store, windowWorkspace, selectedWorkspaceTask });
+// Tabs are scoped to the task the main panel is actually showing — the same
+// slot that decides what the agent tab renders — so the tab bar and the views
+// its shortcuts open can never disagree about which task they belong to. With
+// no task on screen there is nothing to tab into and the repo-scoped tools
+// stay modal.
+const mainTabScopeKey = computed(() => {
+  const task = mainPanelUiSlot.value?.task;
+  return task ? mainTabScopeKeyForTask(task.id) : null;
+});
+
+/**
+ * An agent asked this desktop to show a file. It lands in that task's own tab
+ * set, whether or not this window is currently on that task: the operator's
+ * selection is theirs, and the tab is simply waiting when they look.
+ */
+function openTaskFileView(taskId: string, filePath: string, line?: number): void {
+  mainTabs.openTabInScope(mainTabScopeKeyForTask(taskId), {
+    kind: "file",
+    filePath,
+    initialLine: line,
+  });
+}
+const mainTabs = useMainTabs({ scopeKey: mainTabScopeKey });
+const appModals = useAppModals({
+  isMobile,
+  store,
+  windowWorkspace,
+  selectedWorkspaceTask,
+  mainTabs,
+});
 const {
   showNewTaskModal,
   availableWorkflows,
@@ -356,6 +387,8 @@ const mainPanelTaskIsBlocked = computed(() =>
     : currentTaskIsBlocked.value,
 );
 
+const mainTabViews: MainTabViewsController = { tabs: mainTabs, modals: appModals, store };
+
 let keyboardActions = {} as KeyboardActions;
 const {
   fatalInitializationError,
@@ -373,6 +406,7 @@ const {
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
+  openTaskFileView,
   preferences,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
@@ -396,6 +430,8 @@ const appKeyboardActions = useAppKeyboardActions({
   selectedWorkspaceTask,
   selectedWorkspaceTaskBlocked: selectedRemoteTaskIsBlocked,
   currentShortcutContext,
+  mainTabs,
+  mainPanelRef,
   showNewTaskModal,
   showAddRepoModal,
   addRepoInitialTab,
@@ -519,6 +555,7 @@ const modalLayerController = {
       <MainPanel
         ref="mainPanelRef"
         :ui-slot="mainPanelUiSlot"
+        :views="mainTabViews"
         :repo-path="mainPanelRepo?.path"
         :spawn-pty-session="store.spawnPtySession"
         :recover-task-session="store.recoverTaskSession"

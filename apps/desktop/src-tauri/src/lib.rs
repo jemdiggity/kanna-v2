@@ -249,6 +249,7 @@ pub fn run() {
             // for the app's lifetime instead of per sidecar spawn.
             transfer_sidecar::spawn_transfer_event_poller(app.handle().clone());
             transfer_sidecar::spawn_transfer_companion_event_poller(app.handle().clone());
+            transfer_sidecar::spawn_desktop_view_command_poller(app.handle().clone());
 
             // Restore webview focus when the window gains focus.
             // This catches fullscreen exit (green button, View menu) and app

@@ -6639,15 +6639,20 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
   });
 
-  it("keeps recalled file previews scoped to the selected task", async () => {
-    store.currentItem = {
+  it("opens a picked file as a main-area tab while a task is selected", async () => {
+    const taskA = {
       id: "task-a",
+      repo_id: "repo-1",
       stage: "in progress",
       branch: "task-a",
       prompt: "Task A",
       tags: "[]",
     };
+    store.currentItem = taskA;
     store.selectedItemId = "task-a";
+    // Tabs belong to the task the main panel is showing, so the panel needs a
+    // ready slot for one to exist at all.
+    store.currentTaskSlot = readyTaskSlot("task-a", taskA);
 
     const TaskAwareFilePickerModalTestStub = defineComponent({
       name: "FilePickerModal",
@@ -6655,40 +6660,32 @@ describe("App", () => {
       template: `
         <div data-testid="file-picker-modal">
           <button data-testid="file-picker-select-a" @click="$emit('select', 'src/task-a.ts')">task a</button>
-          <button data-testid="file-picker-select-b" @click="$emit('select', 'src/task-b.ts')">task b</button>
         </div>
       `,
     });
 
-    const FilePathPreviewModalTestStub = defineComponent({
-      name: "FilePreviewModal",
+    // The real panel renders each tab's view; this stub only reports the tab
+    // set it was handed, which is what this test is about.
+    const TabListMainPanelTestStub = defineComponent({
+      name: "MainPanel",
       props: {
-        filePath: {
-          type: String,
-          required: true,
-        },
-      },
-      emits: ["close"],
-      setup(_props, { emit, expose }) {
-        function dismiss() {
-          emit("close");
-          return true;
-        }
-
-        expose({ dismiss, zIndex: 1000, bringToFront: vi.fn() });
-
-        return {};
+        views: { type: Object, required: false, default: undefined },
       },
       template: `
-        <div data-testid="file-preview-modal" :data-file-path="filePath">
-          <button data-testid="file-preview-close" @click="$emit('close')">close</button>
+        <div data-testid="main-panel">
+          <span
+            v-for="tab in (views ? views.tabs.tabs.value : [])"
+            :key="tab.id"
+            :data-testid="'main-tab-' + tab.id"
+            :data-active="views.tabs.activeTabId.value === tab.id ? 'true' : 'false'"
+          >{{ tab.id }}</span>
         </div>
       `,
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
       FilePickerModal: TaskAwareFilePickerModalTestStub,
-      FilePreviewModal: FilePathPreviewModalTestStub,
+      MainPanel: TabListMainPanelTestStub,
     });
 
     expect(capturedKeyboardActions).not.toBeNull();
@@ -6697,46 +6694,18 @@ describe("App", () => {
     await flushPromises();
     await wrapper.get('[data-testid="file-picker-select-a"]').trigger("click");
     await flushPromises();
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-file-path")).toBe("src/task-a.ts");
 
-    capturedKeyboardActions?.dismiss();
-    await flushPromises();
-
-    store.currentItem = {
-      id: "task-b",
-      stage: "in progress",
-      branch: "task-b",
-      prompt: "Task B",
-      tags: "[]",
-    };
-    store.selectedItemId = "task-b";
-
-    capturedKeyboardActions?.toggleFilePreview();
-    await flushPromises();
-
+    // The file lands in the task's own tab set, not in an overlay above it,
+    // and the picker that launched it is gone.
+    expect(wrapper.get('[data-testid="main-tab-file:src/task-a.ts"]').attributes("data-active"))
+      .toBe("true");
+    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(true);
-
-    await wrapper.get('[data-testid="file-picker-select-b"]').trigger("click");
-    await flushPromises();
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-file-path")).toBe("src/task-b.ts");
-
-    capturedKeyboardActions?.dismiss();
-    await flushPromises();
-
-    store.currentItem = {
-      id: "task-a",
-      stage: "in progress",
-      branch: "task-a",
-      prompt: "Task A",
-      tags: "[]",
-    };
-    store.selectedItemId = "task-a";
 
     capturedKeyboardActions?.toggleFilePreview();
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-file-path")).toBe("src/task-a.ts");
+    expect(wrapper.find('[data-testid="main-tab-file:src/task-a.ts"]').exists()).toBe(false);
   });
 
   it("preserves file preview component state when hiding and showing the last preview", async () => {

@@ -9,8 +9,6 @@ import type {
   RemoteTaskDiffContent,
   RemoteTaskDiffRequest,
 } from "../services/desktopRemoteTaskClient";
-useShortcutContext("diff");
-const { zIndex, bringToFront } = useModalZIndex();
 
 const modalRef = ref<HTMLElement | null>(null);
 
@@ -24,11 +22,20 @@ const props = defineProps<{
   baseRef?: string;
   viewKey?: string;
   standalone?: boolean;
+  /**
+   * Rendered inline as a main-area tab instead of as an overlay: no scrim, no
+   * modal z-index, and no click-outside dismissal. The view itself — toolbar,
+   * scroll state, tear-off — is unchanged.
+   */
+  embedded?: boolean;
   remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
   remoteDesktopId?: string;
   remoteTaskId?: string;
   remoteTransport?: RemoteTaskViewTransport;
 }>();
+
+if (!props.embedded) useShortcutContext("diff");
+const { zIndex, bringToFront } = useModalZIndex({ enabled: !props.embedded });
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -67,7 +74,12 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized, standalone }" :style="{ zIndex }" @click.self="emit('close')">
+  <div
+    class="modal-overlay"
+    :class="{ maximized, standalone, embedded }"
+    :style="embedded ? undefined : { zIndex }"
+    @click.self="embedded || emit('close')"
+  >
     <div
       ref="modalRef"
       class="diff-modal"
@@ -121,7 +133,16 @@ onMounted(() => {
   background: none;
 }
 
-.standalone .diff-modal {
+.modal-overlay.embedded {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+  background: none;
+}
+
+.standalone .diff-modal,
+.embedded .diff-modal {
   width: 100%;
   height: 100%;
   border: none;
