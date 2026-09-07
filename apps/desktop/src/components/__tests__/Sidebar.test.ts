@@ -257,9 +257,7 @@ describe("Sidebar", () => {
     expect(title.text()).toBe("Waiting for first runtime observation");
   });
 
-  it("draws a busy task as working even when its output is unread", () => {
-    // Working outranks unread: mid-turn, "it is working" is the more useful
-    // thing to say, and the output nobody has read is still being written.
+  it("draws both runtime styling and the unread indicator for a busy unread task", () => {
     const wrapper = mountSidebar([
       item("task-busy-unread", {
         display_name: "Busy and unread",
@@ -274,6 +272,7 @@ describe("Sidebar", () => {
       .attributes("style");
     expect(style).toContain("font-style: italic");
     expect(style).toContain("font-weight: normal");
+    expect(wrapper.get('[data-task-id="task-busy-unread"] .unread-task-dot').exists()).toBe(true);
   });
 
   it("restores the unread mark once a busy task settles", () => {
@@ -289,8 +288,9 @@ describe("Sidebar", () => {
     });
 
     const style = wrapper_style(mountSidebar([settled], null), "task-settling");
-    expect(style).toContain("font-weight: bold");
+    expect(style).toContain("font-weight: normal");
     expect(style).toContain("font-style: normal");
+    expect(mountSidebar([settled], null).get('.unread-task-dot').exists()).toBe(true);
   });
 
   it("keeps the unread mark on a task parked on a prompt", () => {
@@ -307,8 +307,9 @@ describe("Sidebar", () => {
     const style = wrapper
       .get('[data-task-id="task-waiting-unread"] .item-title')
       .attributes("style");
-    expect(style).toContain("font-weight: bold");
+    expect(style).toContain("font-weight: normal");
     expect(style).toContain("font-style: normal");
+    expect(wrapper.get('[data-task-id="task-waiting-unread"] .unread-task-dot').exists()).toBe(true);
   });
 
   it("stops drawing a settled task as working while it is unselected", () => {
@@ -328,7 +329,8 @@ describe("Sidebar", () => {
       .get('[data-task-id="task-settled"] .item-title')
       .attributes("style");
     expect(style).toContain("font-style: normal");
-    expect(style).toContain("font-weight: bold");
+    expect(style).toContain("font-weight: normal");
+    expect(wrapper.get('[data-task-id="task-settled"] .unread-task-dot').exists()).toBe(true);
   });
 
   it("keeps a task working after it is marked read", () => {
@@ -349,11 +351,12 @@ describe("Sidebar", () => {
       .attributes("style");
     expect(style).toContain("font-style: italic");
     expect(style).toContain("font-weight: normal");
+    expect(wrapper.find('[data-task-id="task-read-busy"] .unread-task-dot').exists()).toBe(false);
   });
 
   it("falls back to blended activity for a remote task that has no dimensions", () => {
-    // The cloud index projects `activity` and nothing else, so a task owned by
-    // another desktop has no runtime or read dimension of its own to read.
+    // Legacy cloud snapshots predate the two split fields and still need an
+    // honest fallback to their blended activity.
     const wrapper = mountSidebar([
       item("task-remote", {
         display_name: "Owned elsewhere",

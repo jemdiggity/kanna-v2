@@ -9,10 +9,8 @@ import type { PipelineItem } from "../types/kanna"
  * exactly like a finished one, and the working mark is simply lost. Reading
  * `runtime_state` and `read_state` separately is what lets both show at once.
  *
- * Each helper falls back to `activity` when its own dimension is absent, which
- * is the honest answer for a remote task: the cloud index projects `activity`
- * and nothing else, so a task owned by another desktop has no runtime or read
- * dimension of its own to read.
+ * Each helper falls back to `activity` when its own dimension is absent so
+ * snapshots published before the split fields were added still render.
  */
 
 type TaskActivityFields = Pick<PipelineItem, "activity" | "runtime_state" | "read_state">
@@ -40,15 +38,9 @@ export function isTaskUnread(item: TaskActivityFields): boolean {
 /**
  * Whether the sidebar draws the unread mark.
  *
- * Working outranks unread: while an agent is mid-turn, "it is working" is the
- * more useful thing to say about it, and the output nobody has read yet is
- * still being written. This is a *display* precedence only — the read dimension
- * is untouched underneath, so the mark reappears the moment the task settles,
- * which is the whole difference from the old behaviour where a busy transition
- * destroyed the unread state outright.
- *
- * A task parked on a prompt is not working, so it keeps its unread mark.
+ * The mark is orthogonal to runtime styling: busy + unread deliberately draws
+ * both the working treatment and this mark.
  */
 export function showsUnreadMark(item: TaskActivityFields): boolean {
-  return isTaskUnread(item) && !isTaskWorking(item)
+  return isTaskUnread(item)
 }

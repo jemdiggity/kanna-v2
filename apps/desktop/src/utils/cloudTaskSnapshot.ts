@@ -10,6 +10,8 @@ export interface CloudTaskSnapshotInput {
     | "stage"
     | "activity"
     | "activity_revision"
+    | "runtime_state"
+    | "read_state"
     | "blocker_revision"
     | "transition_revision"
     | "branch"
@@ -46,6 +48,8 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
     stage: input.item.stage,
     activity: input.item.activity,
     activityRevision: input.item.activity_revision,
+    runtimeState: input.item.runtime_state,
+    readState: input.item.read_state,
     blockerRevision: input.item.blocker_revision,
     transitionRevision: input.item.transition_revision,
     status: deriveStatus(input.item.stage, input.item.closed_at, input.blockedByTaskIds),

@@ -126,6 +126,10 @@ struct CloudTaskSnapshot {
     stage: String,
     activity: String,
     activity_revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    read_state: Option<String>,
     blocker_revision: i64,
     transition_revision: Option<String>,
     status: String,
@@ -351,6 +355,8 @@ fn map_task(
         stage: truncate(&item.stage, 64),
         activity: truncate(&item.activity, 32),
         activity_revision: item.activity_revision,
+        runtime_state: item.runtime_state,
+        read_state: Some(item.read_state),
         blocker_revision: item.blocker_revision,
         transition_revision: item.transition_revision,
         status: status.into(),
@@ -656,7 +662,7 @@ mod tests {
                     agent_type: Some("pty".into()),
                     agent_provider: "codex".into(),
                     activity: activity.into(),
-                    runtime_state: None,
+                    runtime_state: Some("busy".into()),
                     read_state: if activity == "unread" {
                         "unread"
                     } else {
@@ -727,6 +733,8 @@ mod tests {
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
         assert_eq!(json["tasks"][0]["activityRevision"], 7);
+        assert_eq!(json["tasks"][0]["runtimeState"], "busy");
+        assert_eq!(json["tasks"][0]["readState"], "read");
         assert_eq!(json["tasks"][0]["blockerRevision"], 11);
         assert_eq!(json["tasks"][0]["transitionRevision"], "run-7");
         assert_eq!(json["tasks"][0]["hasRunningPost"], false);
