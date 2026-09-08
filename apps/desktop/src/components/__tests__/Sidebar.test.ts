@@ -257,7 +257,7 @@ describe("Sidebar", () => {
     expect(title.text()).toBe("Waiting for first runtime observation");
   });
 
-  it("draws both runtime styling and the unread indicator for a busy unread task", () => {
+  it("lets busy typography win over unread state", () => {
     const wrapper = mountSidebar([
       item("task-busy-unread", {
         display_name: "Busy and unread",
@@ -272,14 +272,12 @@ describe("Sidebar", () => {
       .attributes("style");
     expect(style).toContain("font-style: italic");
     expect(style).toContain("font-weight: normal");
-    expect(wrapper.get('[data-task-id="task-busy-unread"] .unread-task-dot').exists()).toBe(true);
+    expect(wrapper.find('.unread-task-dot').exists()).toBe(false);
   });
 
-  it("restores the unread mark once a busy task settles", () => {
-    // The point of keeping the dimensions separate: suppressing the mark while
-    // working is a display choice, not a write. The read dimension survives, so
-    // the mark comes back the moment the agent stops — which the old behaviour
-    // could not do, because a busy transition destroyed the unread state.
+  it("draws idle unread tasks in bold", () => {
+    // The read dimension survives a busy transition, so the typography changes
+    // as soon as the runtime settles without conflating the stored states.
     const settled = item("task-settling", {
       display_name: "Finished with unread output",
       activity: "unread",
@@ -288,13 +286,11 @@ describe("Sidebar", () => {
     });
 
     const style = wrapper_style(mountSidebar([settled], null), "task-settling");
-    expect(style).toContain("font-weight: normal");
+    expect(style).toContain("font-weight: bold");
     expect(style).toContain("font-style: normal");
-    expect(mountSidebar([settled], null).get('.unread-task-dot').exists()).toBe(true);
   });
 
-  it("keeps the unread mark on a task parked on a prompt", () => {
-    // `waiting` is a live session, but it is not working, so the mark stays.
+  it("draws waiting unread tasks in bold without changing their runtime treatment", () => {
     const wrapper = mountSidebar([
       item("task-waiting-unread", {
         display_name: "Parked on a permission prompt",
@@ -307,9 +303,8 @@ describe("Sidebar", () => {
     const style = wrapper
       .get('[data-task-id="task-waiting-unread"] .item-title')
       .attributes("style");
-    expect(style).toContain("font-weight: normal");
+    expect(style).toContain("font-weight: bold");
     expect(style).toContain("font-style: normal");
-    expect(wrapper.get('[data-task-id="task-waiting-unread"] .unread-task-dot').exists()).toBe(true);
   });
 
   it("stops drawing a settled task as working while it is unselected", () => {
@@ -329,8 +324,7 @@ describe("Sidebar", () => {
       .get('[data-task-id="task-settled"] .item-title')
       .attributes("style");
     expect(style).toContain("font-style: normal");
-    expect(style).toContain("font-weight: normal");
-    expect(wrapper.get('[data-task-id="task-settled"] .unread-task-dot').exists()).toBe(true);
+    expect(style).toContain("font-weight: bold");
   });
 
   it("keeps a task working after it is marked read", () => {
@@ -351,7 +345,19 @@ describe("Sidebar", () => {
       .attributes("style");
     expect(style).toContain("font-style: italic");
     expect(style).toContain("font-weight: normal");
-    expect(wrapper.find('[data-task-id="task-read-busy"] .unread-task-dot').exists()).toBe(false);
+  });
+
+  it("draws idle read tasks at normal weight and style", () => {
+    const style = wrapper_style(mountSidebar([
+      item("task-idle-read", {
+        activity: "idle",
+        runtime_state: "idle",
+        read_state: "read",
+      }),
+    ], null), "task-idle-read");
+
+    expect(style).toContain("font-style: normal");
+    expect(style).toContain("font-weight: normal");
   });
 
   it("falls back to blended activity for a remote task that has no dimensions", () => {
@@ -370,6 +376,20 @@ describe("Sidebar", () => {
       .attributes("style");
     expect(style).toContain("font-style: italic");
     expect(style).toContain("font-weight: normal");
+  });
+
+  it("draws a remote idle unread task in bold from its cloud dimensions", () => {
+    const style = wrapper_style(mountSidebar([
+      item("task-remote-unread", {
+        remote_task: true,
+        activity: "unread",
+        runtime_state: "idle",
+        read_state: "unread",
+      }),
+    ], null), "task-remote-unread");
+
+    expect(style).toContain("font-style: normal");
+    expect(style).toContain("font-weight: bold");
   });
 
   it("places a remotely blocked task in the blocked section with its blocker name", () => {
@@ -403,6 +423,9 @@ describe("Sidebar", () => {
     expect(blockedRow.element.previousElementSibling).toBeNull();
     expect(wrapper.text()).toContain("sidebar.sectionBlocked");
     expect(wrapper.findAll(`[data-task-id="${blocked.task_id}"]`)).toHaveLength(1);
+    const style = blockedRow.get(".item-title").attributes("style");
+    expect(style).toContain("font-style: normal");
+    expect(style).toContain("font-weight: normal");
   });
 
   it("keeps one selected DOM row when a creating slot hydrates into its durable task", async () => {

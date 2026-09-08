@@ -35,12 +35,7 @@ export function isTaskUnread(item: TaskActivityFields): boolean {
   return item.activity === "unread"
 }
 
-/**
- * Whether the sidebar draws the unread mark.
- *
- * The mark is orthogonal to runtime styling: busy + unread deliberately draws
- * both the working treatment and this mark.
- */
-export function showsUnreadMark(item: TaskActivityFields): boolean {
-  return isTaskUnread(item)
+/** Typography gives runtime precedence over read state in the sidebar. */
+export function taskSidebarFontWeight(item: TaskActivityFields): "bold" | "normal" {
+  return !isTaskWorking(item) && isTaskUnread(item) ? "bold" : "normal"
 }
