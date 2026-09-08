@@ -166,6 +166,7 @@ export interface SessionState {
   accountDesktops: DesktopSummary[];
   liveLanDesktops: DesktopSummary[];
   trustedDesktops: TrustedDesktopRecord[];
+  pendingAnonymousPushRevocations: TrustedDesktopRecord[];
   machineSourceWarnings: { account: string | null; local: string | null };
   repoCreationProfiles: RepoCreationProfile[];
   selectedDesktopId: string | null;
@@ -320,6 +321,7 @@ export interface SessionStore {
     local: DesktopSummary[];
   }): void;
   setTrustedDesktops(desktops: TrustedDesktopRecord[]): void;
+  setPendingAnonymousPushRevocations(desktops: TrustedDesktopRecord[]): void;
   upsertTrustedDesktop(desktop: TrustedDesktopRecord): void;
   removeTrustedDesktop(desktopId: string): void;
   setMachineSourceWarnings(warnings: {
@@ -481,6 +483,7 @@ export function createSessionStore(): SessionStore {
     accountDesktops: [],
     liveLanDesktops: [],
     trustedDesktops: [],
+    pendingAnonymousPushRevocations: [],
     machineSourceWarnings: { account: null, local: null },
     repoCreationProfiles: [],
     selectedDesktopId: null,
@@ -716,6 +719,7 @@ export function createSessionStore(): SessionStore {
         activeView: state.activeView,
         authUser: state.auth.status === "signedIn" ? state.auth.user : null,
         trustedDesktops: state.trustedDesktops,
+        pendingAnonymousPushRevocations: state.pendingAnonymousPushRevocations,
         repoCreationProfiles: state.repoCreationProfiles,
         taskCreationAttempts: state.taskCreationAttempts.map(
           ({
@@ -757,6 +761,8 @@ export function createSessionStore(): SessionStore {
           ? { status: "signedIn", user: context.authUser }
           : state.auth,
         trustedDesktops: context.trustedDesktops ?? [],
+        pendingAnonymousPushRevocations:
+          context.pendingAnonymousPushRevocations ?? [],
         repoCreationProfiles: context.repoCreationProfiles ?? [],
         isComposerOpen: false,
         composerPrompt: "",
@@ -860,6 +866,10 @@ export function createSessionStore(): SessionStore {
     },
     setTrustedDesktops(trustedDesktops) {
       state = { ...state, trustedDesktops };
+      publish();
+    },
+    setPendingAnonymousPushRevocations(pendingAnonymousPushRevocations) {
+      state = { ...state, pendingAnonymousPushRevocations };
       publish();
     },
     upsertTrustedDesktop(desktop) {

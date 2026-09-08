@@ -2672,19 +2672,42 @@ export function createMobileController(
       );
       const nextTrustedDesktops = currentTrustedDesktops
         .filter((desktop) => desktop.desktopId !== desktopId);
-      if (
+      const shouldRevoke = Boolean(
         removedDesktop?.desktopPushIdentity
         && removedDesktop.pushPairingCert
-      ) {
-        await options.revokeAnonymousPushPairing?.(removedDesktop);
-      }
+        && options.revokeAnonymousPushPairing
+      );
+      const pendingRevocations = shouldRevoke
+        ? [
+            ...store.getState().pendingAnonymousPushRevocations.filter(
+              (desktop) => desktop.desktopId !== desktopId
+            ),
+            removedDesktop!
+          ]
+        : store.getState().pendingAnonymousPushRevocations;
       await options.persistSessionContext?.({
         ...store.getPersistedContext(),
-        trustedDesktops: nextTrustedDesktops
+        trustedDesktops: nextTrustedDesktops,
+        pendingAnonymousPushRevocations: pendingRevocations
       });
       store.setTrustedDesktops(nextTrustedDesktops);
+      store.setPendingAnonymousPushRevocations(pendingRevocations);
       options.replaceClientForTrustChange?.();
       await refreshDesktops({ force: true });
+      if (shouldRevoke) {
+        try {
+          await options.revokeAnonymousPushPairing!(removedDesktop!);
+          const remaining = store.getState().pendingAnonymousPushRevocations
+            .filter((desktop) => desktop.desktopId !== desktopId);
+          await options.persistSessionContext?.({
+            ...store.getPersistedContext(),
+            pendingAnonymousPushRevocations: remaining
+          });
+          store.setPendingAnonymousPushRevocations(remaining);
+        } catch (error) {
+          console.warn("Anonymous push pairing revocation will be retried:", error);
+        }
+      }
     },
 
     async signInWithEmailPassword(email, password) {

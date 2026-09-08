@@ -209,6 +209,8 @@ Run '\\''copilot update'\\'' to check for updates.
 
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_SERVER_URL='http://172.16.0.193:48120'");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='ws://172.16.0.193:9081'");
+    expect(plan.windows[2]?.env.KANNA_ADVERTISED_RELAY_URL)
+      .toBe("ws://172.16.0.193:9081");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST='172.16.0.193'");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST='172.16.0.193'");
   });

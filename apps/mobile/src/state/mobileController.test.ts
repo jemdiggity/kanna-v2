@@ -1089,24 +1089,21 @@ describe("createMobileController", () => {
 
     expect(revokeAnonymousPushPairing).toHaveBeenCalledOnce();
     expect(revokeAnonymousPushPairing).toHaveBeenCalledWith(pairedDesktop);
-    expect(store.getState().trustedDesktops).toEqual([pairedDesktop, retainedDesktop]);
-    let settled = false;
-    void removal.then(() => { settled = true; });
-    await flushMicrotasks();
-    expect(settled).toBe(false);
+    expect(store.getState().trustedDesktops).toEqual([retainedDesktop]);
+    expect(store.getState().pendingAnonymousPushRevocations).toEqual([pairedDesktop]);
     revocation.resolve();
     await removal;
     expect(store.getState().trustedDesktops).toEqual([retainedDesktop]);
     expect(store.getState().desktops).toEqual([accountDesktop]);
   });
 
-  it("retains manual trust when anonymous push revocation fails", async () => {
+  it("removes manual trust and durably queues revocation when the relay is unavailable", async () => {
     const store = createSessionStore();
     const pairedDesktop = {
       ...trustedDesktop,
       desktopPushIdentity: {
         publicKey: "desktop-public-key",
-        relayUrl: "wss://relay-staging.kanna.build",
+        relayUrl: "ws://127.0.0.1:9086",
         environment: "staging"
       },
       pushPairingCert: {
@@ -1130,11 +1127,14 @@ describe("createMobileController", () => {
       }
     );
 
-    await expect(controller.removeManualMachine("desktop-1"))
-      .rejects.toThrow("relay unavailable");
+    await expect(controller.removeManualMachine("desktop-1")).resolves.toBeUndefined();
 
-    expect(store.getState().trustedDesktops).toEqual([pairedDesktop]);
-    expect(persistSessionContext).not.toHaveBeenCalled();
+    expect(store.getState().trustedDesktops).toEqual([]);
+    expect(store.getState().pendingAnonymousPushRevocations).toEqual([pairedDesktop]);
+    expect(persistSessionContext).toHaveBeenCalledWith(expect.objectContaining({
+      trustedDesktops: [],
+      pendingAnonymousPushRevocations: [pairedDesktop]
+    }));
   });
 
   it("keeps manual trust published until durable removal succeeds", async () => {
