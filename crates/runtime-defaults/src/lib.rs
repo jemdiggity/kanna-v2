@@ -150,7 +150,7 @@ pub fn desktop_cloud_environment_from_env(value: Option<&str>) -> Option<Desktop
 }
 
 pub fn default_daemon_dir_for_home(home: &Path) -> PathBuf {
-    macos_app_support_dir_for_home(home).join(PRODUCT_APP_SUPPORT_DIR)
+    app_support_dir_for_home(home).join(PRODUCT_APP_SUPPORT_DIR)
 }
 
 pub fn default_daemon_dir_for_app_support_root(app_support_root: &Path) -> PathBuf {
@@ -173,7 +173,7 @@ pub fn daemon_dir_for_bundle_identifier_for_home(
     daemon_dir_for_bundle_identifier_for_app_support_root(
         bundle_identifier,
         debug_assertions,
-        &macos_app_support_dir_for_home(home),
+        &app_support_dir_for_home(home),
     )
 }
 
@@ -278,7 +278,7 @@ pub fn worktree_root_for_path(path: &Path) -> Option<PathBuf> {
 }
 
 pub fn canonical_desktop_app_data_dir_for_home(home: &Path) -> PathBuf {
-    macos_app_support_dir_for_home(home).join(DESKTOP_BUNDLE_IDENTIFIER)
+    app_support_dir_for_home(home).join(DESKTOP_BUNDLE_IDENTIFIER)
 }
 
 pub fn canonical_desktop_app_data_dir_for_app_support_root(app_support_root: &Path) -> PathBuf {
@@ -302,7 +302,7 @@ pub fn canonical_desktop_db_path() -> PathBuf {
 }
 
 pub fn legacy_desktop_db_path_for_home(home: &Path) -> PathBuf {
-    macos_app_support_dir_for_home(home)
+    app_support_dir_for_home(home)
         .join(LEGACY_DESKTOP_BUNDLE_IDENTIFIER)
         .join(DEFAULT_DB_NAME)
 }
@@ -367,7 +367,7 @@ pub fn socket_path(dir: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     dir.hash(&mut hasher);
     let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+    socket_dir().join(format!("kanna-{hash:08x}.sock"))
 }
 
 pub fn human_control_socket_path(dir: &Path) -> PathBuf {
@@ -376,7 +376,7 @@ pub fn human_control_socket_path(dir: &Path) -> PathBuf {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("kanna");
-    PathBuf::from(format!("/tmp/{stem}-human.sock"))
+    socket_dir().join(format!("{stem}-human.sock"))
 }
 
 pub fn current_target_triple() -> &'static str {
@@ -602,8 +602,73 @@ pub fn strip_ansi_for_display(input: &str) -> String {
     result
 }
 
-fn macos_app_support_dir_for_home(home: &Path) -> PathBuf {
-    home.join("Library").join("Application Support")
+/// The per-user directory Kanna's own application data lives under.
+///
+/// One rule, resolved in one place, because the daemon, the server, `kd` and
+/// the recovery sidecar must agree: `kanna-server` reaches the same directory
+/// through `dirs::data_dir()`, and a disagreement here is a split brain (a
+/// server writing its database in one place while the daemon looks for its
+/// socket and rules in another).
+///
+/// * macOS: `~/Library/Application Support`.
+/// * Linux: `$XDG_DATA_HOME`, else `~/.local/share` -- the same resolution
+///   `dirs::data_dir()` performs, including its rule that a relative
+///   `XDG_DATA_HOME` is ignored.
+///
+/// Every subdirectory below it (`Kanna`, `build.kanna`, `build.kanna.staging`,
+/// `transfer/registry`, the database name) is unchanged on both platforms.
+fn app_support_dir_for_home(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        home.join("Library").join("Application Support")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        xdg_dir_for_home(std::env::var_os("XDG_DATA_HOME").as_deref(), home, ".local/share")
+    }
+}
+
+/// Resolve one XDG base directory: the environment value when it is an
+/// absolute path, and `home/<fallback>` otherwise. Kept pure (and therefore
+/// testable) rather than reading the environment itself.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn xdg_dir_for_home(value: Option<&std::ffi::OsStr>, home: &Path, fallback: &str) -> PathBuf {
+    match value.map(PathBuf::from) {
+        // A relative XDG_DATA_HOME is invalid per the spec and is ignored,
+        // matching `dirs::data_dir()` so the server agrees with us.
+        Some(path) if path.is_absolute() => path,
+        _ => home.join(fallback),
+    }
+}
+
+/// Directory holding the daemon's control sockets.
+///
+/// macOS has no per-user runtime directory, so this stays `/tmp` -- the
+/// shared, sticky directory these sockets have always used. Linux does have
+/// one: `XDG_RUNTIME_DIR` is per-user and mode 0700, and it matters here
+/// because `fs.protected_regular` and `fs.protected_fifos` cover regular
+/// files and FIFOs but deliberately **not** socket paths, so any local user
+/// can pre-create the daemon's socket path in a shared `/tmp`. A private
+/// runtime directory removes that outright. It falls back to `/tmp` when the
+/// session manager provides none (a container, a bare `su`), which is no
+/// worse than macOS.
+fn socket_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        socket_dir_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+    }
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn socket_dir_from(runtime_dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    match runtime_dir.map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        _ => PathBuf::from("/tmp"),
+    }
 }
 
 fn home_dir() -> PathBuf {
@@ -623,7 +688,60 @@ mod tests {
 
         assert_eq!(
             default_daemon_dir_for_home(home),
-            PathBuf::from("/Users/tester/Library/Application Support/Kanna")
+            app_support_dir_for_home(home).join("Kanna")
+        );
+    }
+
+    /// The literal roots, pinned per platform. Everything below them is
+    /// shared, so the other tests assert structure against this root rather
+    /// than repeating a macOS path that would be wrong on Linux.
+    #[test]
+    fn the_app_support_root_is_the_platform_data_directory() {
+        let home = Path::new("/Users/tester");
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            app_support_dir_for_home(home),
+            PathBuf::from("/Users/tester/Library/Application Support")
+        );
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            use std::ffi::OsStr;
+
+            // `dirs::data_dir()` -- which `kanna-server` uses -- resolves
+            // exactly this way, including ignoring a relative XDG_DATA_HOME.
+            assert_eq!(
+                xdg_dir_for_home(None, home, ".local/share"),
+                PathBuf::from("/Users/tester/.local/share")
+            );
+            assert_eq!(
+                xdg_dir_for_home(Some(OsStr::new("/xdg/data")), home, ".local/share"),
+                PathBuf::from("/xdg/data")
+            );
+            assert_eq!(
+                xdg_dir_for_home(Some(OsStr::new("relative/data")), home, ".local/share"),
+                PathBuf::from("/Users/tester/.local/share")
+            );
+        }
+    }
+
+    /// The daemon's sockets go in a private per-user runtime directory where
+    /// the platform has one, because `fs.protected_regular` does not cover
+    /// socket paths in a shared `/tmp`.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn socket_dir_prefers_the_private_runtime_directory() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            socket_dir_from(Some(OsStr::new("/run/user/1000"))),
+            PathBuf::from("/run/user/1000")
+        );
+        assert_eq!(socket_dir_from(None), PathBuf::from("/tmp"));
+        assert_eq!(
+            socket_dir_from(Some(OsStr::new("not/absolute"))),
+            PathBuf::from("/tmp")
         );
     }
 
@@ -664,7 +782,7 @@ mod tests {
 
         assert_eq!(
             daemon_dir_for_runtime(
-                Some(Path::new("/Users/tester/Library/Application Support/Kanna")),
+                Some(&app_support_dir_for_home(home).join("Kanna")),
                 current_exe,
                 current_dir,
                 home,
@@ -681,9 +799,11 @@ mod tests {
 
         assert_eq!(
             daemon_dir_for_runtime_with_bundle_identifier(
-                Some(Path::new(
-                    "/Users/tester/Library/Application Support/build.kanna.staging/Kanna"
-                )),
+                Some(
+                    &app_support_dir_for_home(home)
+                        .join("build.kanna.staging")
+                        .join("Kanna")
+                ),
                 current_exe,
                 current_dir,
                 home,
@@ -702,7 +822,7 @@ mod tests {
 
         assert_eq!(
             daemon_dir_for_runtime(None, current_exe, current_dir, home),
-            PathBuf::from("/Users/tester/Library/Application Support/Kanna")
+            app_support_dir_for_home(home).join("Kanna")
         );
     }
 
@@ -716,7 +836,9 @@ mod tests {
                 false,
                 home
             ),
-            PathBuf::from("/Users/tester/Library/Application Support/build.kanna.staging/Kanna")
+            app_support_dir_for_home(home)
+                .join("build.kanna.staging")
+                .join("Kanna")
         );
     }
 
@@ -726,7 +848,7 @@ mod tests {
 
         assert_eq!(
             daemon_dir_for_bundle_identifier_for_home(DESKTOP_BUNDLE_IDENTIFIER, false, home),
-            PathBuf::from("/Users/tester/Library/Application Support/Kanna")
+            app_support_dir_for_home(home).join("Kanna")
         );
     }
 
@@ -736,7 +858,9 @@ mod tests {
 
         assert_eq!(
             canonical_desktop_db_path_for_home(home),
-            PathBuf::from("/Users/tester/Library/Application Support/build.kanna/kanna-v2.db")
+            app_support_dir_for_home(home)
+                .join("build.kanna")
+                .join("kanna-v2.db")
         );
     }
 
@@ -746,9 +870,10 @@ mod tests {
 
         assert_eq!(
             default_transfer_registry_dir_for_home(home),
-            PathBuf::from(
-                "/Users/tester/Library/Application Support/build.kanna/transfer/registry"
-            )
+            app_support_dir_for_home(home)
+                .join("build.kanna")
+                .join("transfer")
+                .join("registry")
         );
     }
 
@@ -762,7 +887,7 @@ mod tests {
             let mut hasher = DefaultHasher::new();
             dir.hash(&mut hasher);
             let hash = hasher.finish() as u32;
-            PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+            PathBuf::from(format!("kanna-{hash:08x}.sock"))
         }
 
         for dir in [
@@ -771,7 +896,14 @@ mod tests {
             Path::new("/repo/.kanna-worktrees/task-1234/.kanna-daemon/pipeline"),
             Path::new("/tmp/kanna daemon with spaces"),
         ] {
-            assert_eq!(socket_path(dir), legacy_socket_path(dir));
+            // The directory moved on Linux; the file name -- and with it
+            // the hash algorithm every existing daemon derives its socket
+            // from -- must not.
+            assert_eq!(
+                socket_path(dir).file_name(),
+                legacy_socket_path(dir).file_name()
+            );
+            assert_eq!(socket_path(dir).parent(), Some(socket_dir().as_path()));
         }
     }
 
@@ -782,7 +914,7 @@ mod tests {
         );
 
         let path = human_control_socket_path(daemon_dir);
-        assert_eq!(path.parent(), Some(Path::new("/tmp")));
+        assert_eq!(path.parent(), Some(socket_dir().as_path()));
         assert!(path.as_os_str().len() < 104);
         assert_ne!(path, socket_path(daemon_dir));
     }

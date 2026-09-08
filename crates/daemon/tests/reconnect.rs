@@ -2836,15 +2836,25 @@ fn atomic_attach_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// Wait for a fixture to touch a marker file.
+///
+/// This is an eventual event with no product latency contract -- the marker
+/// appears when a shell finishes writing however much output the test asked
+/// for -- so the budget only has to contain a wedged fixture. It used to be
+/// two seconds, which a flood sized for a kernel with large socket buffers
+/// (see [`MINIMUM_SATURATING_FLOOD`]) outgrows on an ordinary machine.
 fn wait_for_file(path: &Path) {
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
         if path.exists() {
             return;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for file {path:?}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-
-    panic!("timed out waiting for file {:?}", path);
 }
 
 fn release_hidden_prefix_session(dir: &Path) {
@@ -3550,11 +3560,26 @@ fn natural_exit_finalization_precedes_same_id_replacement_creation() {
         "stale natural-exit teardown targeted the replacement incarnation: {commands:?}",
     );
 
+    // The replacement printed its line seconds ago, before this attach, so
+    // the attach snapshot is where it lives; only what the session emits
+    // afterwards arrives live. Reading the live stream alone would be
+    // asserting a race, not a fanout.
     let mut attached = daemon.connect();
-    attach(&mut attached, session_id);
-    let output = attached.collect_output_until_contains("NEW_NATURAL_INCARNATION");
+    attached.send(&Cmd::AttachSnapshot {
+        session_id: session_id.to_string(),
+        emulate_terminal: false,
+    });
+    let snapshot = recv_snapshot(&mut attached, session_id);
+    let observed = if snapshot.vt.contains("NEW_NATURAL_INCARNATION") {
+        snapshot.vt
+    } else {
+        String::from_utf8_lossy(
+            &attached.collect_output_until_contains("NEW_NATURAL_INCARNATION"),
+        )
+        .into_owned()
+    };
     assert!(
-        String::from_utf8_lossy(&output).contains("NEW_NATURAL_INCARNATION"),
+        observed.contains("NEW_NATURAL_INCARNATION"),
         "replacement terminal lost its fanout during stale natural-exit cleanup",
     );
 }
@@ -3992,6 +4017,49 @@ fn test_broadcast_both_clients_receive_output() {
 /// bounds on loaded machines, so they serialize among themselves.
 static FLOOD_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The smallest flood that actually saturates a non-reading subscriber's
+/// socket on this platform.
+///
+/// AF_UNIX flow control is not the same on the two kernels, and the
+/// difference is large enough to silently void these tests. On macOS the
+/// clamped receiver buffer is what bites: a writer into a socket clamped to
+/// `SO_RCVBUF` 4096 blocks after about 8 KiB. On Linux the *sender's*
+/// `SO_SNDBUF` dominates and the receiver's clamp barely moves it -- the same
+/// socketpair took 180 KiB before the write blocked, against a 212 992-byte
+/// default `SO_SNDBUF`. A flood sized for macOS therefore fits entirely
+/// inside kernel buffers on Linux: nothing stalls, nothing lags, and these
+/// tests would report green while exercising none of the backpressure they
+/// exist for. (Their closing "the daemon logged a stall/lag" assertions are
+/// what catches that, and are why this constant is not guesswork.)
+const MINIMUM_SATURATING_FLOOD: usize = if cfg!(target_os = "macos") {
+    0
+} else {
+    512 * 1024
+};
+
+/// Size one flood, keeping each test's own intent while guaranteeing the
+/// subscriber's socket really saturates here.
+fn flood_bytes(intended: usize) -> usize {
+    intended.max(MINIMUM_SATURATING_FLOOD)
+}
+
+/// How long a *healthy* client may take to receive a whole flood.
+///
+/// These tests guard one regression: a 500 ms per-chunk write timeout being
+/// paid for every chunk the stalled subscriber cannot take, which turns a
+/// flood into tens of seconds. The ceiling therefore only has to sit an order
+/// of magnitude under that, and it scales with the flood because
+/// [`MINIMUM_SATURATING_FLOOD`] makes the flood far larger on a kernel whose
+/// socket buffers are far larger -- the same number of bytes is not the same
+/// amount of work.
+fn flood_delivery_ceiling(base: Duration) -> Duration {
+    if cfg!(target_os = "macos") {
+        base
+    } else {
+        base * 5
+    }
+}
+
 #[test]
 fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     let _flood_probe_guard = FLOOD_PROBE_LOCK
@@ -4010,8 +4078,10 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
             // Small enough that a healthy client parses the whole flood well
             // inside the strict bound even on a loaded machine, large enough
             // to saturate a non-reading subscriber's socket buffers.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 16384 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(16384)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4042,10 +4112,11 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     // 4096-byte receive buffer, so seconds, not milliseconds. The ceiling
     // therefore only has to be an order of magnitude under that, which keeps
     // it out of reach of scheduler noise on a box running several suites.
-    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(2_000));
+    let flood_ceiling = flood_delivery_ceiling(Duration::from_millis(2_000));
+    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", flood_ceiling);
     let flood_latency = flood_started.elapsed();
     assert!(
-        flood_latency < Duration::from_millis(2_000),
+        flood_latency < flood_ceiling,
         "healthy delivery must not wait on the stalled subscriber; took {flood_latency:?}"
     );
 
@@ -4054,7 +4125,7 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
         data: b"HEALTHY_MARKER\n".to_vec(),
     });
     let output = healthy
-        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(2_000));
+        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", flood_ceiling);
     let output = String::from_utf8_lossy(&output);
     let marker = output
         .find("HEALTHY_MARKER")
@@ -4106,8 +4177,10 @@ fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 65536 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(65536)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4132,7 +4205,10 @@ fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
 
     std::fs::write(dir.join("go"), b"go").unwrap();
 
-    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(1_500));
+    healthy.collect_output_until_contains_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_millis(1_500)),
+    );
 
     // PTY ingestion itself must keep advancing while the observer is
     // saturated: new input has to reach the authoritative headless terminal.
@@ -4178,8 +4254,10 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
             "-c".to_string(),
             // Enough serialized volume to overflow the reduced byte budget on
             // top of the kernel socket buffers.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(32768)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4199,12 +4277,12 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
 
     // The healthy subscriber observes the end of the flood promptly while the
     // stalled subscriber's backlog overflows its byte budget.
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
+    healthy.wait_for_content_with_timeout("FLOOD_DONE", flood_delivery_ceiling(Duration::from_secs(5)));
 
     // The lagging subscriber is not disconnected: once it resumes reading and
     // drains its bounded backlog, the daemon resynchronizes it in place with
     // a fresh authoritative snapshot that contains the content it missed.
-    stalled.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(15));
+    stalled.wait_for_content_with_timeout("FLOOD_DONE", flood_delivery_ceiling(Duration::from_secs(15)));
 
     // After the resync the recovered subscriber streams live output again,
     // and the session stayed healthy for everyone.
@@ -4248,8 +4326,10 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(32768)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4267,7 +4347,7 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
 
     std::fs::write(dir.join("go"), b"go").unwrap();
 
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
+    healthy.wait_for_content_with_timeout("FLOOD_DONE", flood_delivery_ceiling(Duration::from_secs(5)));
     wait_for_daemon_log(
         &daemon,
         "stage=observer_write event=lag",
@@ -4333,8 +4413,10 @@ fn same_connection_reattach_discards_stale_backlog_behind_fresh_snapshot() {
             // 'S' fill marks stale pre-reattach output; the flood exceeds the
             // clamped socket buffers so the subject's mailbox holds a backlog
             // when it re-attaches.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 65536 /dev/zero | tr '\\000' S; printf '\\r\\nSTALE_DONE\\r\\n'; : > flooded; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' S; printf '\\r\\nSTALE_DONE\\r\\n'; : > flooded; cat",
+                flood_bytes(65536)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -5045,7 +5127,8 @@ const STDIN_RECORDER_PROGRAM: &str = r#"
 use Time::HiRes qw(time sleep);
 $| = 1;
 system('stty raw -echo');
-my ($bytes_path, $reads_path, $paste, $repaint_seconds) = @ARGV;
+my ($bytes_path, $reads_path, $paste, $repaint_seconds, $read_size) = @ARGV;
+$read_size = 65536 unless $read_size;
 open(my $bytes, '>', $bytes_path) or die "bytes: $!";
 open(my $reads, '>', $reads_path) or die "reads: $!";
 binmode($bytes);
@@ -5056,7 +5139,7 @@ print "READY\r\n";
 my $repainted = 0;
 while (1) {
     my $buf = '';
-    my $n = sysread(STDIN, $buf, 65536);
+    my $n = sysread(STDIN, $buf, $read_size);
     last unless defined($n) && $n > 0;
     print $reads "$n\n";
     print $bytes $buf;
@@ -5173,12 +5256,45 @@ impl StdinRecorder {
     }
 }
 
+/// A consumer read size small enough to guarantee that any message worth
+/// testing arrives in several reads, on any kernel.
+///
+/// The daemon does not control where a consumer's `read` boundaries fall --
+/// that is the whole lesson of the 2026-09-06 incident -- and the two kernels
+/// do not agree on where they fall by default: macOS's PTY queue split a
+/// 1,047-byte write at 1,022 bytes, while Linux delivered the same write
+/// whole (measured in Phase 0). Framing tests must therefore impose the
+/// fragmentation themselves rather than inherit a platform constant, or they
+/// assert nothing at all on the platform that does not split.
+const FRAGMENTING_READ_SIZE: usize = 128;
+
 fn spawn_stdin_recorder(
     daemon: &DaemonHandle,
     conn: &mut ClientConn,
     session_id: &str,
     bracketed_paste_mode: bool,
     repaint_seconds: f64,
+) -> StdinRecorder {
+    spawn_stdin_recorder_reading(
+        daemon,
+        conn,
+        session_id,
+        bracketed_paste_mode,
+        repaint_seconds,
+        65536,
+    )
+}
+
+/// As [`spawn_stdin_recorder`], but the recorder reads at most `read_size`
+/// bytes per `read`, so the consumer's own boundaries -- not the kernel's --
+/// decide how the message is fragmented.
+fn spawn_stdin_recorder_reading(
+    daemon: &DaemonHandle,
+    conn: &mut ClientConn,
+    session_id: &str,
+    bracketed_paste_mode: bool,
+    repaint_seconds: f64,
+    read_size: usize,
 ) -> StdinRecorder {
     let bytes_path = daemon._dir.join(format!("{session_id}-stdin.bin"));
     let reads_path = daemon._dir.join(format!("{session_id}-reads.txt"));
@@ -5195,6 +5311,7 @@ fn spawn_stdin_recorder(
             reads_path.to_string_lossy().into_owned(),
             if bracketed_paste_mode { "1" } else { "" }.to_string(),
             format!("{repaint_seconds}"),
+            format!("{read_size}"),
         ],
         cwd: "/tmp".to_string(),
         env: HashMap::new(),
@@ -5253,6 +5370,15 @@ fn session_pid(conn: &mut ClientConn, session_id: &str) -> u32 {
 /// arrives — the daemon's partial-write loop is correct — but they arrive as two
 /// separate reads, and the second one is a 25-byte fragment that reads as a
 /// complete sentence.
+// macOS only, deliberately: this fixture asserts that the *kernel* split the
+// write, which is the 2026-09-06 incident's own premise. Phase 0 measured the
+// identical 1,047-byte write arriving whole on Linux (kernel 7.0, both
+// canonical and raw), so the split cannot be required there -- and must never
+// be replaced by a "Linux queue size", which would only re-encode a second
+// platform constant the daemon does not control. The framing guarantee that
+// this behaviour is the reason for is asserted portably by the two tests
+// below, which fragment the consumer instead.
+#[cfg(target_os = "macos")]
 #[test]
 fn raw_input_at_the_incident_length_is_split_by_the_pty_queue() {
     let daemon = DaemonHandle::start();
@@ -5303,7 +5429,17 @@ fn a_long_single_line_logical_message_survives_the_pty_queue_split() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "long-logical-message";
-    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    // The consumer, not the kernel, is what fragments this message -- so the
+    // guarantee is asserted on every platform rather than only where the PTY
+    // queue happens to split.
+    let recorder = spawn_stdin_recorder_reading(
+        &daemon,
+        &mut conn,
+        session_id,
+        true,
+        0.0,
+        FRAGMENTING_READ_SIZE,
+    );
     let message = incident_shaped_message();
 
     conn.send(&Cmd::SubmitInput {
@@ -5333,8 +5469,8 @@ fn a_long_single_line_logical_message_survives_the_pty_queue_split() {
     let reads = recorder.reads();
     assert!(
         reads.len() >= 2,
-        "the kernel queue must still have split this message — the fix is in-band framing, \
-         not a single write; it arrived as {reads:?}"
+        "a reader taking {FRAGMENTING_READ_SIZE} bytes at a time must have split this \
+         message — the fix is in-band framing, not a single write; it arrived as {reads:?}"
     );
     assert!(
         recorder.first_read() < expected.len() - 1,
@@ -5360,11 +5496,21 @@ fn a_logical_message_split_inside_a_character_is_not_corrupted() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "multibyte-logical-message";
-    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    let recorder = spawn_stdin_recorder_reading(
+        &daemon,
+        &mut conn,
+        session_id,
+        true,
+        0.0,
+        FRAGMENTING_READ_SIZE,
+    );
 
     let text = "日本語のメッセージ、".repeat(45);
     let message = text.as_bytes().to_vec();
-    assert!(message.len() > 1_100, "the payload must outgrow the queue");
+    assert!(
+        message.len() > 1_100,
+        "the payload must outgrow any single consumer read"
+    );
 
     conn.send(&Cmd::SubmitInput {
         session_id: session_id.to_string(),
@@ -5377,12 +5523,26 @@ fn a_logical_message_split_inside_a_character_is_not_corrupted() {
     assert_eq!(received, expected);
     recorder.assert_settled_at(&expected, Duration::from_millis(400));
 
-    let split = recorder.first_read();
-    assert_eq!(
-        expected[split] & 0b1100_0000,
-        0b1000_0000,
-        "this test only proves reassembly if the read boundary cut a character; the split \
-         landed at {split}, on a character boundary"
+    // This test only proves reassembly if a read boundary actually cut a
+    // character. Every boundary is checked rather than just the first: the
+    // consumer asks for a fixed number of bytes but may be handed fewer, so
+    // no single boundary's offset is guaranteed. With three-byte characters
+    // and a reader that is not itself character-aware, two boundaries in
+    // three land mid-character, so a run with none is a broken premise.
+    let boundaries: Vec<usize> = recorder
+        .reads()
+        .iter()
+        .scan(0usize, |offset, read| {
+            *offset += read;
+            Some(*offset)
+        })
+        .take_while(|offset| *offset < expected.len())
+        .collect();
+    assert!(
+        boundaries
+            .iter()
+            .any(|offset| expected[*offset] & 0b1100_0000 == 0b1000_0000),
+        "no read boundary cut a character, so nothing was reassembled: {boundaries:?}"
     );
 
     let inner = &received[PASTE_BEGIN.len()..received.len() - PASTE_END.len() - 1];

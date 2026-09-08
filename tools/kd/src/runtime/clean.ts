@@ -1,4 +1,5 @@
 import { lstatSync, rmSync } from "node:fs";
+import { appCacheDir } from "../context";
 import { homedir } from "node:os";
 import { isAbsolute, join, parse, resolve } from "node:path";
 import type { CommandResult, CommandRunner } from "./process";
@@ -97,7 +98,11 @@ export async function cleanWorkspace(input: CleanInput): Promise<CleanResult> {
   ];
 
   if (input.sharedRustBuild) {
-    candidates.push({ path: join(homeDir, "Library", "Caches", "kanna", "rust-build") });
+    // Same directory `resolveKdContext` treats as the legacy shared build
+    // dir; if these two disagree, `kd clean` silently leaves it behind.
+    candidates.push({
+      path: join(appCacheDir(homeDir, process.env, process.platform), "kanna", "rust-build")
+    });
   }
 
   if (input.all) {

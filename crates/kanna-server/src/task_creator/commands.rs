@@ -445,10 +445,12 @@ pub(super) fn build_task_shell_command(
             .collect::<Vec<_>>()
             .join(" && ");
         command_parts.push(format!(
-            // zsh may cache a provider found later on PATH before setup
-            // installs a workspace-local executable. Refresh its command
-            // table so the just-provisioned binary wins.
-            "printf '\\033[33mRunning startup...\\033[0m\\n' && {} && rehash && printf '\\n'",
+            // A shell may cache a provider found earlier on PATH before
+            // setup installs a workspace-local executable. Refresh its
+            // command table so the just-provisioned binary wins. `hash -r` is
+            // POSIX and works in bash, dash and zsh alike; zsh's own `rehash`
+            // does not exist in the other two.
+            "printf '\\033[33mRunning startup...\\033[0m\\n' && {} && hash -r && printf '\\n'",
             setup_parts
         ));
     }

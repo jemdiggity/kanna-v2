@@ -426,7 +426,7 @@ fn test_provider_fixture_binary(_name: &str, _workspace_root: &str) -> Option<St
 }
 
 /// The user's real PATH as an interactive login shell resolves it, captured
-/// ONCE per process. Loading zshrc costs seconds; it used to run per binary
+/// ONCE per process. Loading the shell's startup files costs seconds; it used to run per binary
 /// lookup on the stage-advance request path, which is where the multi-second
 /// ⌘S-to-prompt lag came from. `warm_login_shell_path` pays the one-time cost
 /// at server startup, off the request path. Binary resolution also checks live
@@ -436,8 +436,9 @@ fn login_shell_path() -> Option<&'static str> {
     static LOGIN_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     LOGIN_SHELL_PATH
         .get_or_init(|| {
-            let output = Command::new("/bin/zsh")
-                .args(["--login", "-i", "-c", "printf %s \"$PATH\""])
+            let shell = crate::login_shell::login_shell();
+            let output = Command::new(shell.path())
+                .args(shell.login_interactive_args("printf %s \"$PATH\""))
                 .output()
                 .ok()?;
             if !output.status.success() {

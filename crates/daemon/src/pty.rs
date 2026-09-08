@@ -1415,20 +1415,32 @@ mod tests {
 
     /// Production shape: an interactive zsh gives every background job its
     /// own process group, so `kill(-leader)` alone never reaches the job.
+    /// An interactive, job-control-capable shell to drive teardown fixtures
+    /// with. It is deliberately the platform's own rather than one fixed
+    /// path: a stock Ubuntu image ships no `zsh` at all, and bash gives every
+    /// background job its own process group exactly as zsh does, which is the
+    /// premise this fixture needs.
     #[cfg(target_os = "macos")]
+    const INTERACTIVE_SHELL: (&str, &[&str]) = ("/bin/zsh", &["-f", "-i"]);
+    #[cfg(target_os = "linux")]
+    const INTERACTIVE_SHELL: (&str, &[&str]) = ("/bin/bash", &["--norc", "--noprofile", "-i"]);
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn kill_terminates_interactive_zsh_jobs_in_their_own_process_groups() {
+    fn kill_terminates_interactive_shell_jobs_in_their_own_process_groups() {
         let mut env = HashMap::new();
         env.insert("TERM".to_string(), "dumb".to_string());
+        let (shell, shell_args) = INTERACTIVE_SHELL;
+        let shell_args: Vec<String> = shell_args.iter().map(|arg| arg.to_string()).collect();
         let mut session = PtySession::spawn(
-            "/bin/zsh",
-            &["-f".to_string(), "-i".to_string()],
+            shell,
+            &shell_args,
             "/tmp",
             &env,
             120,
             32,
         )
-        .expect("interactive zsh spawn should succeed");
+        .expect("interactive shell spawn should succeed");
         write_to_master(&session, b"sleep 300 & echo JOB_START $!\r");
         let output = read_pty_output_until(
             &session,
@@ -1446,7 +1458,7 @@ mod tests {
             crate::proc_info::process_info(job).expect("background job should be inspectable");
         assert_ne!(
             job_info.pgid, leader,
-            "interactive zsh should place the job in its own process group"
+            "an interactive shell should place the job in its own process group"
         );
 
         session.kill().expect("kill should succeed");
@@ -1461,7 +1473,7 @@ mod tests {
     /// A descendant that calls `setsid()` leaves both the leader's process
     /// group and the controlling terminal; only the parent-chain walk can
     /// find it.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn kill_terminates_descendants_that_escape_with_setsid() {
         if !std::path::Path::new("/usr/bin/perl").exists() {
@@ -1634,7 +1646,7 @@ mod tests {
 
     /// A stale handoff pid that now belongs to an unrelated process (PID
     /// reuse) fails identity authentication and must never be signaled.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn adopt_refuses_signaling_unrelated_reused_pids() {
         let mut victim = std::process::Command::new("/bin/sleep")
@@ -1716,7 +1728,7 @@ mod tests {
     /// fork, so an adopted session refuses non-destructive signals. Teardown
     /// (which freezes first, and whose sweep is authenticated by the
     /// transferred master fd) remains available.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn adopted_sessions_refuse_non_destructive_signals_but_stay_killable() {
         let mut session = PtySession::spawn(
@@ -1784,7 +1796,7 @@ mod tests {
     /// matching start-time metadata (new daemons) or through its controlling
     /// terminal (legacy daemons without identity metadata), and stays
     /// killable after handoff.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn adopt_authenticates_live_leaders_and_kills_them() {
         let mut session = PtySession::spawn(
@@ -1860,7 +1872,7 @@ mod tests {
     /// Membership must not stop traversal: an on-terminal intermediate is
     /// already in the teardown set via its controlling tty, but its own
     /// detached (setsid) grandchild is only reachable by walking through it.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn kill_reaches_detached_grandchildren_behind_on_terminal_intermediates() {
         if !std::path::Path::new("/usr/bin/perl").exists() {

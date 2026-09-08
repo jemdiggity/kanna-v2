@@ -96,6 +96,15 @@ pub fn send_fds(socket: RawFd, fds: &[RawFd]) -> io::Result<()> {
     }
 }
 
+/// `recvmsg` flags for an SCM_RIGHTS receive: on Linux, create the
+/// descriptors close-on-exec in the kernel. macOS has no such flag, so there
+/// the descriptors are marked immediately afterwards inside the spawn/fd
+/// boundary (see [`recv_fds`]).
+#[cfg(target_os = "linux")]
+const RECV_FDS_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECV_FDS_FLAGS: libc::c_int = 0;
+
 /// Receive file descriptors from a Unix socket.
 ///
 /// `count` is the expected number of fds. Returns the received fds.
@@ -121,15 +130,20 @@ pub fn recv_fds(socket: RawFd, count: usize) -> io::Result<Vec<RawFd>> {
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_space as _;
 
-    // Received fds enter this process inheritable (macOS has no
-    // MSG_CMSG_CLOEXEC), so the whole receive-and-mark window must be inside
+    // Received fds enter this process inheritable on macOS, which has no
+    // MSG_CMSG_CLOEXEC, so the whole receive-and-mark window must be inside
     // the process-wide spawn/fd boundary: no fork/exec may run before the
-    // adopted fds are close-on-exec.
+    // adopted fds are close-on-exec. The boundary is therefore kept on both
+    // platforms; Linux merely narrows the window it has to cover, by asking
+    // the kernel to create the descriptors close-on-exec in the first place
+    // instead of only fencing the gap afterwards. The post-hoc marking below
+    // stays as well: it is what macOS relies on, and on Linux it is a no-op
+    // on an already-marked descriptor.
     let _spawn_boundary = crate::fd::spawn_fd_boundary();
 
     let deadline = Instant::now() + RECV_FDS_RETRY_TIMEOUT;
     let ret = loop {
-        let ret = unsafe { libc::recvmsg(socket, &mut msg, 0) };
+        let ret = unsafe { libc::recvmsg(socket, &mut msg, RECV_FDS_FLAGS) };
         if ret >= 0 {
             break ret;
         }
@@ -173,7 +187,11 @@ fn collect_scm_rights_fds(msg: &libc::msghdr, expected: usize) -> io::Result<Vec
 
     let truncated = msg.msg_flags & libc::MSG_CTRUNC != 0;
     let control_start = msg.msg_control as usize;
-    let control_end = control_start + msg.msg_controllen as usize;
+    // `msg_controllen` is `socklen_t` on macOS and `size_t` on Linux, so this
+    // conversion is a cast on one platform and a no-op on the other. Either
+    // way a value that does not fit is treated as an empty control buffer,
+    // which makes every control message below fail the bounds check.
+    let control_end = control_start + usize::try_from(msg.msg_controllen).unwrap_or(0);
     let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
     let fd_size = std::mem::size_of::<RawFd>();
 
@@ -283,6 +301,73 @@ mod tests {
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0, "socketpair failed");
         (fds[0], fds[1])
+    }
+
+    fn is_cloexec(fd: RawFd) -> bool {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD failed for fd {fd}");
+        flags & libc::FD_CLOEXEC != 0
+    }
+
+    /// Pin the platform primitive itself: on Linux the kernel creates the
+    /// descriptor close-on-exec, so the inheritable window `spawn_fd_boundary`
+    /// exists to fence never opens at all. A sender's own FD_CLOEXEC does not
+    /// travel over SCM_RIGHTS -- that is what makes the flag necessary -- so
+    /// the descriptor is deliberately sent as an inheritable one.
+    #[test]
+    fn the_recv_flags_decide_whether_the_kernel_marks_the_descriptor() {
+        let (s1, s2) = socketpair();
+        let mut pipe_fds = [0 as RawFd; 2];
+        unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
+        assert!(!is_cloexec(pipe_fds[0]), "sent fd should be inheritable");
+
+        send_fds(s1, &[pipe_fds[0]]).unwrap();
+
+        // Receive by hand so the post-hoc marking in `recv_fds` cannot mask
+        // what the kernel did.
+        let mut dummy = [0u8; 1];
+        let mut iov = libc::iovec {
+            iov_base: dummy.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+        let mut cmsg_buf = vec![0u8; space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsg_buf.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        assert!(unsafe { libc::recvmsg(s2, &mut msg, RECV_FDS_FLAGS) } > 0);
+        let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        assert!(!cmsg.is_null());
+        let mut received: RawFd = -1;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                libc::CMSG_DATA(cmsg),
+                (&mut received as *mut RawFd).cast::<u8>(),
+                std::mem::size_of::<RawFd>(),
+            )
+        };
+
+        #[cfg(target_os = "linux")]
+        assert!(
+            is_cloexec(received),
+            "MSG_CMSG_CLOEXEC must make the kernel mark the descriptor"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            !is_cloexec(received),
+            "without MSG_CMSG_CLOEXEC the descriptor arrives inheritable, \
+             which is exactly why `spawn_fd_boundary` must fence the window"
+        );
+
+        unsafe {
+            libc::close(received);
+            libc::close(pipe_fds[0]);
+            libc::close(pipe_fds[1]);
+            libc::close(s1);
+            libc::close(s2);
+        }
     }
 
     #[test]

@@ -39,10 +39,8 @@ fn snapshot_dir() -> PathBuf {
         return PathBuf::from(dir).join("terminal-recovery");
     }
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home)
-        .join("Library")
-        .join("Application Support")
-        .join("Kanna")
-        .join("terminal-recovery")
+    // The daemon's own default, resolved by the one helper that knows where
+    // application data lives on this platform -- a literal here would put the
+    // sidecar's snapshots somewhere the daemon never looks.
+    kanna_runtime_defaults::default_daemon_dir().join("terminal-recovery")
 }

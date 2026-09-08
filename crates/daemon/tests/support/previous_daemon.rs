@@ -6,6 +6,19 @@ use std::time::Duration;
 
 const PREVIOUS_TAG: &str = "v0.1.0-staging.1";
 
+/// Whether the release archived at [`PREVIOUS_TAG`] can run on this platform
+/// at all.
+///
+/// It cannot on Linux: that release's `proc_info` has no Linux backend, so the
+/// fixture binary aborts in `SuccessorAuthorizer::capture()` before a handoff
+/// can even be attempted -- there is no previous *Linux* release to hand off
+/// from yet. Cross-version handoff is therefore exercised on macOS only, and
+/// the skip notice says so rather than the suite quietly reporting green.
+///
+/// Revisit this with every [`PREVIOUS_TAG`] bump: the first tag cut after
+/// Linux support ships makes it `true` everywhere.
+const PREVIOUS_RELEASE_RUNS_HERE: bool = cfg!(target_os = "macos");
+
 /// Test-only: makes the fixture behave as if no ghostty checkout could be
 /// resolved, so `fixture_isolation` can observe what the skip notice does to a
 /// real libtest run.
@@ -30,6 +43,9 @@ pub fn binary() -> Option<PathBuf> {
     }
     if let Some(path) = std::env::var_os("KANNA_PREVIOUS_DAEMON_BIN") {
         return Some(PathBuf::from(path));
+    }
+    if !PREVIOUS_RELEASE_RUNS_HERE {
+        return None;
     }
 
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -90,13 +106,23 @@ pub fn binary() -> Option<PathBuf> {
 pub fn binary_or_skip(test: &str) -> Option<PathBuf> {
     let binary = binary();
     if binary.is_none() {
-        let notice = format!(
-            "SKIP {test}: no local ghostty checkout for the previous-daemon fixture. \
-             The cross-version handoff invariants in crates/daemon/SPEC.md were NOT \
-             exercised. Build this workspace first (`cargo build -p kanna-daemon`), or \
-             point GHOSTTY_SOURCE_DIR at a ghostty checkout, or set \
-             KANNA_PREVIOUS_DAEMON_BIN to a prebuilt {PREVIOUS_TAG} daemon.\n"
-        );
+        let notice = if PREVIOUS_RELEASE_RUNS_HERE {
+            format!(
+                "SKIP {test}: no local ghostty checkout for the previous-daemon fixture. \
+                 The cross-version handoff invariants in crates/daemon/SPEC.md were NOT \
+                 exercised. Build this workspace first (`cargo build -p kanna-daemon`), or \
+                 point GHOSTTY_SOURCE_DIR at a ghostty checkout, or set \
+                 KANNA_PREVIOUS_DAEMON_BIN to a prebuilt {PREVIOUS_TAG} daemon.\n"
+            )
+        } else {
+            format!(
+                "SKIP {test}: the previous release {PREVIOUS_TAG} predates Linux support \
+                 and cannot start on {}, so the cross-version handoff invariants in \
+                 crates/daemon/SPEC.md were NOT exercised here. They are covered on macOS \
+                 until a Linux-capable release tag becomes the previous release.\n",
+                std::env::consts::OS
+            )
+        };
         let mut stderr = std::io::stderr();
         let _ = stderr.write_all(notice.as_bytes());
         let _ = stderr.flush();

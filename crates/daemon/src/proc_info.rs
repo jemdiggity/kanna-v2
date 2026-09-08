@@ -8,9 +8,14 @@
 //! reachable from the session leader through the parent chain, or when its
 //! controlling terminal is the session's slave device. On macOS both facts —
 //! plus the start-time identity used to detect PID reuse — come from
-//! `proc_pidinfo(PROC_PIDTBSDINFO)`.
+//! `proc_pidinfo(PROC_PIDTBSDINFO)`; on Linux they come from `procfs`.
 //!
-//! On non-macOS platforms these helpers degrade to "unknown": callers fall
+//! The two backends answer the same questions, but Linux's answers carry
+//! different guarantees in three places — start-time resolution, "no
+//! controlling terminal", and pipe provenance. Each is documented on the
+//! Linux `imp` module below, because callers depend on the difference.
+//!
+//! On every other platform these helpers degrade to "unknown": callers fall
 //! back to plain group signaling.
 
 #![allow(dead_code)]
@@ -372,22 +377,417 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux backend.
+///
+/// Every fact the macOS backend gets from `proc_pidinfo` comes from
+/// `procfs` here. Three of the primitives differ in *guarantee*, not just in
+/// spelling, and callers depend on the difference:
+///
+/// * **`StartTime` resolution is 10 ms**, not microseconds: `starttime` in
+///   `/proc/<pid>/stat` is measured in clock ticks (`_SC_CLK_TCK` is 100).
+///   Processes spawned back to back routinely share a tick, so `StartTime`
+///   alone distinguishes far less than it does on macOS. The identity used
+///   everywhere is the `(pid, start)` *pair*, which is still unique: a pid is
+///   not reused until the whole `pid_max` space (4194304 by default) wraps,
+///   which cannot happen inside one 10 ms tick.
+/// * **"no controlling terminal" is `tty_nr == 0`**, not `NODEV`. It is
+///   mapped to [`NO_TTY`] here so the teardown sweep does not treat every
+///   detached process as sharing a terminal.
+/// * **Both ends of a pipe share one inode.** There is no distinct "far end"
+///   handle to bind to, so [`pipe_end_belongs_to`] proves the weaker — but
+///   still kernel-authoritative — statement documented on it.
+///
+/// Every lookup fails *safe*: an unreadable or vanished `/proc` entry (a
+/// different uid, a non-dumpable process, an exit racing the scan) reads as
+/// "unavailable", never as "alive" or "matching".
+#[cfg(target_os = "linux")]
 mod imp {
-    use super::ProcessInfo;
+    use super::{ProcessInfo, NO_TTY};
+    use std::io::Read;
 
+    /// `/proc/<pid>/exe`. The link carries a ` (deleted)` suffix once the
+    /// binary behind it is replaced or unlinked, and that suffix is
+    /// deliberately **not** stripped: callers compare these paths byte for
+    /// byte as a trust root, and a replaced binary must fail the comparison.
+    /// Binaries are therefore upgraded by replacing the file and restarting
+    /// the process, never live underneath a running one.
     pub fn process_executable_path(pid: libc::pid_t) -> Option<std::path::PathBuf> {
         if pid <= 1 {
             return None;
         }
-        #[cfg(target_os = "linux")]
-        {
-            return std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+
+    /// Read the whole of a small `/proc` file. `read_to_string` is used
+    /// rather than `fs::read_to_string` because `/proc` files report size 0
+    /// and the latter would allocate nothing up front; correctness is the
+    /// same, this just avoids a needless stat.
+    fn read_proc(path: &str) -> Option<String> {
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).ok()?;
+        Some(contents)
+    }
+
+    /// Parse the fields of `/proc/<pid>/stat` we need.
+    ///
+    /// `comm` (field 2) is the executable's basename, unquoted and
+    /// parenthesised, and may itself contain spaces *and* parentheses — so
+    /// the split is at the **last** `)`, never on whitespace.
+    fn parse_stat(pid: libc::pid_t, stat: &str) -> Option<ProcessInfo> {
+        let rest = &stat[stat.rfind(')')? + 1..];
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        // `fields[0]` is field 3 (`state`), so field N is `fields[N - 3]`.
+        let field = |n: usize| fields.get(n - 3).copied();
+
+        let state = field(3)?;
+        let ppid: libc::pid_t = field(4)?.parse().ok()?;
+        let pgid: libc::pid_t = field(5)?.parse().ok()?;
+        // `tty_nr` is a signed int in procfs; 0 means "no controlling
+        // terminal", which the rest of this module spells `NO_TTY`.
+        let tty_nr: i32 = field(7)?.parse().ok()?;
+        let starttime: u64 = field(22)?.parse().ok()?;
+
+        Some(ProcessInfo {
+            pid,
+            ppid,
+            pgid,
+            tdev: if tty_nr == 0 { NO_TTY } else { tty_nr as u32 },
+            is_zombie: state == "Z",
+            // `t` is tracing-stop; it is as stopped as `T` for teardown.
+            is_stopped: state == "T" || state == "t",
+            start: (starttime, 0),
+        })
+    }
+
+    pub fn process_info(pid: libc::pid_t) -> Option<ProcessInfo> {
+        if pid <= 0 {
+            return None;
         }
-        #[cfg(not(target_os = "linux"))]
-        {
+        parse_stat(pid, &read_proc(&format!("/proc/{pid}/stat"))?)
+    }
+
+    pub fn all_process_info() -> Vec<ProcessInfo> {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<libc::pid_t>().ok())
+            // A pid that exits mid-scan is "gone", not an error.
+            .filter_map(process_info)
+            .collect()
+    }
+
+    /// Inode of the pipe behind `fd`. On Linux both ends of a pipe share one
+    /// inode, so this identifies the *pipe*, not an end of it — see
+    /// [`pipe_end_belongs_to`].
+    pub fn pipe_peer_handle(fd: std::os::unix::io::RawFd) -> Option<u64> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+            return None;
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return None;
+        }
+        let inode = stat.st_ino as u64;
+        if inode == 0 {
+            None
+        } else {
+            Some(inode)
+        }
+    }
+
+    /// True when `pid` holds pipe `handle` open in `mode` (`O_RDONLY` or
+    /// `O_WRONLY`). The descriptor is located through
+    /// `/proc/<pid>/fd/<n>` → `pipe:[<inode>]` and its direction read from
+    /// `/proc/<pid>/fdinfo/<n>`'s octal `flags:` line.
+    fn pid_holds_pipe_end_in_mode(pid: libc::pid_t, handle: u64, mode: libc::c_int) -> bool {
+        if pid <= 0 || handle == 0 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return false;
+        };
+        let wanted = format!("pipe:[{handle}]");
+        for entry in entries.flatten() {
+            let Ok(link) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            if link.to_str() != Some(wanted.as_str()) {
+                continue;
+            }
+            let Some(fd_name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(fdinfo) = read_proc(&format!("/proc/{pid}/fdinfo/{fd_name}")) else {
+                continue;
+            };
+            let Some(flags) = fdinfo.lines().find_map(|line| {
+                let value = line.strip_prefix("flags:")?.trim();
+                libc::c_int::from_str_radix(value, 8).ok()
+            }) else {
+                continue;
+            };
+            if flags & libc::O_ACCMODE == mode {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// True when `pid` holds pipe `handle` open at all, in either direction.
+    /// Kept for symmetry with the macOS backend; authentication goes through
+    /// [`pipe_end_belongs_to`], which also pins the direction.
+    pub fn pid_holds_pipe_end(pid: libc::pid_t, handle: u64) -> bool {
+        pid_holds_pipe_end_in_mode(pid, handle, libc::O_RDONLY)
+            || pid_holds_pipe_end_in_mode(pid, handle, libc::O_WRONLY)
+    }
+
+    pub fn socket_peer_pid(socket_fd: std::os::unix::io::RawFd) -> Option<libc::pid_t> {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        // Frozen at `connect()`, exactly like macOS's `LOCAL_PEERPID`: the
+        // pid survives the peer's exit, so live identity rechecks stay
+        // mandatory at every use site.
+        if ret == 0 && cred.pid > 1 {
+            Some(cred.pid)
+        } else {
             None
         }
+    }
+
+    /// Resolve the slave tty device number for a PTY master fd
+    /// (`TIOCGPTN` + `stat` of `/dev/pts/<n>`). The kernel's
+    /// `new_encode_dev()` (what `/proc/<pid>/stat` reports as `tty_nr`) and
+    /// glibc's `st_rdev` agree bit for bit in the 32-bit range, so the value
+    /// compares directly against [`ProcessInfo::tdev`]. A device that does
+    /// not fit 32 bits (only reachable for `major > 0xfff`) fails safe.
+    pub fn slave_device_of_master(master_fd: std::os::unix::io::RawFd) -> Option<u32> {
+        let mut pty_number: libc::c_uint = 0;
+        let ret = unsafe {
+            libc::ioctl(
+                master_fd,
+                libc::TIOCGPTN,
+                &mut pty_number as *mut libc::c_uint,
+            )
+        };
+        if ret != 0 {
+            return None;
+        }
+        let path = std::ffi::CString::new(format!("/dev/pts/{pty_number}")).ok()?;
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::stat(path.as_ptr(), &mut st) } != 0 {
+            return None;
+        }
+        let dev = u32::try_from(st.st_rdev).ok()?;
+        if dev == NO_TTY {
+            None
+        } else {
+            Some(dev)
+        }
+    }
+
+    /// Authenticate one transferred descriptor as a genuine end of a pipe
+    /// shared with `pid`. Three independent facts must hold:
+    ///
+    /// 1. the descriptor really is a pipe (not a socket, file, or tty),
+    /// 2. our side is open in the direction the role requires — a descriptor
+    ///    we will READ (the child's stdout/stderr) must not be writable, and
+    ///    one we will WRITE (the child's stdin) must not be readable, and
+    /// 3. `pid` holds *this same pipe* open in the **opposite** direction.
+    ///
+    /// Point 3 is deliberately weaker than the macOS backend's claim, and the
+    /// difference is a kernel one: on Linux both ends of a pipe share a single
+    /// inode, so no "far end" handle exists to bind to. The strongest fact
+    /// procfs can prove is "some descriptor in `pid` refers to this pipe and
+    /// is open the other way round" — it cannot prove that descriptor is the
+    /// *only* far end. That is still kernel-authoritative and still
+    /// independent of anything the sender claims, which is what the callers
+    /// rely on; it just may not be stated more strongly than this.
+    pub fn pipe_end_belongs_to(
+        fd: std::os::unix::io::RawFd,
+        pid: libc::pid_t,
+        end: super::PipeEnd,
+    ) -> bool {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+            return false;
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return false;
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return false;
+        }
+        let (ours, theirs) = match end {
+            super::PipeEnd::Read => (libc::O_RDONLY, libc::O_WRONLY),
+            super::PipeEnd::Write => (libc::O_WRONLY, libc::O_RDONLY),
+        };
+        if flags & libc::O_ACCMODE != ours {
+            return false;
+        }
+        let Some(handle) = pipe_peer_handle(fd) else {
+            return false;
+        };
+        pid_holds_pipe_end_in_mode(pid, handle, theirs)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// `comm` is the raw executable basename: it may contain spaces and
+        /// parentheses, so the field split must key off the LAST `)`.
+        #[test]
+        fn stat_with_parens_and_spaces_in_comm_parses() {
+            let stat = "4242 (we ird) (name)) S 7 9 9 1027 4242 4194304 100 0 0 0 1 2 3 4 20 0 1 0 987654 1 2 3";
+            let info = parse_stat(4242, stat).expect("stat should parse");
+            assert_eq!(info.pid, 4242);
+            assert_eq!(info.ppid, 7);
+            assert_eq!(info.pgid, 9);
+            assert_eq!(info.tdev, 1027);
+            assert!(!info.is_zombie);
+            assert!(!info.is_stopped);
+            assert_eq!(info.start, (987654, 0));
+        }
+
+        /// `tty_nr == 0` is Linux's "no controlling terminal". Left as 0 it
+        /// would make every detached process look like it shares device 0,
+        /// and the teardown sweep would kill unrelated processes.
+        #[test]
+        fn no_controlling_terminal_maps_to_no_tty() {
+            let stat = "5 (x) S 1 5 5 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 42 0 0";
+            let info = parse_stat(5, stat).expect("stat should parse");
+            assert_eq!(info.tdev, NO_TTY);
+        }
+
+        #[test]
+        fn zombie_and_both_stopped_states_are_recognised() {
+            let with_state = |state: &str| {
+                let stat = format!(
+                    "5 (x) {state} 1 5 5 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 42 0 0"
+                );
+                parse_stat(5, &stat).expect("stat should parse")
+            };
+            assert!(with_state("Z").is_zombie);
+            assert!(with_state("T").is_stopped);
+            // Tracing stop is as stopped as SIGSTOP for teardown purposes.
+            assert!(with_state("t").is_stopped);
+            assert!(!with_state("S").is_zombie);
+            assert!(!with_state("S").is_stopped);
+        }
+
+        /// A pipe end must not authenticate against a peer holding the SAME
+        /// direction: on Linux both ends share an inode, so direction is the
+        /// only thing separating "the far end" from a dup of our own end.
+        #[test]
+        fn pipe_end_requires_the_peer_to_hold_the_opposite_direction() {
+            let mut fds = [0 as libc::c_int; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            let (read_end, write_end) = (fds[0], fds[1]);
+            let me = std::process::id() as libc::pid_t;
+
+            // We hold both ends, so we are our own peer in both directions.
+            assert!(pipe_end_belongs_to(read_end, me, super::super::PipeEnd::Read));
+            assert!(pipe_end_belongs_to(
+                write_end,
+                me,
+                super::super::PipeEnd::Write
+            ));
+
+            // Dropping the write end leaves nobody holding the opposite
+            // direction, so the read end no longer authenticates.
+            unsafe { libc::close(write_end) };
+            assert!(!pipe_end_belongs_to(
+                read_end,
+                me,
+                super::super::PipeEnd::Read
+            ));
+
+            // A read end presented as a write end is refused outright.
+            assert!(!pipe_end_belongs_to(
+                read_end,
+                me,
+                super::super::PipeEnd::Write
+            ));
+            unsafe { libc::close(read_end) };
+        }
+
+        /// The guarantee `stop_verified`'s fault injection depends on: an
+        /// unreaped zombie keeps its full `/proc` identity, so the pid is
+        /// pinned and cannot have been recycled. It disappears only on reap.
+        #[test]
+        fn an_unreaped_zombie_keeps_its_identity_and_loses_it_on_reap() {
+            let mut victim = std::process::Command::new("/bin/sleep")
+                .arg("300")
+                .spawn()
+                .expect("victim spawn should succeed");
+            let pid = victim.id() as libc::pid_t;
+            let live = process_info(pid).expect("live victim should resolve");
+
+            victim.kill().expect("victim kill");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match process_info(pid) {
+                    Some(info) if info.is_zombie => {
+                        assert_eq!(
+                            info.start, live.start,
+                            "a zombie must keep the identity that pins its pid"
+                        );
+                        break;
+                    }
+                    _ => {
+                        assert!(std::time::Instant::now() < deadline, "victim should zombie");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            }
+
+            victim.wait().expect("victim reaped");
+            assert!(
+                process_info(pid).is_none_or(|info| info.start != live.start),
+                "a reaped pid must no longer answer with the old identity"
+            );
+        }
+
+        #[test]
+        fn socket_peer_pid_reports_this_process_over_a_socketpair() {
+            let mut fds = [0 as libc::c_int; 2];
+            assert_eq!(
+                unsafe {
+                    libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr())
+                },
+                0
+            );
+            assert_eq!(
+                socket_peer_pid(fds[0]),
+                Some(std::process::id() as libc::pid_t)
+            );
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+mod imp {
+    use super::ProcessInfo;
+
+    pub fn process_executable_path(_pid: libc::pid_t) -> Option<std::path::PathBuf> {
+        None
     }
 
     pub fn process_info(_pid: libc::pid_t) -> Option<ProcessInfo> {
@@ -444,8 +844,16 @@ pub enum PipeEnd {
 }
 
 /// True when `pid` currently refers to the process with the given start-time
-/// identity (zombie or live). This is the gate for any pid-targeted signal:
-/// a recycled pid has a different start time and must never be signaled.
+/// identity. This is the gate for any pid-targeted signal: a recycled pid has
+/// a different start time and must never be signaled.
+///
+/// Zombies differ by platform, and the difference is the kernel's, not a
+/// choice: macOS's `proc_pidinfo` stops reporting a process the moment it
+/// dies, so a zombie never matches there, while Linux keeps `/proc/<pid>`
+/// fully readable until the parent reaps it, so a zombie does match. Linux is
+/// the safer of the two -- an unreaped zombie *pins* its pid, so a match
+/// cannot be a recycled process -- and callers that need liveness rather than
+/// identity already use [`identity_alive`].
 pub fn identity_matches(pid: libc::pid_t, start: StartTime) -> bool {
     process_info(pid).map(|info| info.start == start) == Some(true)
 }
@@ -489,6 +897,21 @@ pub fn stop_verified(target: SessionTarget) -> bool {
             unsafe { libc::kill(target.pid, libc::SIGKILL) };
             // Let the kill land so the post-stop verification sees it.
             std::thread::sleep(std::time::Duration::from_millis(20));
+            // On Linux an unreaped zombie keeps `/proc/<pid>` -- and with it
+            // the full start-time identity -- readable, so SIGKILL alone does
+            // not release the pid and does not simulate the recycling this
+            // fixture is about. Reaping does. (macOS needs no equivalent:
+            // `proc_pidinfo` already reports a zombie as gone, so the pid
+            // there stops matching the moment the target dies. The
+            // consequence is that macOS exercises the post-stop rollback
+            // branch below while Linux takes the `kill` failure path; both
+            // assert the property that matters -- a target that changed
+            // inside the window is never reported frozen.)
+            #[cfg(target_os = "linux")]
+            {
+                let mut status: libc::c_int = 0;
+                unsafe { libc::waitpid(target.pid, &mut status, 0) };
+            }
         }
     }
     if unsafe { libc::kill(target.pid, libc::SIGSTOP) } != 0 {
@@ -788,7 +1211,7 @@ pub fn freeze_session_processes_with(
     stopped
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 
@@ -870,7 +1293,8 @@ mod tests {
             !stopped,
             "a target that changed inside the verify→stop window must be rejected"
         );
-        victim.wait().expect("victim reaped");
+        // The injection may already have reaped it (see `stop_verified`).
+        let _ = victim.wait();
 
         // The plain path still stops a stable target (and identity survives).
         let mut stable = std::process::Command::new("/bin/sleep")

@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 
 //! Integration tests for daemon handoff (session transfer on upgrade).
 //!
