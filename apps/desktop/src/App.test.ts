@@ -1796,7 +1796,7 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("toggles preferences with the preferences shortcut action", async () => {
+  it("opens preferences as a tab and closes it with the close-tab shortcut", async () => {
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
       MainPanel: TabHostMainPanelStub,
     });
@@ -1809,9 +1809,14 @@ describe("App", () => {
 
     expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(true);
 
+    // The shortcut that opened it raises it rather than toggling it shut...
     capturedKeyboardActions?.openPreferences();
     await flushPromises();
+    expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(true);
 
+    // ...⌘W is what closes a tab.
+    await capturedKeyboardActions?.closeTabOrWindow();
+    await flushPromises();
     expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(false);
 
     wrapper.unmount();
@@ -5827,7 +5832,9 @@ describe("App", () => {
     await wrapper.get('[data-testid="remember-diff-state"]').trigger("click");
     await flushPromises();
 
-    capturedKeyboardActions?.showDiff();
+    // Close the tab so reopening has to restore the state rather than simply
+    // keep the mounted view.
+    await capturedKeyboardActions?.closeTabOrWindow();
     await flushPromises();
     expect(wrapper.find('[data-testid="diff-modal"]').exists()).toBe(false);
 
@@ -6804,7 +6811,7 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(false);
 
-    capturedKeyboardActions?.toggleFilePreview();
+    await capturedKeyboardActions?.closeTabOrWindow();
     await flushPromises();
 
     expect(wrapper.find('[data-testid="main-tab-file:src/task-a.ts"]').exists()).toBe(false);

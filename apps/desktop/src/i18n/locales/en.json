@@ -113,7 +113,8 @@
     "oldestUnreadAllRepos": "Oldest Unread Task Across Repos",
     "oldestRead": "Oldest Read Task",
     "oldestReadAllRepos": "Oldest Read Task Across Repos",
-    "focusSearch": "Search"
+    "focusSearch": "Search",
+    "closeTab": "Close Tab"
   },
   "shortcutContexts": {
     "main": "Main Shortcuts",

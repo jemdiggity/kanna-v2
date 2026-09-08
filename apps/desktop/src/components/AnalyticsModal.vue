@@ -101,7 +101,6 @@ const lineChartOptions = computed(() => ({
 <template>
   <div
     ref="overlayRef"
-    class="modal-overlay"
     :class="overlayClass"
     :style="overlayStyle"
     tabindex="0"
@@ -248,14 +247,6 @@ const lineChartOptions = computed(() => ({
 </template>
 
 <style scoped>
-.modal-overlay.embedded {
-  position: relative;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
-  background: none;
-}
-
 .embedded .analytics-modal {
   width: 100%;
   height: 100%;

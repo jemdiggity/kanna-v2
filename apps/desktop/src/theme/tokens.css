@@ -87,3 +87,22 @@
   --kn-agent-terminal-accent: #0b66c3;
   --kn-code-bg: #ffffff;
 }
+
+/*
+ * A view rendered inline as a main-content-area tab rather than as an
+ * overlay. It deliberately does NOT carry `.modal-overlay`: those rules are
+ * per-component and each carries its own scrim, centring and padding, and a
+ * tab that inherited any of them rendered wrong in a way each component had
+ * to remember to undo. The tab simply fills the area it was given.
+ */
+.embedded-view {
+  position: relative;
+  inset: auto;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  background: none;
+}

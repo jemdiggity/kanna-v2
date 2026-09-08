@@ -31,7 +31,7 @@ export function useEmbeddableView(
   zIndex: Ref<number>;
   bringToFront: () => void;
   isForeground: () => boolean;
-  overlayClass: Ref<{ embedded: boolean }>;
+  overlayClass: Ref<Record<string, boolean>>;
   overlayStyle: Ref<{ zIndex: number } | undefined>;
   dismissOnScrimClick: (dismiss: () => void) => void;
   focusWhenBrought: (element: Ref<HTMLElement | null>) => void;
@@ -45,7 +45,17 @@ export function useEmbeddableView(
     bringToFront,
     /** False while another tab is in front of this embedded view. */
     isForeground: () => !(props.embedded === true && props.active === false),
-    overlayClass: computed(() => ({ embedded: props.embedded === true })),
+    /**
+     * The root's classes. An embedded view drops `modal-overlay` entirely
+     * rather than overriding it: those rules belong to a thing with a scrim
+     * that centres a fixed-size box in the viewport, and a tab is none of
+     * that. It keeps `embedded` so each view can size its own inner box.
+     */
+    overlayClass: computed(() => ({
+      "modal-overlay": props.embedded !== true,
+      "embedded-view": props.embedded === true,
+      embedded: props.embedded === true,
+    })),
     overlayStyle: computed(() => (props.embedded ? undefined : { zIndex: zIndex.value })),
     /** A tab has no scrim, so a click on its root must not close it. */
     dismissOnScrimClick: (dismiss: () => void) => {

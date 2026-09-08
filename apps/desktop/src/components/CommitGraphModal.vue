@@ -34,7 +34,6 @@ onMounted(() => {
 
 <template>
   <div
-    class="modal-overlay"
     :class="overlayClass"
     :style="overlayStyle"
     @click.self="dismissOnScrimClick(() => emit('close'))"
@@ -51,14 +50,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.modal-overlay.embedded {
-  position: relative;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
-  background: none;
-}
-
 .embedded .graph-modal {
   width: 100%;
   height: 100%;

@@ -40,7 +40,6 @@ defineExpose({ bringToFront });
 
 <template>
   <div
-    class="modal-overlay"
     :class="overlayClass"
     :style="overlayStyle"
     @click.self="dismissOnScrimClick(() => emit('close'))"
@@ -62,14 +61,6 @@ defineExpose({ bringToFront });
 </template>
 
 <style scoped>
-.modal-overlay.embedded {
-  position: relative;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
-  background: none;
-}
-
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -79,6 +70,16 @@ defineExpose({ bringToFront });
   justify-content: center;
   padding: 28px;
   background: var(--kn-overlay-scrim);
+}
+
+.embedded .image-preview-modal {
+  width: 100%;
+  max-width: none;
+  max-height: none;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .image-preview-modal {

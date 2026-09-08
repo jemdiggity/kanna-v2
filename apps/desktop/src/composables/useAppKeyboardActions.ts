@@ -148,6 +148,13 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
         selectedItemId: selectedTaskId,
       });
     },
+    closeTabOrWindow: async () => {
+      // ⌘W closes the thing in front: the tab, and the window once there is no
+      // tab left to close. The native File menu item routes here too, so both
+      // paths agree.
+      if (mainTabs.closeActiveTab()) return;
+      await requestCloseCurrentWindow();
+    },
     closeWindow: async () => {
       await requestCloseCurrentWindow();
     },
@@ -168,11 +175,6 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (!opened) toast.info(t("toasts.noTerminalFileLink"));
     },
     toggleFilePreview: () => {
-      const activeTab = mainTabs.activeTab.value;
-      if (activeTab?.kind === "file") {
-        mainTabs.closeTab(activeTab.id);
-        return;
-      }
       const openFileTab = mainTabs.tabs.value.find((tab) => tab.kind === "file");
       if (openFileTab) {
         mainTabs.activateTab(openFileTab.id);
@@ -186,7 +188,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       showFilePickerOnTop();
     },
     toggleTreeExplorer: () => {
-      mainTabs.toggleTab({ kind: "tree" });
+      mainTabs.openTab({ kind: "tree" });
     },
     openInIDE: async () => {
       const item = store.currentItem;
@@ -253,21 +255,21 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       }
       // A repository or app scope has no worktree to run in, so ⌘J opens the
       // shell that scope does have rather than nothing at all.
-      mainTabs.toggleTab({
+      mainTabs.openTab({
         kind: "shell",
         shellScope: mainTabs.hasAgentTab.value ? "worktree" : "repo",
       });
     },
     openShellRepoRoot: () => {
-      mainTabs.toggleTab({ kind: "shell", shellScope: "repo" });
+      mainTabs.openTab({ kind: "shell", shellScope: "repo" });
     },
     showDiff: () => {
       if (!store.selectedRepo && !selectedWorkspaceTask.value) return;
-      mainTabs.toggleTab({ kind: "diff" });
+      mainTabs.openTab({ kind: "diff" });
     },
     showCommitGraph: () => {
       if (!store.selectedRepo) return;
-      mainTabs.toggleTab({ kind: "graph" });
+      mainTabs.openTab({ kind: "graph" });
     },
     showShortcuts: () => {
       if (showShortcutsModal.value) {
@@ -308,7 +310,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       }
     },
     showAnalytics: () => {
-      mainTabs.toggleTab({ kind: "analytics" });
+      mainTabs.openTab({ kind: "analytics" });
     },
     goBack: () => navigateBack(),
     goForward: () => navigateForward(),
@@ -317,7 +319,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     blockTask: () => { handleBlockTask(); },
     editBlockedTask: () => { handleEditBlockedTask(); },
     openPreferences: () => {
-      mainTabs.toggleTab({ kind: "preferences" });
+      mainTabs.openTab({ kind: "preferences" });
     },
     prevTab: () => { cycleTabs(-1); },
     nextTab: () => { cycleTabs(1); },

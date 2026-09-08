@@ -174,7 +174,9 @@ pub fn run() {
             let new_window_item = MenuItemBuilder::with_id(MENU_ID_NEW_WINDOW, "New Window")
                 .accelerator("CmdOrControl+N")
                 .build(app)?;
-            let close_window_item = MenuItemBuilder::with_id(MENU_ID_CLOSE_WINDOW, "Close Window")
+            // ⌘W closes the tab in front and falls through to the window when
+            // there is none, so the item is "Close" rather than "Close Window".
+            let close_window_item = MenuItemBuilder::with_id(MENU_ID_CLOSE_WINDOW, "Close")
                 .accelerator("CmdOrControl+W")
                 .build(app)?;
             let file_submenu = SubmenuBuilder::new(app, "File")

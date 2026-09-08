@@ -5,6 +5,7 @@ import type { ShortcutContext } from "./useShortcutContext";
 export type ActionName =
   | "newTask"
   | "newWindow"
+  | "closeTabOrWindow"
   | "closeWindow"
   | "openFile"
   | "openLatestFileLink"
@@ -106,7 +107,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "openShellRepoRoot", labelKey: "shortcuts.shellRepoRoot", groupKey: "shortcuts.groupOpenInspect", key: ["J", "j"],                  meta: true, shift: true,  display: "⇧⌘J",     context: PREVIEW_MODAL_CONTEXTS },
   { action: "openInIDE",      labelKey: "shortcuts.openInIDE",      groupKey: "shortcuts.groupOpenInspect", key: "o",                         meta: true,               display: "⌘O",       context: ["main"] },
   { action: "newWindow",    labelKey: "shortcuts.newWindow",    groupKey: "shortcuts.groupWorkspace", key: "n",                            meta: true,               display: "⌘N",       context: ["main"] },
-  { action: "closeWindow",  labelKey: "shortcuts.closeWindow",  groupKey: "shortcuts.groupWorkspace", key: "w",                            meta: true,               display: "⌘W",       context: ["main", "diff", "file", "shell", "tree", "graph", "newTask", "transfer"] },
+  { action: "closeTabOrWindow", labelKey: "shortcuts.closeTab", groupKey: "shortcuts.groupWorkspace", key: "w",                    meta: true,               display: "⌘W",       context: ["main", "diff", "file", "shell", "tree", "graph", "newTask", "transfer"] },
+  { action: "closeWindow",  labelKey: "shortcuts.closeWindow",  groupKey: "shortcuts.groupWorkspace", key: ["W", "w"],                     meta: true, shift: true,  display: "⇧⌘W",     context: ["main", "diff", "file", "shell", "tree", "graph", "newTask", "transfer"] },
   // Views — layout and framing controls
   { action: "toggleSidebar", labelKey: "shortcuts.toggleSidebar", groupKey: "shortcuts.groupWorkspace", key: "b",                            meta: true,               display: "⌘B",       context: ["main"] },
   { action: "toggleMaximize", labelKey: "shortcuts.maximize",       groupKey: "shortcuts.groupWorkspace", key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter", context: ["main", "diff", "file", "shell", "tree"] },
@@ -182,7 +184,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions, options?: { befor
     const ctx = options?.context?.();
     for (const def of shortcuts) {
       if (matches(def, e)) {
-        if (isTauri && (def.action === "newWindow" || def.action === "closeWindow")) continue;
+        if (isTauri && (def.action === "newWindow" || def.action === "closeTabOrWindow")) continue;
         if (ctx && !(def.context ?? ["main"]).includes(ctx)) continue;
         e.preventDefault();
         options?.beforeAction?.(def.action);

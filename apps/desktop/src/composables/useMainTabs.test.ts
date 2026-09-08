@@ -120,23 +120,36 @@ describe("useMainTabs", () => {
     expect(mainTabId({ kind: "shell" })).toBe("shell");
   });
 
-  it("toggles a view closed only when it is the one in front", () => {
+  it("brings an already open view forward instead of closing it", () => {
     const { tabs } = setup();
 
-    tabs.toggleTab({ kind: "diff" });
+    tabs.openTab({ kind: "diff" });
     expect(tabs.activeTabId.value).toBe("diff");
 
     tabs.openTab({ kind: "shell" });
     expect(tabs.activeTabId.value).toBe("shell");
 
-    // Diff is open but behind the shell: the shortcut raises it.
-    tabs.toggleTab({ kind: "diff" });
+    // The shortcut that opened a view raises it again rather than toggling it
+    // shut; closing is ⌘W's job.
+    tabs.openTab({ kind: "diff" });
     expect(tabs.activeTabId.value).toBe("diff");
     expect(tabs.isOpen("diff")).toBe(true);
 
-    // Now it is in front, so the same shortcut closes it.
-    tabs.toggleTab({ kind: "diff" });
+    tabs.openTab({ kind: "diff" });
+    expect(tabs.isOpen("diff")).toBe(true);
+  });
+
+  it("closes the tab in front, and reports when there is none to close", () => {
+    const { tabs } = setup();
+
+    expect(tabs.closeActiveTab()).toBe(false);
+
+    tabs.openTab({ kind: "diff" });
+    expect(tabs.closeActiveTab()).toBe(true);
     expect(tabs.isOpen("diff")).toBe(false);
+
+    // Back on the agent session, which is the task rather than a view of it.
+    expect(tabs.closeActiveTab()).toBe(false);
   });
 
   it("moves to the tab that takes the closed one's place", () => {

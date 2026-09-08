@@ -91,10 +91,25 @@ const fullModeEntries = computed(() => {
     ];
   };
 
+  // The first column stacks three groups, so their start rows are computed
+  // rather than written down: a hard-coded offset silently collided the moment
+  // a group gained a shortcut, printing two entries into one grid cell.
+  const stacked: FullModeEntry[] = [];
+  let nextRow = 1;
+  for (const groupKey of [
+    "shortcuts.groupCreateOrganize",
+    "shortcuts.groupWorkspace",
+    "shortcuts.groupAppHelp",
+  ]) {
+    const entries = entriesFor(groupKey, 1, nextRow);
+    if (entries.length === 0) continue;
+    stacked.push(...entries);
+    // One blank row separates a group from the next group's heading.
+    nextRow += entries.length + 1;
+  }
+
   return [
-    ...entriesFor("shortcuts.groupCreateOrganize", 1, 1),
-    ...entriesFor("shortcuts.groupWorkspace", 1, 10),
-    ...entriesFor("shortcuts.groupAppHelp", 1, 15),
+    ...stacked,
     ...entriesFor("shortcuts.groupMoveAround", 2, 1),
     ...entriesFor("shortcuts.groupOpenInspect", 3, 1),
   ];

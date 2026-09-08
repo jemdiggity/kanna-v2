@@ -26,7 +26,7 @@ interface ModalStackEntry {
 
 function modalStackScript(): string {
   return `
-    const entries = Array.from(document.querySelectorAll(".modal-overlay:not(.embedded)"))
+    const entries = Array.from(document.querySelectorAll(".modal-overlay"))
       .filter((overlay) => {
         if (!(overlay instanceof HTMLElement)) return false;
         const style = getComputedStyle(overlay);

@@ -113,7 +113,8 @@
     "oldestUnreadAllRepos": "모든 저장소에서 가장 오래된 읽지 않은 작업",
     "oldestRead": "가장 오래된 읽은 작업",
     "oldestReadAllRepos": "모든 저장소에서 가장 오래된 읽은 작업",
-    "focusSearch": "검색"
+    "focusSearch": "검색",
+    "closeTab": "탭 닫기"
   },
   "shortcutContexts": {
     "main": "메인 단축키",

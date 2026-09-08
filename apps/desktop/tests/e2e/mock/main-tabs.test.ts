@@ -6,7 +6,7 @@ import { WebDriverClient } from "../helpers/webdriver";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { getVueState, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, getVueState, tauriInvoke } from "../helpers/vue";
 
 /**
  * The main content area hosts a task's views as tabs: the agent session plus
@@ -63,6 +63,19 @@ async function pressShortcut(
   options: { key: string; meta?: boolean; shift?: boolean; alt?: boolean },
 ): Promise<void> {
   await client.executeSync(buildGlobalKeydownScript(options));
+}
+
+/**
+ * ⌘W itself belongs to the native File menu in the packaged app, which
+ * dispatches to this action — so a test presses it the way the menu does
+ * rather than synthesising a keydown the web handler deliberately ignores.
+ */
+async function pressCloseTab(client: WebDriverClient): Promise<void> {
+  const result = await callVueMethod(client, "keyboardActions.closeTabOrWindow");
+  if (result && typeof result === "object" && "__error" in result) {
+    throw new Error(String((result as { __error: string }).__error));
+  }
+  await sleep(200);
 }
 
 /** Tabs persist per task, so each test starts from the agent session alone. */
@@ -181,11 +194,17 @@ describe("main content area tabs", () => {
     await waitForActiveTab(client, "shell");
     expect(await openTabIds(client)).toEqual(["agent", "diff", "shell"]);
 
-    // The shortcut that opened a view closes it only when it is in front.
+    // The shortcut that opened a view raises it again rather than toggling it
+    // shut — closing is ⌘W's job.
     await pressShortcut(client, { key: "d", meta: true });
     await waitForActiveTab(client, "diff");
     await pressShortcut(client, { key: "d", meta: true });
-    // Closing the diff hands over to the tab that takes its place.
+    await waitForActiveTab(client, "diff");
+    expect(await openTabIds(client)).toEqual(["agent", "diff", "shell"]);
+
+    // ⌘W closes the tab in front and hands over to the one that takes its
+    // place.
+    await pressCloseTab(client);
     await waitForActiveTab(client, "shell");
     expect(await openTabIds(client)).toEqual(["agent", "shell"]);
 
@@ -194,7 +213,7 @@ describe("main content area tabs", () => {
     await sleep(400);
     expect(await openTabIds(client)).toEqual(["agent", "shell"]);
 
-    await pressShortcut(client, { key: "j", meta: true });
+    await pressCloseTab(client);
     await waitForActiveTab(client, "agent");
     expect(await openTabIds(client)).toEqual(["agent"]);
   });
@@ -231,7 +250,7 @@ describe("main content area tabs", () => {
     const hiddenShell = await client.executeSync<boolean>(
       `const shell = document.querySelector(".shell-modal");
        if (!shell) return false;
-       const overlay = shell.closest(".modal-overlay");
+       const overlay = shell.closest(".embedded-view");
        return Boolean(overlay) && getComputedStyle(overlay).display === "none";`
     );
     expect(hiddenShell).toBe(true);

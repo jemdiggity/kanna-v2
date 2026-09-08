@@ -251,20 +251,6 @@ export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
     state.activeId = (state.tabs[index] ?? state.tabs[index - 1])?.id ?? "";
   }
 
-  /**
-   * The keyboard-shortcut semantics the ephemeral modals had: the shortcut
-   * that opened a view closes it again when that view already has focus, and
-   * raises it when it is open but behind something else.
-   */
-  function toggleTab(descriptor: MainTabDescriptor): void {
-    const id = mainTabId(descriptor);
-    if (isOpen(id) && activeTabId.value === id) {
-      closeTab(id);
-      return;
-    }
-    openTab(descriptor);
-  }
-
   function cycleTab(direction: -1 | 1): void {
     const ordered = tabs.value;
     if (ordered.length < 2) return;
@@ -273,6 +259,12 @@ export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
     activateTab(ordered[next].id);
   }
 
+  /**
+   * Close the tab in front, the way ⌘W closes a tab everywhere else. Returns
+   * false when there is nothing to close — an agent session, which belongs to
+   * the task rather than being a view of it, or an empty scope — and the
+   * caller closes the window instead.
+   */
   function closeActiveTab(): boolean {
     const id = activeTabId.value;
     if (!id || id === AGENT_TAB_ID) return false;
@@ -298,7 +290,6 @@ export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
     closeTab,
     closeActiveTab,
     activateTab,
-    toggleTab,
     cycleTab,
     dropScope,
   };

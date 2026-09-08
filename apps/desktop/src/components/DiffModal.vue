@@ -78,7 +78,6 @@ onMounted(() => {
 
 <template>
   <div
-    class="modal-overlay"
     :class="[{ maximized, standalone }, overlayClass]"
     :style="overlayStyle"
     @click.self="dismissOnScrimClick(() => emit('close'))"
@@ -133,14 +132,6 @@ onMounted(() => {
 }
 
 .modal-overlay.standalone {
-  background: none;
-}
-
-.modal-overlay.embedded {
-  position: relative;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
   background: none;
 }
 

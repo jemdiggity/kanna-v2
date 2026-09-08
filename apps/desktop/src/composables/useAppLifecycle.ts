@@ -42,7 +42,7 @@ type AppUpdateController = ReturnType<typeof useAppUpdate>;
 type NativeKeyboardActions = Pick<
   KeyboardActions,
   | "newWindow"
-  | "closeWindow"
+  | "closeTabOrWindow"
   | "navigateUp"
   | "navigateDown"
   | "navigateRepoUp"
@@ -361,7 +361,7 @@ export function useAppLifecycle({
 
     try {
       const unlistenNativeCloseWindow = await listenCurrentWebviewWindow(WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT, async () => {
-        await getKeyboardActions().closeWindow();
+        await getKeyboardActions().closeTabOrWindow();
       });
       appUnlisteners.push(unlistenNativeCloseWindow);
     } catch (e: unknown) {

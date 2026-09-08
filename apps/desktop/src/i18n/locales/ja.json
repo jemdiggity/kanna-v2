@@ -101,7 +101,7 @@
     "createRepo": "リポジトリ作成",
     "importClone": "インポート / クローン",
     "newWindow": "新しいウィンドウ",
-    "closeWindow": "ウィンドウを閉じる",
+    "closeWindow": "ウインドウを閉じる",
     "goBack": "戻る",
     "goForward": "進む",
     "allShortcuts": "すべてのショートカット",
@@ -113,7 +113,8 @@
     "oldestUnreadAllRepos": "全リポジトリで最も古い未読タスク",
     "oldestRead": "最も古い既読タスク",
     "oldestReadAllRepos": "全リポジトリで最も古い既読タスク",
-    "focusSearch": "検索"
+    "focusSearch": "検索",
+    "closeTab": "タブを閉じる"
   },
   "shortcutContexts": {
     "main": "メインショートカット",

@@ -355,21 +355,18 @@ describe("file preview", () => {
     expect(await frontModeBadgeText()).toBe("Rendered");
     await waitForRenderedMarkdown();
 
-    // ⌥⌘P closes whichever file is in front; the one that takes its place
-    // comes forward.
+    // ⌥⌘P brings a file forward; it never closes one.
+    await pressKey("d", { meta: true });
+    await waitForPreviewHidden();
     await pressKey("π", { meta: true, alt: true, code: "KeyP" });
-    expect(await openFileTabPaths()).toEqual(["src/index.txt"]);
-    expect(await previewedFilePath()).toBe("src/index.txt");
+    expect(await openFileTabPaths()).toEqual(["src/index.txt", "README.md"]);
+    await waitForPreviewVisible();
 
-    await pressKey("π", { meta: true, alt: true, code: "KeyP" });
+    // Recall with nothing open is the next test's subject, which states its
+    // selection explicitly; this one just leaves a clean tab set behind.
+    await client.executeSync(closeMainTabsScript(["file", "diff"]));
+    await sleep(300);
     expect(await openFileTabPaths()).toEqual([]);
-
-    // With none open it recalls the last file this task opened.
-    await pressKey("π", { meta: true, alt: true, code: "KeyP" });
-    expect(await previewedFilePath()).toBe("README.md");
-
-    await pressKey("Escape");
-    await client.waitForNoElement(".preview-modal", 5000);
   });
 
   it("keeps file preview recall scoped to the selected task", async () => {

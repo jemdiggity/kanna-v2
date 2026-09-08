@@ -321,7 +321,7 @@ describe("modal tear-off", () => {
     await client.waitForAppReady();
     await dismissStartupShortcuts(client);
     await client.waitForElement(".app", 5_000);
-    await client.waitForElement(".modal-overlay.embedded .tree-modal", 5_000);
+    await client.waitForElement(".embedded-view .tree-modal", 5_000);
     await client.waitForText(".tree-modal", "README.md", 5_000);
     await client.waitForText(".tree-modal", CURRENT_FILE, 5_000);
     expect(await visibleSelection(client)).toEqual(selectedAtDrag);
@@ -388,7 +388,7 @@ describe("modal tear-off", () => {
     await client.waitForAppReady();
     await dismissStartupShortcuts(client);
     await client.waitForElement(".app", 5_000);
-    await client.waitForElement(".modal-overlay.embedded .diff-modal", 5_000);
+    await client.waitForElement(".embedded-view .diff-modal", 5_000);
     await client.waitForText(".diff-view", CURRENT_DIFF_FILE, 10_000);
     expect(await visibleSelection(client)).toEqual(selectedAtDrag);
     await assertFullWindowModal(client, ".diff-modal", modalRect);

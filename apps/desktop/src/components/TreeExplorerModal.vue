@@ -228,7 +228,6 @@ function isDimmed(entry: TreeNode): boolean {
 <template>
   <div
     v-show="!suspended"
-    class="modal-overlay"
     :class="[{ maximized, standalone }, overlayClass]"
     :style="overlayStyle"
     @click.self="dismissOnScrimClick(() => emit('close'))"
@@ -395,19 +394,12 @@ function isDimmed(entry: TreeNode): boolean {
   box-shadow: none;
 }
 
-.modal-overlay.embedded {
-  position: relative;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
-  background: none;
-}
-
 .embedded .tree-modal {
   width: 100%;
   height: 100%;
   border: none;
   border-radius: 0;
+  box-shadow: none;
 }
 
 .modal-overlay.standalone {
@@ -488,6 +480,17 @@ function isDimmed(entry: TreeNode): boolean {
   position: relative;
   display: flex;
   flex-direction: column;
+}
+
+/*
+ * As a tab the explorer is far wider than the 780px box it was drawn for, and
+ * three equal columns stretched a directory listing across the whole panel.
+ * Hold the browsing columns at a readable width — the way a column browser
+ * does — and let the preview take the slack.
+ */
+.embedded .col-parent,
+.embedded .col-current {
+  flex: 0 0 clamp(220px, 22vw, 340px);
 }
 
 .miller-col + .miller-col {

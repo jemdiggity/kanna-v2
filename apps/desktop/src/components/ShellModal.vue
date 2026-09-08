@@ -61,7 +61,6 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, _cols
 
 <template>
   <div
-    class="modal-overlay"
     :class="[{ maximized }, overlayClass]"
     :style="overlayStyle"
     @click.self="dismissOnScrimClick(() => emit('close'))"
@@ -98,14 +97,6 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, _cols
   flex-direction: column;
   overflow: hidden;
   padding: 4px;
-}
-
-.modal-overlay.embedded {
-  position: relative;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
-  background: none;
 }
 
 .embedded .shell-modal {
