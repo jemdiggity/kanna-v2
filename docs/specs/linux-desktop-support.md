@@ -4,7 +4,13 @@ Date: 2026-09-07
 
 Source task: `869376a8`
 
-Status: researched recommendation; Linux execution has not yet been verified.
+Status: Phase 0 complete (2026-09-07, task `81ab28f1`). The ARM64 Linux VM
+exists, all six pinned sidecars build and the daemon binary runs on it, and the
+identity, PTY, and launcher spikes have been measured. Phases 1–3 remain
+researched recommendation. Measured results now supersede the assumptions they
+replace; see
+[platform baseline](../2026-09-07-linux-phase0-platform-baseline.md) and
+[identity/PTY/launcher spikes](../2026-09-07-linux-identity-pty-launcher-spike.md).
 
 ## Context and recommendation
 
@@ -18,12 +24,14 @@ work to dogfood plan-build-review/dynamic workflows. This document is the
 reference for those tasks, not an instruction to implement the entire port in
 one task or a finalized specification of undecided platform policy.
 
-The original assignment was discussion-only. This document records that
-assessment following the owner's subsequent request to save and commit it.
-No Linux implementation, Linux build, VM setup, or Linux test run was performed
-in the assessment. Statements about current code describe the inspected
-checkout; upstream availability was checked in September 2026. Implementation
-tasks must recheck their actual base and supported dependency versions.
+The original assignment was discussion-only, and this document recorded that
+assessment. Statements about current code describe the inspected checkout;
+upstream availability was checked in September 2026. Implementation tasks must
+recheck their actual base and supported dependency versions.
+
+Phase 0 has since run. Where a claim below was an assumption and has since been
+measured, this document says so inline and points at the dated evidence
+document. Everything not marked as measured is still an assessment.
 
 ## System boundary
 
@@ -54,21 +62,24 @@ Read [architecture](../dev/architecture.md), the
 “Works as-is” means the core design appears reusable, not that a Linux binary
 has passed tests. Effort is concentrated in platform integration and evidence.
 
+Rows marked **[measured]** were checked on the Phase 0 VM; the rest are still
+assessment.
+
 | Component | Assessment | Required work or validation |
 | --- | --- | --- |
 | Task/workflow model, SQLite, HTTP/KSP protocols | Works as-is at the core | Bundled SQLite, server-owned task lifecycle, durable inputs, and event feeds need no identified redesign. Exercise their real wiring on Linux. |
-| Server startup and paths | Port work | Replace macOS application-support defaults consistently; define Linux data/config/runtime locations; remove hardcoded zsh assumptions; audit native TLS dependencies. |
+| Server startup and paths | Port work **[measured: confirmed]** | The Linux daemon resolves its data dir to `~/Library/Application Support/Kanna/`, and `/bin/zsh` absence accounts for most of the 22 Linux server test failures. Replace macOS application-support defaults consistently; define Linux data/config/runtime locations; remove hardcoded zsh assumptions; audit native TLS dependencies. |
 | Loopback/LAN authorization | Works as-is conceptually | Preserve local credentials, Host checks, browser classification, and WebSocket authentication. Test actual WebKitGTK request behavior. |
-| Basic PTY spawn/stream | Port work, largely reusable | Unix primitives carry over; validate controlling terminal, partial writes, EOF/EIO, resize, signals, descriptor inheritance, and cleanup. |
-| Daemon identity and handoff | Substantial port work | Implement Linux process, socket-peer, terminal, and pipe ownership checks. Existing stubs cannot support safe startup. |
-| Ghostty and terminal recovery | Port/build work | Build pinned native dependencies and recovery sidecar; validate snapshots, serialization, resource discovery, and transferred pipe ownership. |
+| Basic PTY spawn/stream | Port work, largely reusable **[measured]** | Resize, controlling terminal, and fd transfer verified working; `EIO`-not-EOF on hangup and the absent 1,022-byte split are the two concrete deltas. Unix primitives carry over; validate controlling terminal, partial writes, EOF/EIO, resize, signals, descriptor inheritance, and cleanup. |
+| Daemon identity and handoff | Substantial port work **[measured: confirmed, and larger than "implement the stubs"]** | The Linux daemon aborts at `SuccessorAuthorizer::capture()` today. Every primitive has a Linux facility, but three carry different guarantees and the launcher shape is constrained (see the spike document). Existing stubs cannot support safe startup. |
+| Ghostty and terminal recovery | Port/build work **[measured: builds]** | Pinned Zig 0.15.2 + Ghostty fork build natively; `kanna-terminal-recovery` builds and its tests pass. Still validate snapshots and transferred pipe ownership at runtime. Build pinned native dependencies and recovery sidecar; validate snapshots, serialization, resource discovery, and transferred pipe ownership. |
 | Vue stores/components/KeepAlive | Mostly reusable; GUI port work | Test activation/deactivation, terminal caches, hidden geometry, focus, and reconnect under WebKitGTK. |
 | xterm and desktop integrations | Port work | WebGL/fallback rendering, fonts, IME, clipboard images, drag/drop, scrolling, scaling, shortcuts, and platform window behavior. |
-| `kd` | Port work | Keep ports, tmux identity, and `.build/`; make setup, paths, launch plans, toolchain/release targets, and test launchers platform-aware. |
+| `kd` | Port work **[measured: `kd setup --check` ported and passing on Linux]** | Keep ports, tmux identity, and `.build/`; make setup, paths, launch plans, toolchain/release targets, and test launchers platform-aware. |
 | Agent CLIs | Upstream Linux availability; Kanna integration unverified | Validate each provider's discovery, authentication, hooks/MCP, resume, terminal negotiation, and input behavior. |
 | Mobile/discovery/relay | Mostly reusable; bootstrap work | Non-macOS Bonjour code already exists. Verify discovery, pairing, transfer, and cloud credentials without assuming a renderer. |
 | Desktop E2E | Port work | Adapt the macOS-oriented harness to a Linux WebDriver backend and real Linux app launch. |
-| Packaging, updates, service ownership | Platform contract needs design | Choose dependency boundary, installation layout, update owner, and lifetime semantics together. |
+| Packaging, updates, service ownership | Platform contract needs design **[measured: the dependency set is now known — `libc++1`, `libc++abi1`, `libssl3t64`, glibc ≥ 2.39]** | Choose dependency boundary, installation layout, update owner, and lifetime semantics together. |
 
 ## Daemon: the first substantial blocker
 
@@ -122,6 +133,20 @@ namespaces, PID reuse, reparenting, and unavailable identity must fail safely.
 Sources: [Linux Unix sockets](https://man7.org/linux/man-pages/man7/unix.7.html)
 and [process stat fields](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html).
 
+**Measured (2026-09-07).** Every primitive above has a working Linux facility,
+and the running Linux `kanna-daemon` binary aborts exactly here — at
+`SuccessorAuthorizer::capture()`, on its *own* pid, because `process_info`
+returns `None`. Three of the seven differ in kind rather than spelling, and each
+changes a guarantee: `starttime` has 10 ms resolution (macOS has microseconds),
+both ends of a Linux pipe share one inode so "the peer holds the far end" is not
+provable — only "someone holds this pipe in the opposite direction" — and
+"no controlling terminal" is `tty_nr == 0`, not `NODEV`. `/proc/<pid>/exe` gains
+a ` (deleted)` suffix after any in-place binary replacement, so a raw path
+comparison fails across every upgrade. `SO_PEERPIDFD` and pidfds are available
+and stronger than the macOS primitives. Yama `ptrace_scope` 1 *and* 2 leave all
+the required `/proc` reads working. Full primitive-by-primitive table:
+[identity/PTY/launcher spikes](../2026-09-07-linux-identity-pty-launcher-spike.md).
+
 ### Launcher and service lifecycle
 
 The daemon captures its original launcher's kernel-derived executable while
@@ -144,6 +169,17 @@ mount paths and executable replacement can change kernel-reported paths.
 Stable paths help, but a real package-upgrade handoff test is required; do not
 simply loosen path comparison to make upgrades pass.
 
+**Measured (2026-09-07).** "Not, by itself, an equivalent design" turns out to
+be too gentle: a daemon whose direct parent is `systemd --user` cannot capture a
+launcher trust root *at all*. The user manager holds capabilities, so the kernel
+marks it non-dumpable and `readlink("/proc/<pid>/exe")` returns `EACCES` to the
+same uid. An ordinary user binary as parent (`gnome-shell`, `bash`) is readable.
+The recommended shape — a Kanna-owned per-user supervisor started by a user unit
+— is therefore the only one that satisfies both the trust root and
+cgroup/linger lifetime. `enable-linger` was enabled on the VM and left enabled;
+`KillUserProcesses` is `false` here only as a distro default. See the spike
+document for the parent chains and the alternatives table.
+
 ## Server, clients, and dependencies
 
 `kanna-server` already owns bundled `rusqlite`, task creation, terminal
@@ -159,11 +195,26 @@ Identified platform assumptions include:
 - Server workspace execution and login-shell PATH discovery contain direct
   `/bin/zsh` invocations. Choose a supported shell policy rather than assuming
   zsh exists on a clean Linux machine.
+  **Measured (2026-09-07):** absent `zsh` accounts for 15 of 22 `kanna-server`
+  test failures on Linux. Installing it is *not* the fix: a freshly installed
+  `zsh` with no `~/.zshrc` runs the interactive `zsh-newuser-install` wizard on
+  every login shell, clears the screen and waits for a keypress, which Kanna's
+  PTY bootstrap reads instead of its setup output. The policy must name a shell
+  that is present and non-interactive out of the box, not relocate the
+  hardcoded path.
 - Sidecar discovery must cover Linux installed and development layouts,
   including recovery, transfer, CLI/MCP, and bundled definitions.
 - Server and desktop dependencies include `native-tls` consumers. Bundled
   SQLite and vendored libgit2/OpenSSL settings elsewhere do not prove the
   whole release is self-contained. Inspect the actual linked artifacts.
+  **Measured (2026-09-07):** confirmed, and it is a hard build failure, not a
+  packaging nicety. `kanna-cli` and `kanna-mcp` reach `openssl-sys` through
+  `reqwest`'s default features; `kanna-server` reaches it through
+  `tokio-tungstenite`'s `native-tls` feature despite already using `rustls-tls`
+  for `reqwest`. All three refused to build until `libssl-dev` was installed.
+  The vendored `openssl-src` in `Cargo.lock` comes from the desktop crate's
+  `git2 vendored-openssl` and does not cover them. Bundled SQLite is confirmed:
+  no binary links `libsqlite3`.
 
 Preserve `lan_trust`: a loopback address is not authorization for a browser.
 Keep Host validation, Origin/Fetch Metadata classification, the local `0600`
@@ -251,6 +302,15 @@ attempt to discover an Apple SDK. Validate pinned source/dependency fetching,
 static linking where intended, and reproducible builds. Do not widen the port
 into an unrelated Ghostty/Zig migration unless evidence requires it.
 
+**Measured (2026-09-07).** Evidence does not require it. The pinned Zig 0.15.2
+linux-aarch64 toolchain built the pinned Ghostty fork (`665a03f3`) natively for
+all four `libghostty-vt-sys` consumers, with the macOS CLT patch never
+consulted, and all six sidecars link. The one consequence to carry forward is
+that Zig links LLVM's `libc++`/`libc++abi`, which a base Ubuntu image does not
+have — a packaging dependency, not a build problem. `cargo` was used directly:
+the Bazel graph is still Darwin-shaped (`supported_platform_triples`), which is
+Phase 3 scope.
+
 ### Decide the Linux meaning of the vendoring rule
 
 The current rule prohibits dependencies accidentally inherited from a build
@@ -288,6 +348,10 @@ because current upstream Tauri documentation describes cross-platform testing.
 
 First investigate adapting the existing W3C client to Linux `tauri-driver`
 plus `WebKitWebDriver`, preserving task-specific ports and test isolation.
+**Measured (2026-09-07):** `tauri-plugin-webdriver 0.2.1` itself compiles on
+Linux as part of `cargo check -p kanna-desktop`. That removes one assumed
+blocker; it says nothing about a real Linux app launch or a working
+`WebKitWebDriver` session, which remain the actual work.
 Current upstream also offers an embedded WDIO route; it is a different
 integration from the current plugin, and adopting it should be a measured
 choice rather than an automatic test-stack rewrite. Real GUI tests must run
@@ -313,6 +377,22 @@ size. Do not replace 1,022 with another magic “Linux queue size.” The daemon
 does not control consumer read boundaries; bracketed-paste framing gives a
 supporting consumer a logical boundary independent of those reads.
 
+**Measured (2026-09-07).** The same 1,047-byte write into a pty master came back
+from the slave as a *single* 1,047-byte read — in canonical and raw mode, framed
+and unframed. There is no split to assert, so
+`raw_input_at_the_incident_length_is_split_by_the_pty_queue` cannot pass on
+Linux and must stay the macOS fixture. Two other PTY behaviours are concrete
+code changes rather than open questions: the master read returns `EIO`, not 0,
+once the last slave fd closes, so `output.rs`'s stream loop takes its error
+branch — and logs `log::error!("PTY read error …")` — on every normal Linux
+session end, and
+`FD_CLOEXEC` does not travel across `SCM_RIGHTS` — confirmed — but
+`fd_transfer.rs` already fences that window with `fd::spawn_fd_boundary()`
+precisely because macOS lacks `MSG_CMSG_CLOEXEC`; Linux can additionally pass
+the flag to close the window in the kernel, which is a deliberate improvement
+rather than a fix. Resize, controlling-terminal acquisition, and fd transfer
+otherwise carry over unchanged.
+
 The entire `crates/daemon/tests/handoff.rs` suite and several process
 adoption/cleanup tests are macOS-gated. Port their behavioral coverage, not
 just compilation guards. Required Linux evidence includes forged identity/fd
@@ -320,6 +400,20 @@ rejection, detached descendant teardown, fd leak prevention, server restart,
 authenticated daemon replacement, snapshot continuity, and real HTTP input
 receipt plus durable ledger state. Existing shell/Perl fixtures and command
 availability also need an explicit Linux test environment.
+
+**Measured (2026-09-07).** The Linux `kanna-daemon` test picture is one blocker,
+not a hundred: 651 tests pass and 113 fail, and every failure traces to the
+`proc_info` stubs — 7 unit tests read them directly, and all 106 integration
+failures across `agent_sessions`, `detection_rules`, `reconnect`,
+`recovery_service`, and `worktree_isolation` are the harness failing to reach a
+daemon that refused to start. Detached descendant teardown is already
+demonstrably broken: the `--no-fail-fast` run left `sleep 300` escapees
+reparented to init and holding the harness's stdout — one of them a deliberate
+SIGTERM-ignoring fixture that needed `SIGKILL` — because the session sweep needs
+`all_process_info()` (empty vec on Linux) and `slave_device_of_master()`
+(`None`) to find processes that have left the process group. A Linux CI lane
+will hang on that until the identity backend exists. Guest coreutils are the
+Rust uutils build, which the shell/Perl fixtures should not assume away.
 
 The [2026-09-06 PTY receipt note](../2026-09-06-logical-input-pty-receipt-e2e-note.md)
 records both the incident and narrower test evidence. It also reports inherited
@@ -329,9 +423,24 @@ test status.
 
 ## Development on the Mac Studio
 
-Use a full ARM64 Linux VM alongside macOS. The owner does not need to acquire
-a Linux box. A VM provides a real Linux kernel for PTYs, `/proc`, credentials,
-handoff, and service lifecycle testing, plus a desktop for WebKitGTK work.
+**Measured (2026-09-07).** The VM exists and is the Phase 0 evidence
+environment. Full facts, toolchain versions, and a fresh-VM checklist are in the
+[platform baseline](../2026-09-07-linux-phase0-platform-baseline.md); the
+essentials:
+
+| Fact | Value |
+| --- | --- |
+| Hypervisor | UTM (QEMU aarch64, Apple hypervisor), VM `Linux`, UUID `AFA4B3BF-1874-4CB2-AACD-82C47B8C2EC5` |
+| Address | `192.168.64.2`, hypervisor shared/NAT network — invisible to LAN mDNS; lease in `/var/db/dhcpd_leases` |
+| Access | `ssh kanna-linux-vm` (key `~/.ssh/kanna-linux-vm_ed25519`, user `jeremy`, password-free); `sudo` still prompts |
+| Guest | Ubuntu 26.04.1 LTS aarch64, kernel 7.0.0-31, glibc 2.43, systemd 259, GNOME 50 / Wayland |
+| Capacity | 8 vCPU, 15 GiB RAM, 64 GB disk (below the 100–150 GB suggested below) |
+| Shell | `bash` login shell, `/bin/sh` is `dash`, **no `zsh`**; coreutils are the Rust uutils build |
+
+Do not drive the guest through the UTM console window — it drops fast synthetic
+keystrokes and captures Ctrl+Alt. Use SSH.
+
+The original guidance below stands for anyone rebuilding this environment.
 
 | Option | Role | Trade-off |
 | --- | --- | --- |
@@ -365,18 +474,42 @@ References: [UTM](https://mac.getutm.app/),
 
 These are rough engineering effort ranges for someone familiar with Kanna,
 including meaningful verification. They are not calendar commitments or
-measured implementation estimates. Re-estimate after the Linux build and
-identity spikes; graphics and installed upgrades are major uncertainties.
+measured implementation estimates. The spikes this section asked for have now
+run; the table below is the re-estimate, and the paragraph after it says what
+moved and why. Graphics and installed upgrades remain the major uncertainties —
+Phase 0 touched neither.
 
 | Phase | Deliverable and exit gate | Effort |
 | --- | --- | --- |
-| 0: Bound the platform | Confirm VM/distro/architecture and dependency policy; prove pinned sidecar builds; measure process identity and PTY behavior; decide launcher ownership. | S–M: 1–2 engineering weeks |
-| 1: Headless worker | Daemon, server, CLI/MCP, definitions and recovery resources; Linux paths/shells; authenticated startup/handoff. Exercise create → execute → durable input → completion → stage fork → close, server restart, and daemon replacement. | L: 4–8 weeks |
-| 2: GUI preview | Real Tauri app through `kd`, terminal matrix, Linux integrations/shortcuts, WebDriver lane, local credential tests, and paired mobile access. | L: 3–6 additional weeks |
-| 3: Supported distribution | Clean-machine install without developer tools, signed update strategy, installed live-session upgrade tests, supported display/hardware matrix, release automation, support documentation. | M–L: 2–4 additional weeks |
+| 0: Bound the platform | Confirm VM/distro/architecture and dependency policy; prove pinned sidecar builds; measure process identity and PTY behavior; decide launcher ownership. | **Done 2026-09-07**, inside one working session — well below the original S–M estimate, because the build spike came out clean |
+| 1: Headless worker | Daemon, server, CLI/MCP, definitions and recovery resources; Linux paths/shells; authenticated startup/handoff. Exercise create → execute → durable input → completion → stage fork → close, server restart, and daemon replacement. **Now also: a Kanna-owned per-user supervisor/launcher binary and its user unit.** | L: 5–8 weeks (was 4–8; the low end is no longer plausible) |
+| 2: GUI preview | Real Tauri app through `kd`, terminal matrix, Linux integrations/shortcuts, WebDriver lane, local credential tests, and paired mobile access. | L: 3–6 additional weeks (unchanged; the build-side risk is gone, the runtime risk is not) |
+| 3: Supported distribution | Clean-machine install without developer tools, signed update strategy, installed live-session upgrade tests, supported display/hardware matrix, release automation, support documentation. **Now also: Linux triples in the `crate_universe` graph.** | M–L: 2–4 additional weeks (unchanged) |
 
-The rounded planning envelope is approximately 10–20 engineering weeks for a
-narrow supported GUI release; the individual ranges total 10–20 weeks. Multiple
+What the evidence moved:
+
+- **Down.** All six pinned sidecars build with unmodified crate sources; the
+  pinned Zig 0.15.2 + Ghostty fork builds natively; `cargo clippy --workspace
+  --all-targets` exits 0; `cargo check -p kanna-desktop` compiles against
+  WebKitGTK 2.52 with a single dead-code warning, and even
+  `tauri-plugin-webdriver` compiles. The test baseline is healthy: 313 of 314
+  daemon lib tests and 1326 of 1348 server tests pass, and the failures
+  concentrate into two causes (the identity stub, and `/bin/zsh`).
+- **Up.** Launcher ownership is not a configuration choice: it needs a new
+  Kanna-owned supervisor binary, which is a component with its own lifecycle,
+  packaging, and upgrade-handoff story. The identity backend is not a
+  transcription of the macOS one — three primitives carry different guarantees
+  and the `/proc/<pid>/exe` ` (deleted)` behaviour needs a defined rule. The
+  29 `handoff.rs` tests and 14 macOS-gated unit tests need behavioural Linux
+  equivalents, and the macOS 1,022-byte receipt premise has to be replaced with
+  portable tests rather than ported.
+- **Unchanged and still unmeasured.** Graphics, fonts, IME, clipboard, GPU
+  context loss, installed upgrades, x86-64, agent-CLI integration, and every
+  mobile/cloud bootstrap question. Nothing in Phase 0 supports a claim about
+  any of them.
+
+The rounded planning envelope remains approximately 10–20 engineering weeks for
+a narrow supported GUI release, now with the low end less likely. Multiple
 distributions, Flatpak, and simultaneous architecture rollout increase scope.
 Do not infer that multiple agents divide elapsed time linearly: identity,
 launcher, package layout, and acceptance decisions have dependencies.
@@ -396,19 +529,58 @@ when a decision is made or a measured result replaces an assumption.
 
 ## Decisions before implementation commitments
 
+Phase 0 was scoped to produce evidence for these, not to make them. None is the
+build stage's to settle; each still needs the owner. What changed is that four
+of the six now have measurements attached rather than assumptions.
+
 1. Is the launch product a local headless worker, a full desktop replacement,
    or both in that order? Recommendation: both in that order.
+   **Still open — no new evidence; unchanged recommendation.**
 2. Which distro/version, kernel baseline, CPU architectures, and display
    environments are supported? Start with one ARM64 VM baseline for local
    development; explicitly schedule x86-64 CI and release validation.
+   **Evidence now in hand.** The development baseline is Ubuntu 26.04.1 aarch64,
+   kernel 7.0.0-31, glibc 2.43. The *artifacts* built there need glibc ≥ 2.39
+   (measured from their versioned symbols), so they would run on Ubuntu 24.04
+   but not 22.04. Nothing about x86-64 was tested. The owner still chooses the
+   supported floor and whether ARM64-only development is acceptable through
+   Phase 1.
 3. Does the vendoring rule permit declared OS/runtime libraries? Are agent
    CLIs and repository toolchains user-managed prerequisites?
+   **Evidence now in hand.** The measured runtime dependency set is
+   `libc++1` + `libc++abi1` (from the pinned Zig/Ghostty link, in four of six
+   sidecars, and *not* present on a base Ubuntu image) and `libssl3t64` (from
+   two crates still routing TLS through `native-tls`). Bundled SQLite is
+   confirmed — no `libsqlite3` in any binary. The owner decides whether a deb
+   declaring those is "vendored enough", or whether the `native-tls` consumers
+   move to `rustls` first. Agent CLIs and repo toolchains remain unaddressed.
 4. Who owns launcher startup, daemon/server recovery, installation, and
    updates? Must sessions survive logout as well as app restart and upgrade?
+   **Evidence now in hand, and it eliminates one option outright.** A daemon
+   launched directly by `systemd --user` can never capture a launcher trust
+   root: the user manager holds capabilities, so it is non-dumpable and
+   `/proc/<pid>/exe` is `EACCES` even to the same uid. The recommendation is a
+   Kanna-owned per-user supervisor binary started by a user unit — an ordinary
+   readable executable that owns startup and authorization while server and
+   daemon stay independent processes. `enable-linger` is what buys
+   logout survival; `KillUserProcesses=false` is only a distro default and must
+   not be promised. Details and the alternatives table are in the
+   [spike document](../2026-09-07-linux-identity-pty-launcher-spike.md).
 5. Is local-only headless operation sufficient initially, or are paired mobile
    access and unattended cloud authentication release requirements?
+   **Still open — no new evidence.**
 6. Which real Linux users/hardware will supply graphics and desktop acceptance
    evidence beyond the Studio VM?
+   **Still open — no new evidence.** The VM's GNOME/Wayland session is a real
+   session but a virtual GPU; nothing here supports a graphics claim.
+
+A seventh question surfaced during Phase 0 and belongs with these:
+
+7. Should the daemon adopt pidfds (`pidfd_open`, `pidfd_send_signal`,
+   `SO_PEERPIDFD`) on Linux rather than mirroring the macOS pid + start-time
+   shape? They are available and measurably stronger, but they set a kernel
+   floor (5.3 / 5.1 / 6.5), and Linux `starttime` has only 10 ms resolution
+   against macOS's microseconds. Decide explicitly, with the floor written down.
 
 No answer to these questions should be inferred from the fact that Linux
 support is planned. Resolve them in the owning implementation plans and record

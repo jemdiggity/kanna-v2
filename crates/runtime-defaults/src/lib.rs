@@ -388,7 +388,18 @@ pub fn current_target_triple() -> &'static str {
     {
         "x86_64-apple-darwin"
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+    {
+        "aarch64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    {
+        "x86_64-unknown-linux-gnu"
+    }
+    #[cfg(not(all(
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )))]
     {
         "unknown-target"
     }
@@ -774,6 +785,22 @@ mod tests {
         assert_eq!(path.parent(), Some(Path::new("/tmp")));
         assert!(path.as_os_str().len() < 104);
         assert_ne!(path, socket_path(daemon_dir));
+    }
+
+    #[test]
+    fn current_target_triple_matches_the_rust_host_triple() {
+        // Sidecar discovery names files `<binary>-<triple>` and looks in
+        // `.build/<triple>/<profile>`, so this must equal the triple cargo
+        // builds under. `unknown-target` here means every staged sidecar is
+        // invisible to the runtime.
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        assert_eq!(current_target_triple(), "aarch64-apple-darwin");
+        #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+        assert_eq!(current_target_triple(), "x86_64-apple-darwin");
+        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+        assert_eq!(current_target_triple(), "aarch64-unknown-linux-gnu");
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        assert_eq!(current_target_triple(), "x86_64-unknown-linux-gnu");
     }
 
     #[test]
