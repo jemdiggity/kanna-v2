@@ -19,10 +19,42 @@ async function commandVersion(runner: CommandRunner, command: string, args: stri
   return result.stdout.trim() || result.stderr.trim() || command;
 }
 
-export async function checkSetupPrerequisites(runner: CommandRunner, repoRoot: string): Promise<SetupResult> {
-  const checks: SetupCheck[] = [];
-  const xcode = await runner.run("xcode-select", ["-p"]);
-  checks.push({ name: "xcode", ok: xcode.exitCode === 0, message: xcode.exitCode === 0 ? xcode.stdout.trim() : "install with: xcode-select --install" });
+async function checkNativeToolchain(runner: CommandRunner, platform: NodeJS.Platform): Promise<SetupCheck[]> {
+  if (platform === "darwin") {
+    const xcode = await runner.run("xcode-select", ["-p"]);
+    return [{
+      name: "xcode",
+      ok: xcode.exitCode === 0,
+      message: xcode.exitCode === 0 ? xcode.stdout.trim() : "install with: xcode-select --install"
+    }];
+  }
+
+  // Linux has no single developer-tools bundle: check the C/C++ compiler and
+  // the GTK/WebKitGTK development packages Tauri links against.
+  const compiler = await commandVersion(runner, "cc", ["--version"]);
+  const guiLibs = await runner.run("pkg-config", ["--exists", "gtk+-3.0", "webkit2gtk-4.1"]);
+  return [
+    {
+      name: "cc",
+      ok: compiler !== null,
+      message: compiler?.split("\n")[0] ?? "missing command: cc (install build-essential)"
+    },
+    {
+      name: "webkitgtk",
+      ok: guiLibs.exitCode === 0,
+      message: guiLibs.exitCode === 0
+        ? "gtk+-3.0 and webkit2gtk-4.1 present"
+        : "install with: apt install libgtk-3-dev libwebkit2gtk-4.1-dev"
+    }
+  ];
+}
+
+export async function checkSetupPrerequisites(
+  runner: CommandRunner,
+  repoRoot: string,
+  platform: NodeJS.Platform = process.platform
+): Promise<SetupResult> {
+  const checks: SetupCheck[] = await checkNativeToolchain(runner, platform);
 
   for (const [name, command, args] of [
     ["rust", "rustc", ["--version"]],
