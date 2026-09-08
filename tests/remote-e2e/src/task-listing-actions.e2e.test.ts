@@ -336,32 +336,66 @@ describe("remote task listing, creation, and actions E2E", () => {
       `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&from=now&timeoutSecs=0`,
       null
     ));
-    const cursor = getString(armed, "cursor");
+    let cursor = getString(armed, "cursor");
+    const seen: string[] = [];
 
-    await harness.stopRelay();
-    try {
+    // This used to evict a watcher from the bounded short-handle map because
+    // every resume minted another handle. The watcher is armed through the
+    // relay, then resumes its one handle well past that former cap and
+    // requires each checkpoint to return exactly its new event.
+    for (let index = 0; index < 4_100; index += 1) {
+      const type = `task.cursor_busy_${index}`;
       await invokeLanJson(harness, "POST", "/v1/e2e/sql", {
         query: false,
         sql: "INSERT INTO task_event (task_id, type, payload) VALUES (?1, ?2, '{}')",
-        params: [task.taskId, "task.awaiting_input"]
+        params: [task.taskId, type]
       });
-      const duringDrop = asRecord(await invokeLanJson(
+      const response = asRecord(await invokeLanJson(
         harness,
         "GET",
         `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
         null
       ));
-      expect(getString(duringDrop, "cursor")).toBe(cursor);
-      expect(eventTypes(duringDrop)).toEqual(["task.awaiting_input"]);
-      const machineErrors = duringDrop.machineErrors;
-      expect(Array.isArray(machineErrors)).toBe(true);
-      expect((machineErrors as unknown[]).length).toBeGreaterThan(0);
-      for (const error of machineErrors as unknown[]) {
-        expect(asRecord(error)).toMatchObject({
+      expect(eventTypes(response)).toEqual([type]);
+      cursor = getString(response, "cursor");
+      seen.push(...eventTypes(response));
+    }
+    expect(new Set(seen).size).toBe(4_100);
+
+    await harness.stopRelay();
+    try {
+      // A local writer stays available while the relay peer is unreachable.
+      await invokeLanJson(harness, "POST", "/v1/e2e/sql", {
+        query: false,
+        sql: "INSERT INTO task_event (task_id, type, payload) VALUES (?1, ?2, '{}')",
+        params: [task.taskId, "task.awaiting_input"]
+      });
+      let unreachableSince: string | null = null;
+      for (let poll = 0; poll < 3; poll += 1) {
+        const duringDrop = asRecord(await invokeLanJson(
+          harness,
+          "GET",
+          `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
+          null
+        ));
+        expect(getString(duringDrop, "cursor")).toBe(cursor);
+        if (poll === 0) {
+          expect(eventTypes(duringDrop)).toEqual(["task.awaiting_input"]);
+          seen.push(...eventTypes(duringDrop));
+        } else {
+          expect(eventTypes(duringDrop)).toEqual([]);
+        }
+        const machineErrors = machineErrorsForUnreachablePeers(duringDrop);
+        expect(machineErrors).toHaveLength(1);
+        const error = asRecord(machineErrors[0]);
+        expect(error).toMatchObject({
           machineId: expect.any(String),
           error: expect.stringMatching(/^machine unreachable since unix:\d+$/),
           stale: true
         });
+        const currentSince = getString(error, "error");
+        expect(unreachableSince ?? currentSince).toBe(currentSince);
+        unreachableSince = currentSince;
       }
     } finally {
       await harness.startRelay();
@@ -376,8 +410,10 @@ describe("remote task listing, creation, and actions E2E", () => {
     ));
     expect(getString(resumed, "cursor")).toBe(cursor);
     expect(eventTypes(resumed)).toEqual(["task.revision_requested"]);
-  }, 120_000);
-
+    seen.push(...eventTypes(resumed));
+    expect(seen).toHaveLength(4_102);
+    expect(new Set(seen).size).toBe(4_102);
+  }, 360_000);
 
   it("launches, reuses, and honestly refuses a repository singleton command over the LAN route", async () => {
     // The route the phone's More tab uses. Its 503 was not a transport
@@ -841,6 +877,12 @@ function eventTypes(value: unknown): string[] {
     throw new Error(`expected task event array ${JSON.stringify(value)}`);
   }
   return events.map((event) => getString(asRecord(event), "type"));
+}
+
+function machineErrorsForUnreachablePeers(value: JsonRecord): unknown[] {
+  const errors = value.machineErrors;
+  expect(Array.isArray(errors)).toBe(true);
+  return (errors as unknown[]).filter((error) => asRecord(error).stale === true);
 }
 
 async function appendTaskEvent(

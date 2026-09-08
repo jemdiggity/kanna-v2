@@ -344,16 +344,20 @@ fn shorten_response_cursor(
             )
         })?
         .to_string();
-    let handle = {
-        state
-            .aggregate_task_event_waits
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .issue_short_cursor(cursor.clone(), reuse_handle)
-    };
+    // The durable row is the checkpoint of record.  In particular, do not
+    // advance the cache first: a SQLite failure after forming this response
+    // must leave a retry of the same handle at its previous position.
+    let handle = reuse_handle
+        .map(str::to_owned)
+        .unwrap_or_else(|| new_short_cursor_handle(SHORT_CURSOR_PREFIX));
     Db::open(&state.config().db_path)
         .and_then(|db| db.store_task_event_cursor_handle(&handle, &cursor))
         .map_err(db_error)?;
+    state
+        .aggregate_task_event_waits
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .issue_short_cursor(cursor.clone(), Some(&handle));
     response["cursor"] = Value::String(handle);
     Ok(Json(response))
 }

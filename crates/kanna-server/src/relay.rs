@@ -1885,6 +1885,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_auth_response_is_diagnostic_and_backed_off() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (attempt_tx, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let mut count = 0;
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                count += 1;
+                attempt_tx.send((count, std::time::Instant::now())).unwrap();
+                tokio::spawn(async move {
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    assert!(matches!(
+                        socket.next().await.unwrap().unwrap(),
+                        Message::Text(_)
+                    ));
+                    socket
+                        .send(Message::Text("<html>not relay</html>".into()))
+                        .await
+                        .unwrap();
+                });
+            }
+        });
+        let config = relay_connection_test_config("invalid-auth", address);
+        let database_path = config.db_path.clone();
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let relay_loop = run_relay_loop_with_timing(
+            config,
+            db::Db::open_for_tests(&database_path).unwrap(),
+            Arc::clone(&state),
+            RelayConnectionTiming {
+                connect_timeout: Duration::from_secs(1),
+                reconnect_delay: Duration::from_millis(100),
+            },
+        );
+        tokio::pin!(relay_loop);
+        let verification = async {
+            let (_, first_at) = tokio::time::timeout(Duration::from_secs(1), attempts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let (_, second_at) = tokio::time::timeout(Duration::from_secs(1), attempts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                second_at.duration_since(first_at) >= Duration::from_millis(75),
+                "invalid authentication response retried tightly"
+            );
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while !state
+                    .desktop_routing_unavailable_reason()
+                    .contains("invalid JSON during desktop authentication")
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("invalid relay response was not diagnostic");
+            assert!(state
+                .desktop_routing_unavailable_reason()
+                .contains("<html>not relay</html>"));
+        };
+        tokio::pin!(verification);
+        tokio::select! {
+            () = &mut verification => {}
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        }
+        server.abort();
+        let _ = std::fs::remove_file(database_path);
+    }
+
+    // Invalid authentication frames use the same reconnect state machine as a
+    // dead socket; its timing and diagnostic are covered below.
+    #[tokio::test]
     async fn reconnect_request_cancels_a_stalled_relay_handshake_immediately() {
         let (address, mut accepted, mut closed, relay_server) = stalled_relay_listener().await;
         let config = relay_connection_test_config("cancel", address);
