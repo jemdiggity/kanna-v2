@@ -43,6 +43,16 @@ const navigationHarness = vi.hoisted(() => ({
   }>
 }));
 
+/**
+ * Lets a test hold `Animated` animations open instead of settling them
+ * instantly, so a row caught mid-close can be inspected while its spring is
+ * still running.
+ */
+const animationHarness = vi.hoisted(() => ({
+  autoFinishAnimations: true,
+  pending: [] as Array<() => void>
+}));
+
 const keyboardHarness = vi.hoisted(() => ({
   dismiss: vi.fn(),
   listeners: new Map<
@@ -78,8 +88,12 @@ vi.mock("react-native", () => {
   const animation = (apply: () => void): TestAnimation => ({
     apply,
     start(callback) {
-      apply();
-      callback?.({ finished: true });
+      const finish = () => {
+        apply();
+        callback?.({ finished: true });
+      };
+      if (animationHarness.autoFinishAnimations) finish();
+      else animationHarness.pending.push(finish);
     }
   });
 
@@ -409,6 +423,8 @@ afterEach(async () => {
   navigationHarness.scrollCalls = [];
   keyboardHarness.dismiss.mockReset();
   keyboardHarness.listeners.clear();
+  animationHarness.autoFinishAnimations = true;
+  animationHarness.pending = [];
   vi.useRealTimers();
 });
 
@@ -666,6 +682,25 @@ function rowGestureConfig(taskId: string): RowGestureConfig {
   const config = node?.props["data-pan-config"] as RowGestureConfig | undefined;
   if (!config) throw new Error(`Task row ${taskId} carries no swipe gesture`);
   return config;
+}
+
+/**
+ * Where one rendered row's card currently sits. `0` is rest; a non-zero value
+ * means the row is still displaced by a swipe that has not finished closing.
+ */
+function rowTranslation(taskId: string): number {
+  if (!rendered) throw new Error("The navigator was not rendered");
+  let node: ReactTestInstance | null = rendered.root.find(
+    (candidate) => candidate.props.testID === `mobile.task-row.${taskId}`
+  );
+  while (node && !node.props["data-pan-config"]) {
+    node = node.parent;
+  }
+  if (!node) throw new Error(`Task row ${taskId} carries no swipe gesture`);
+  const style = node.props.style as {
+    transform: Array<{ translateX: { value: number } }>;
+  };
+  return style.transform[0].translateX.value;
 }
 
 function visibleText(): string {
@@ -988,6 +1023,101 @@ describe("RootNavigator task collection integration", () => {
       { taskId: "task-older", repoId: "repo-1" }
     ]);
     expect(stored.pins).toEqual([{ taskId: "task-older", repoId: "repo-1" }]);
+  });
+
+  it("keeps a pinned subtask's closing swipe alive as the row un-nests", async () => {
+    // A pinned task is never nested, so pinning a subtask drops its depth to 0
+    // on the same tick the pin is written. The row has to survive that as the
+    // same component instance, or the spring closing it over its own action is
+    // thrown away with the `Animated.Value` it was driving.
+    const parent: TaskSummary = {
+      id: "task-parent",
+      repoId: "repo-1",
+      title: "Parent feature work",
+      stage: "in progress",
+      createdAt: "2026-07-20 08:00:00"
+    };
+    const child: TaskSummary = {
+      id: "task-child",
+      repoId: "repo-1",
+      title: "Child implementation",
+      stage: "in progress",
+      createdAt: "2026-07-21 08:00:00",
+      parentTaskId: "task-parent"
+    };
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValue([parent, child]);
+    vi.mocked(client.listRepoTasks).mockResolvedValue([parent, child]);
+    const store = createSessionStore();
+    let stored: LocalTaskListPreferences = {
+      pins: [],
+      dismissedActivity: [],
+      pinsSeededFromServer: false
+    };
+    controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: {
+        load: async () => ({
+          status: "loaded" as const,
+          preferences: structuredClone(stored)
+        }),
+        save: async (preferences) => {
+          stored = structuredClone(preferences);
+          return structuredClone(preferences);
+        }
+      }
+    });
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+      await controller!.bootstrap();
+      await flushMicrotasks();
+    });
+
+    expect(
+      rendered!.root.findAll(
+        (node) =>
+          node.props.testID === MOBILE_E2E_IDS.taskListSubtaskRow("task-child")
+      )
+    ).toHaveLength(1);
+
+    // Hold every animation open, so the closing spring is still running when
+    // the pin reorders the list underneath it.
+    animationHarness.autoFinishAnimations = false;
+    animationHarness.pending = [];
+
+    await act(async () => {
+      const gesture = rowGestureConfig("task-child");
+      gesture.onPanResponderGrant?.({}, { dx: 0, dy: 0 });
+      gesture.onPanResponderMove?.({}, { dx: -70, dy: 0 });
+      gesture.onPanResponderRelease?.({}, { dx: -70, dy: 0 });
+      await flushMicrotasks();
+    });
+
+    // The pin landed and the row left its parent for the top of the list.
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-child", repoId: "repo-1" }
+    ]);
+    expect(renderedTaskRowIds()).toEqual(["task-child", "task-parent"]);
+    expect(
+      rendered!.root.findAll(
+        (node) =>
+          node.props.testID === MOBILE_E2E_IDS.taskListSubtaskRow("task-child")
+      )
+    ).toHaveLength(0);
+
+    // The row kept its instance across that move: it is still displaced by the
+    // swipe, with its close unfinished, rather than cut back to rest.
+    expect(rowTranslation("task-child")).toBe(-70);
+    expect(animationHarness.pending.length).toBeGreaterThan(0);
+
+    // Letting the held animations run settles it the rest of the way.
+    await act(async () => {
+      for (const finish of animationHarness.pending.splice(0)) finish();
+      await flushMicrotasks();
+    });
+    expect(rowTranslation("task-child")).toBe(0);
   });
 
   it("switches repos from the all-repo cache before the repo refresh settles", async () => {
