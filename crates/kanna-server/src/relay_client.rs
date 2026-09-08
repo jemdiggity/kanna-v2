@@ -466,7 +466,17 @@ fn parse_authentication(
     message: Message,
     credential_kind: &str,
 ) -> Result<RelayAuthentication, Box<dyn std::error::Error + Send + Sync>> {
-    match serde_json::from_str::<RelayMessage>(message.to_text()?)? {
+    let text = message.to_text().map_err(|error| {
+        format!("relay returned a non-text {credential_kind} authentication frame: {error}")
+    })?;
+    let parsed = serde_json::from_str::<RelayMessage>(text).map_err(|error| {
+        let preview = normalize_relay_http_error_reason(text.as_bytes())
+            .unwrap_or_else(|| "<empty or non-printable body>".to_string());
+        format!(
+            "relay returned invalid JSON during {credential_kind} authentication: {error}; body: {preview}"
+        )
+    })?;
+    match parsed {
         RelayMessage::AuthOk {
             user_id,
             capabilities,

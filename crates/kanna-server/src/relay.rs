@@ -9,6 +9,7 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use relay_client::{RelayId, RelayInvoke, RelayMessage, TunnelService};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -24,6 +25,8 @@ pub(crate) fn desktop_relay_connection_failure_reason(
 const RELAY_PING_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_PONG_TIMEOUT: Duration = Duration::from_secs(75);
 const RELAY_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const RELAY_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5 * 60);
+static RELAY_JITTER_NONCE: AtomicU64 = AtomicU64::new(0);
 const TASK_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MOBILE_NOTIFICATION_REJECTION_CATEGORY: &str = "relayRejection";
 
@@ -37,6 +40,24 @@ const RELAY_CONNECTION_TIMING: RelayConnectionTiming = RelayConnectionTiming {
     connect_timeout: relay_client::RELAY_CONNECT_TIMEOUT,
     reconnect_delay: RELAY_RECONNECT_DELAY,
 };
+
+fn relay_reconnect_backoff(base: Duration, attempt: u32) -> Duration {
+    let ceiling = RELAY_RECONNECT_MAX_DELAY.max(base);
+    let exponential = base
+        .checked_mul(1_u32.checked_shl(attempt.min(16)).unwrap_or(u32::MAX))
+        .unwrap_or(ceiling)
+        .min(ceiling);
+    // Process/time-seeded jitter in [80%, 120%]. It prevents a fleet reconnect
+    // stampede without adding a random-number dependency to the server.
+    let nonce = RELAY_JITTER_NONCE.fetch_add(1, Ordering::Relaxed);
+    let epoch_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let seed = nonce ^ epoch_nanos ^ u64::from(std::process::id());
+    let percent = 80 + (seed.wrapping_mul(1_103_515_245).wrapping_add(12_345) % 41);
+    exponential.mul_f64(percent as f64 / 100.0)
+}
 
 enum PendingDesktopRequest {
     PublishTaskSnapshot {
@@ -180,6 +201,7 @@ async fn run_relay_loop_with_timing(
     let mut desktop_relay_requests = http_state.take_desktop_relay_requests()?;
     let mut next_mobile_notification_id = 1_u64;
     let mut next_desktop_request_id = 1_u64;
+    let mut reconnect_attempt = 0_u32;
     // Stable across relay connection/session rollover, but replaced when this
     // server process restarts. The relay uses it to distinguish reconnect from
     // a dead creator while a singleton reservation is not yet in SQLite.
@@ -199,6 +221,7 @@ async fn run_relay_loop_with_timing(
                     let reason = "desktop relay connect cancelled by local reconnect request";
                     log::info!("Cloud relay account probe cancelled by the local reconnect request");
                     http_state.set_desktop_routing_unavailable(reason);
+                    reconnect_attempt = 0;
                     tokio::time::sleep(timing.reconnect_delay).await;
                     continue;
                 }
@@ -228,7 +251,7 @@ async fn run_relay_loop_with_timing(
                 let reason = "desktop relay connect cancelled by local reconnect request";
                 log::info!("Cloud relay connect cancelled by the local reconnect request");
                 http_state.set_desktop_routing_unavailable(reason);
-                log::info!("Retrying in 5 seconds...");
+                reconnect_attempt = 0;
                 tokio::time::sleep(timing.reconnect_delay).await;
                 continue;
             }
@@ -246,13 +269,19 @@ async fn run_relay_loop_with_timing(
                     }
                 };
                 http_state.set_desktop_routing_unavailable(reason);
-                log::info!("Retrying in 5 seconds...");
-                tokio::time::sleep(timing.reconnect_delay).await;
+                let delay = relay_reconnect_backoff(timing.reconnect_delay, reconnect_attempt);
+                reconnect_attempt = reconnect_attempt.saturating_add(1);
+                log::info!(
+                    "Relay reconnect attempt backed off for {:.1}s",
+                    delay.as_secs_f64()
+                );
+                tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
         log::info!("Connected to relay");
+        let connected_at = Instant::now();
 
         // Wrap sink in Arc<Mutex> so observer tasks can share it
         let sink = Arc::new(Mutex::new(sink));
@@ -1010,8 +1039,19 @@ async fn run_relay_loop_with_timing(
             handle.abort();
         }
 
-        log::info!("Disconnected from relay. Reconnecting in 5 seconds...");
-        tokio::time::sleep(timing.reconnect_delay).await;
+        // A TCP/WebSocket handshake alone is not recovery: proxies and
+        // half-open routes can accept then immediately drop. Reset only after
+        // the session remained healthy through a keepalive budget.
+        if connected_at.elapsed() >= RELAY_PONG_TIMEOUT {
+            reconnect_attempt = 0;
+        }
+        let delay = relay_reconnect_backoff(timing.reconnect_delay, reconnect_attempt);
+        reconnect_attempt = reconnect_attempt.saturating_add(1);
+        log::info!(
+            "Disconnected from relay. Reconnecting in {:.1}s",
+            delay.as_secs_f64()
+        );
+        tokio::time::sleep(delay).await;
     }
 }
 

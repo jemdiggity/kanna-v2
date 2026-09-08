@@ -216,9 +216,28 @@ impl AggregateWaitRegistry {
         Some(entry.cursor.clone())
     }
 
-    fn issue_short_cursor(&mut self, cursor: String) -> String {
+    fn issue_short_cursor(&mut self, cursor: String, reuse_handle: Option<&str>) -> String {
         let now = tokio::time::Instant::now();
         self.evict_expired(now);
+        // A cursor is a consumer checkpoint, not a response id. Updating the
+        // handle supplied by the caller keeps one registry entry per watcher;
+        // the old implementation minted an entry on every poll and allowed a
+        // busy stream to evict its own still-active checkpoint at the cap.
+        if let Some(handle) = reuse_handle {
+            if let Some(entry) = self.short_cursors.get_mut(handle) {
+                entry.cursor = cursor;
+                entry.last_touched = now;
+                return handle.to_string();
+            }
+            self.short_cursors.insert(
+                handle.to_string(),
+                ShortCursorEntry {
+                    cursor,
+                    last_touched: now,
+                },
+            );
+            return handle.to_string();
+        }
         while self.short_cursors.len() >= MAX_SHORT_CURSOR_HANDLES {
             let Some(oldest) = self
                 .short_cursors
@@ -295,17 +314,24 @@ fn expand_short_cursor(
     let Some(handle) = cursor.filter(|cursor| cursor.starts_with(SHORT_CURSOR_PREFIX)) else {
         return Ok(cursor.map(str::to_string));
     };
-    state
+    if let Some(cursor) = state
         .aggregate_task_event_waits
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .resolve_short_cursor(handle)
+    {
+        return Ok(Some(cursor));
+    }
+    Db::open(&state.config().db_path)
+        .and_then(|db| db.resolve_task_event_cursor_handle(handle))
+        .map_err(db_error)?
         .map(Some)
         .ok_or_else(expired_short_cursor)
 }
 
 fn shorten_response_cursor(
     state: &Arc<AppState>,
+    reuse_handle: Option<&str>,
     Json(mut response): Json<Value>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
     let cursor = response
@@ -318,11 +344,16 @@ fn shorten_response_cursor(
             )
         })?
         .to_string();
-    let handle = state
-        .aggregate_task_event_waits
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .issue_short_cursor(cursor);
+    let handle = {
+        state
+            .aggregate_task_event_waits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .issue_short_cursor(cursor.clone(), reuse_handle)
+    };
+    Db::open(&state.config().db_path)
+        .and_then(|db| db.store_task_event_cursor_handle(&handle, &cursor))
+        .map_err(db_error)?;
     response["cursor"] = Value::String(handle);
     Ok(Json(response))
 }
@@ -333,10 +364,14 @@ pub(super) fn issue_expired_short_cursor_for_test(state: &Arc<AppState>) -> Stri
         .aggregate_task_event_waits
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let handle = registry.issue_short_cursor("0".to_string());
+    let handle = registry.issue_short_cursor("0".to_string(), None);
     if let Some(entry) = registry.short_cursors.get_mut(&handle) {
         entry.last_touched = tokio::time::Instant::now() - AGGREGATE_WAIT_SESSION_TTL;
     }
+    // The production reaper removes durable rows only with the event
+    // retention window. Tests need a handle that is absent from both tiers.
+    let _ = Db::open(&state.config().db_path)
+        .and_then(|db| db.delete_task_event_cursor_handle_for_test(&handle));
     handle
 }
 
@@ -1584,7 +1619,9 @@ fn spawn_aggregate_wait(
                     });
                     Err(aggregate_machine_wait_error(status, error))
                 }
-                Err(error) => Err(AggregateMachineWaitError::Unavailable(error)),
+                Err(_error) => Err(AggregateMachineWaitError::Unavailable(
+                    state.desktop_routing_unreachable_error(),
+                )),
             }
         };
         AggregateWaitCompletion {
@@ -1878,12 +1915,17 @@ async fn wait_aggregate_task_events(
         Ok(machine_ids) => {
             active_machines.extend(machine_ids);
         }
-        Err(error) => {
-            machine_errors.push(json!({
-                "machineId": Value::Null,
-                "error": error,
-                "stale": true,
-            }));
+        Err(_error) => {
+            // Known peer ids below get the stable outage state. Before a
+            // first successful listing, attribute discovery failure to this
+            // machine's relay route rather than emitting an unowned error.
+            if session.cursor.machine_ids.len() == 1 {
+                machine_errors.push(json!({
+                    "machineId": local_machine_id,
+                    "error": state.desktop_routing_unreachable_error(),
+                    "stale": true,
+                }));
+            }
         }
     }
     for machine_id in &active_machines {
@@ -1903,7 +1945,7 @@ async fn wait_aggregate_task_events(
         if !active_machines.contains(machine_id) {
             machine_errors.push(json!({
                 "machineId": machine_id,
-                "error": "machine is unreachable through the relay",
+                "error": state.desktop_routing_unreachable_error(),
                 "stale": true,
             }));
         }
@@ -2031,6 +2073,11 @@ pub(super) async fn wait_task_events(
     account_wide_access: AccountWideTaskEventAccess,
     tunneled: Option<Extension<TunneledHttpInvoke>>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let input_short_cursor = query
+        .cursor
+        .as_deref()
+        .filter(|cursor| cursor.starts_with(SHORT_CURSOR_PREFIX))
+        .map(str::to_string);
     let use_short_cursor = query.short_cursor
         || query
             .cursor
@@ -2070,8 +2117,8 @@ pub(super) async fn wait_task_events(
                 response.insert(
                     "machineErrors".to_string(),
                     json!([{
-                        "machineId": Value::Null,
-                        "error": "desktop relay routing is unavailable; sibling machines were not observed",
+                        "machineId": state.config().desktop_id,
+                        "error": state.desktop_routing_unreachable_error(),
                         "stale": true,
                     }]),
                 );
@@ -2081,7 +2128,7 @@ pub(super) async fn wait_task_events(
     }?;
 
     if use_short_cursor {
-        shorten_response_cursor(&state, result)
+        shorten_response_cursor(&state, input_short_cursor.as_deref(), result)
     } else {
         Ok(result)
     }

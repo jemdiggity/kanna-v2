@@ -74,6 +74,7 @@ pub struct AppState {
     anonymous_push_revocations_changed: Arc<Notify>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_unavailable_reason: Arc<StdMutex<Option<String>>>,
+    relay_desktop_routing_unreachable_since: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_generation: Arc<AtomicU64>,
     desktop_relay_tx: mpsc::Sender<DesktopRelayRequest>,
     desktop_relay_rx: Arc<StdMutex<Option<mpsc::Receiver<DesktopRelayRequest>>>>,
@@ -415,6 +416,9 @@ impl AppState {
             relay_desktop_routing_unavailable_reason: Arc::new(StdMutex::new(Some(
                 "desktop relay has not connected".to_string(),
             ))),
+            relay_desktop_routing_unreachable_since: Arc::new(StdMutex::new(Some(
+                relay_outage_timestamp(),
+            ))),
             relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),
             desktop_relay_tx,
             desktop_relay_rx: Arc::new(StdMutex::new(Some(desktop_relay_rx))),
@@ -605,17 +609,42 @@ impl AppState {
                 .relay_desktop_routing_unavailable_reason
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            *self
+                .relay_desktop_routing_unreachable_since
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
         generation
     }
 
     pub(crate) fn set_desktop_routing_unavailable(&self, reason: impl Into<String>) {
+        let was_available = self
+            .relay_desktop_routing_available
+            .swap(false, Ordering::AcqRel);
+        let mut since = self
+            .relay_desktop_routing_unreachable_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if was_available || since.is_none() {
+            *since = Some(relay_outage_timestamp());
+        }
         *self
             .relay_desktop_routing_unavailable_reason
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.into());
-        self.relay_desktop_routing_available
-            .store(false, Ordering::Release);
+    }
+
+    /// Stable public outage state. Transport failures remain in server logs;
+    /// consumers should not see ping, listing and socket symptoms as separate
+    /// faults for one continuous loss of reachability.
+    pub(crate) fn desktop_routing_unreachable_error(&self) -> String {
+        let since = self
+            .relay_desktop_routing_unreachable_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(relay_outage_timestamp);
+        format!("machine unreachable since {since}")
     }
 
     pub(crate) fn desktop_routing_unavailable_reason(&self) -> String {
@@ -1104,4 +1133,11 @@ impl AppState {
         state.revision_requester = Some(revision_requester);
         state
     }
+}
+fn relay_outage_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("unix:{seconds}")
 }

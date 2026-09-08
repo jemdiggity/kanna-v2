@@ -261,6 +261,12 @@ impl Db {
             );
             CREATE INDEX idx_task_event_task_seq ON task_event(task_id, seq);
 
+            CREATE TABLE task_event_cursor_handle (
+                handle TEXT PRIMARY KEY,
+                cursor TEXT NOT NULL,
+                last_touched TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE task_input (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,

@@ -1424,7 +1424,38 @@ async fn short_cursor_upgrades_legacy_state_and_preserves_call_to_call_continuit
         event_pairs(&resumed),
         vec![("child-a".to_string(), "stage.changed".to_string())]
     );
-    assert!(cursor_of(&resumed).starts_with("kh1."));
+    assert_eq!(cursor_of(&resumed), handle);
+}
+
+#[tokio::test]
+async fn short_cursor_survives_server_state_replacement_without_losing_events() {
+    let state = test_state_with_seed("desktop-task-events", "Task Events", seed_orchestration);
+    let config = state.config().clone();
+    let app = router(state);
+    let armed = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&from=now&timeoutSecs=0",
+    )
+    .await;
+    let handle = cursor_of(&armed);
+
+    let db = Db::open(&config.db_path).expect("open db after first server stopped");
+    db.update_pipeline_item_stage("child-a", "review")
+        .expect("append event while watcher is disconnected");
+
+    let restarted = router(Arc::new(AppState::new(config)));
+    let resumed = get_json_body(
+        &restarted,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={handle}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(cursor_of(&resumed), handle);
+    assert_eq!(
+        event_pairs(&resumed),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
 }
 
 #[tokio::test]

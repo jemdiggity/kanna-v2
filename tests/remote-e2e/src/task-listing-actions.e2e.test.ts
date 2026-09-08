@@ -328,6 +328,56 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(getString(asRecord(catalogNext), "cursor").length).toBeLessThan(128);
   }, 120_000);
 
+  it("keeps one durable task-event cursor and outage shape across a relay drop", async () => {
+    const task = await createScriptedTask(harness, { displayName: "Durable relay watcher" });
+    const armed = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&from=now&timeoutSecs=0`,
+      null
+    ));
+    const cursor = getString(armed, "cursor");
+
+    await harness.stopRelay();
+    try {
+      await invokeLanJson(harness, "POST", "/v1/e2e/sql", {
+        query: false,
+        sql: "INSERT INTO task_event (task_id, type, payload) VALUES (?1, ?2, '{}')",
+        params: [task.taskId, "task.awaiting_input"]
+      });
+      const duringDrop = asRecord(await invokeLanJson(
+        harness,
+        "GET",
+        `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
+        null
+      ));
+      expect(getString(duringDrop, "cursor")).toBe(cursor);
+      expect(eventTypes(duringDrop)).toEqual(["task.awaiting_input"]);
+      const machineErrors = duringDrop.machineErrors;
+      expect(Array.isArray(machineErrors)).toBe(true);
+      expect((machineErrors as unknown[]).length).toBeGreaterThan(0);
+      for (const error of machineErrors as unknown[]) {
+        expect(asRecord(error)).toMatchObject({
+          machineId: expect.any(String),
+          error: expect.stringMatching(/^machine unreachable since unix:\d+$/),
+          stale: true
+        });
+      }
+    } finally {
+      await harness.startRelay();
+      await harness.waitForDesktop();
+    }
+    await appendTaskEvent(harness, task.taskId, "task.revision_requested");
+    const resumed = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
+      null
+    ));
+    expect(getString(resumed, "cursor")).toBe(cursor);
+    expect(eventTypes(resumed)).toEqual(["task.revision_requested"]);
+  }, 120_000);
+
 
   it("launches, reuses, and honestly refuses a repository singleton command over the LAN route", async () => {
     // The route the phone's More tab uses. Its 503 was not a transport
