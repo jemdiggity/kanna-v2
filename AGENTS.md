@@ -568,6 +568,49 @@ For UI feel or interaction changes (animation, gesture, or dynamic layout), simu
 - `tauri-plugin-webdriver` on port 4445 for E2E testing. Only works in debug builds on macOS WKWebView.
 - Daemon must be detached from app process group (`setsid` via `pre_exec`) or Ctrl+C kills it.
 - End-to-end mobile runs must start from `./kd dev up --mobile` or `./kd mobile up`. Launching Expo directly from `apps/mobile` does not start the desktop-side `kanna-server`, so the resolved `KANNA_MOBILE_SERVER_PORT` will be down unless the desktop app is already running.
+- **A running mobile dev build proves nothing about which JS it is running.**
+  The Expo dev client remembers the last Metro it loaded
+  (`expo.devlauncher.recentlyopenedapps`, `RCT_jsLocation`) and, with
+  `EXDevLauncherTryToLaunchLastBundle`, relaunches that bundle without showing
+  a launcher. When the remembered address is unreachable — another machine,
+  another worktree's Metro port, a hotspot subnet that is gone — it falls back
+  to the **cached bundle and reports no error**, so the app looks healthy while
+  serving whatever code it downloaded days ago. An owner then measures the old
+  build and reports the bug as unfixed. The only trustworthy signal that a
+  device is running your branch is Metro logging a bundle for it:
+  `./kd dev log mobile | grep -icE 'bundled|bundling'`. Zero means the device
+  never fetched, and every timing or behaviour observed is stale. Check it
+  before believing any device result, yours or the owner's.
+- Debug a device that will not load in this order, cheapest first. **On the
+  phone**, open `http://<mac-lan-ip>:<KANNA_MOBILE_PORT>/status` in Safari:
+  Safari is exempt from the iOS Local Network prompt, so it loading while the
+  app does not isolates the fault to the app (stored address or Local Network
+  permission), and it failing means the network. **On the Mac**, `lsof -nP
+  -iTCP:<port> -sTCP:LISTEN` (Metro must bind `*`, not loopback),
+  `socketfilterfw --getglobalstate`, and `arp -n <phone-ip>` (an entry proves
+  the two are on one L2 segment; a failed `ping` proves nothing, iOS drops
+  ICMP). **On the device**, read what is actually stored rather than guessing:
+  `xcrun devicectl device copy from --device <udid> --domain-type
+  appDataContainer --domain-identifier <bundle-id> --user mobile --source
+  "Library/Preferences/<bundle-id>.plist" --destination <path>`, then
+  `plutil -p`. The same `copy from` reads the app's AsyncStorage and its
+  expo-updates log. `devicectl device info processes` says whether the app is
+  even alive.
+- **iOS has no `adb reverse`.** A physical iPhone reaches Metro over the
+  network, never over the cable, so "it is plugged in by USB" is not a
+  connection. USB carries only Mac→device developer services: usbmuxd
+  forwarding (`iproxy`, WebDriverAgent) and the RemoteXPC tunnel whose IPv6
+  address `devicectl` prints. Neither routes the app's own traffic to your
+  Metro. Put the phone on the Mac's Wi-Fi; the USB alternative is Personal
+  Hotspot, which inverts the link (the Mac joins the phone's network) and then
+  needs `REACT_NATIVE_PACKAGER_HOSTNAME` plus a Metro restart to advertise the
+  hotspot-side address.
+- A **JS-only** mobile change with an unchanged `runtimeVersion` needs no
+  device rebuild: an installed dev build at that runtime version just has to be
+  pointed at the right Metro. Reach for `./kd mobile run --device` only when
+  native code, native config, or the runtime version actually moved. With more
+  than one iPhone attached, `kd mobile doctor --device` refuses to choose —
+  set `KANNA_IOS_DEVICE_UDID`.
 - A dev machine runs several Kanna instances side by side — production `Kanna.app` (LAN port 48120, `~/Library/Application Support/build.kanna/`), `Kanna Staging.app` (48121, `build.kanna.staging/`), and per-worktree dev instances — each with its own DB, server log, `server.toml`, desktop id, and relay (`wss://relay.kanna.build` vs `relay-staging.kanna.build`). They often share a display name, so a name, a process name, or a default port identifies nothing. Before debugging or performing environment-sensitive operations against a running instance (mobile notifications, cloud deploys, mobile OTA publishes, or direct local/LAN API calls), call `kanna_info` and scope every operation and every log, config, DB, and process check to the effective connection, advertised LAN endpoint, `environment`, `desktop.id`, and port it reports; a fault found in a different instance is a different bug, not the answer.
 - Frontend console logs are written to `/tmp/kanna-webview-*.log` via the log forwarding in [`apps/desktop/src/main.ts`](apps/desktop/src/main.ts) and the Tauri `append_log` command in [`apps/desktop/src-tauri/src/commands/fs.rs`](apps/desktop/src-tauri/src/commands/fs.rs). Each instance gets its own log file: worktrees use the directory name (for this worktree: `/tmp/kanna-webview-task-348cf000.log`), while main instances use a cwd path hash (for example `kanna-webview-1a2b3c4d.log`).
 - Prefer the most correct architecture over the shortest patch. Use temporary safety fallbacks only when necessary, and document them as fallbacks rather than as the intended steady state.
