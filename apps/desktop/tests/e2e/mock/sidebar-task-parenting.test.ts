@@ -39,26 +39,6 @@ async function taskRow(client: WebDriverClient, taskId: string): Promise<TaskPar
   return row;
 }
 
-async function waitForRepoTask(
-  client: WebDriverClient,
-  repoId: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const rows = await queryDb(
-      client,
-      "SELECT id FROM pipeline_item WHERE repo_id = ?",
-      [repoId],
-    ) as Array<{ id: string }>;
-    if (rows.length > 0) return;
-    await sleep(100);
-  }
-
-  throw new Error(`Timed out waiting for import-created task in repo ${repoId}`);
-}
-
 async function waitForTaskRow(
   client: WebDriverClient,
   taskId: string,
@@ -203,7 +183,8 @@ describe("sidebar task parenting", () => {
 
     allPinnedRepoPath = await createFixtureRepo("sidebar-all-pinned-test");
     allPinnedRepoId = await importTestRepo(client, allPinnedRepoPath, "sidebar-all-pinned-test");
-    await waitForRepoTask(client, allPinnedRepoId);
+    // The fixture repo ships `.kanna`, so the import launches no setup task —
+    // this repo's rows are exactly the ones seeded below.
     await execDb(client, "DELETE FROM pipeline_item WHERE repo_id = ?", [allPinnedRepoId]);
     await execDb(
       client,

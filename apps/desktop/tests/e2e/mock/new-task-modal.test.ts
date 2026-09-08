@@ -4,6 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { AGENT_PROVIDER_SPECS, type AgentProvider } from "@kanna/agent-protocol";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
@@ -881,18 +882,33 @@ describe("new task modal", () => {
     await resetDefaultAgentPreference(client);
     await openNewTaskModal(client);
 
+    // This file runs with agent-provider isolation, which shadows every
+    // provider executable with a blocked stub so no real CLI can launch —
+    // which also makes every provider resolvable regardless of what this
+    // machine has installed. Asserting a fixed provider list here therefore
+    // asserts the machine, not the app; which providers a repo offers is
+    // covered directly in `useAppTaskCreation.test.ts`. What this E2E proves
+    // is the relationship: the picker offers exactly the providers the server
+    // reports available, plus an SDK choice for each headless-capable one.
     const repoProviders = await client.executeSync<string[]>(
       `const providers = window.__KANNA_E2E__?.setupState?.appTaskCreation?.availableAgentProviders;
        return Array.from(providers?.value ?? providers ?? []);`,
     );
-    expect(repoProviders).toEqual(["claude", "opencode"]);
+    // The repo's own fake-bin backs these two, so they are available on any machine.
+    expect(repoProviders).toContain("claude");
+    expect(repoProviders).toContain("opencode");
 
+    const headlessProviders = new Set(
+      AGENT_PROVIDER_SPECS.filter(({ supports_headless }) => supports_headless).map(({ id }) => id),
+    );
+    // The picker owns its own ordering; what matters is the membership.
     const choices = await listAgentChoices(client);
-    expect(choices).toEqual(["claude", "opencode", "claude sdk", "opencode sdk"]);
-    expect(choices).not.toContain("antigravity");
-    expect(choices).not.toContain("codex");
-    expect(choices).not.toContain("codex sdk");
-    expect(choices).not.toContain("copilot");
+    expect([...choices].sort()).toEqual([
+      ...repoProviders,
+      ...repoProviders
+        .filter((provider) => headlessProviders.has(provider as AgentProvider))
+        .map((provider) => `${provider} sdk`),
+    ].sort());
 
     await cycleToAgentChoice(client, "opencode sdk");
     await submitTaskFromModal(client, prompt);

@@ -7,6 +7,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { localProcessFetch } from "@kanna/local-process-fetch";
+import { RELOAD_APP_SCRIPT } from "../helpers/appReady";
 
 async function waitForPipelineItem<T>(
   client: WebDriverClient,
@@ -56,6 +57,33 @@ async function waitForCondition(
     ? `; last observed state: ${JSON.stringify(lastDiagnostics)}`
     : "";
   throw new Error(`Timed out waiting for ${description}${diagnosticSuffix}`);
+}
+
+/**
+ * Wait until a created task is the store's `currentItem`.
+ *
+ * `createItem` resolves as soon as the server has the row, but the sidebar
+ * slot stays a creating draft until the snapshot hydrates. `closeTask` (and
+ * the ⇧⌘⌫ shortcut behind it) resolves its target through `currentItem`, so
+ * closing in that window silently closes nothing.
+ */
+async function waitForCurrentTask(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown = null;
+  while (Date.now() < deadline) {
+    last = await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const read = (value) => value && value.__v_isRef ? value.value : value;
+       return read(ctx.store.currentItem)?.id ?? null;`,
+    );
+    if (last === taskId) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for ${taskId} to become the current task; saw ${JSON.stringify(last)}`);
 }
 
 async function seedPtyTask(
@@ -221,13 +249,17 @@ describe("task lifecycle", () => {
   it("creates a task that appears in sidebar", async () => {
     // Internal setup only: lifecycle assertions need deterministic SDK-mode
     // tasks so closing behavior can be tested without launching a real agent.
+    // The fixture repo ships `.kanna`, so importing it launches no setup task
+    // (see `launchSetupTaskIfNeeded`). What still has to settle is any row left
+    // mid-creation: this test measures the handoff of a single creating row.
     await waitForCondition(
       async () => client.executeSync<boolean>(
         `const repo = document.querySelector(${JSON.stringify(`.repo-section[data-repo-id="${repoId}"]`)});
-         const rows = repo ? Array.from(repo.querySelectorAll(".workflow-item")) : [];
-         return rows.length > 0 && rows.every((row) => row.getAttribute("aria-busy") !== "true");`,
+         if (!repo) return false;
+         const rows = Array.from(repo.querySelectorAll(".workflow-item"));
+         return rows.every((row) => row.getAttribute("aria-busy") !== "true");`,
       ),
-      "repository setup task to settle before the creation handoff test",
+      "repository task rows to settle before the creation handoff test",
       30_000,
     );
     const baseline = await client.executeSync<{ rowCount: number; repoCount: string }>(
@@ -664,21 +696,40 @@ describe("task lifecycle", () => {
       "SELECT id, branch FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
       [repoId, "Close Fast"],
     )) as Array<{ id: string; branch: string }>;
-    const branch = rows[0]?.branch;
-    expect(branch).toBeTruthy();
-    if (!branch) {
+    const closeFastTask = rows[0];
+    expect(closeFastTask?.branch).toBeTruthy();
+    if (!closeFastTask?.branch) {
       throw new Error("expected the close-fast task to have a branch");
     }
+    const branch = closeFastTask.branch;
 
     await tauriInvoke(client, "write_text_file", {
       path: `${testRepoPath}/.kanna-worktrees/${branch}/.kanna/config.json`,
       content: JSON.stringify({ setup: [] }),
     });
 
+    await waitForCurrentTask(client, closeFastTask.id);
+
+    const closeSelection = await client.executeSync<Record<string, unknown>>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+       return {
+         selectedRepoId: unwrap(ctx.store?.selectedRepoId) ?? null,
+         selectedItemId: unwrap(ctx.store?.selectedItemId) ?? null,
+         selectedTaskId: unwrap(ctx.store?.selectedTaskId) ?? null,
+         currentItemId: unwrap(ctx.store?.currentItem)?.id ?? null,
+       };`,
+    );
     const closeResult = await callVueMethod(client, "store.closeTask");
     if (closeResult && typeof closeResult === "object" && "__error" in closeResult) {
       throw new Error(String((closeResult as { __error: unknown }).__error));
     }
+    // `closeTask` answers false when it cannot resolve a task to close, which
+    // otherwise reads as a passing no-op until the closed_at wait times out.
+    expect(
+      closeResult,
+      `closeTask closed nothing; selection was ${JSON.stringify(closeSelection)}`,
+    ).toBe(true);
 
     // closed_at is the sole done indicator — closing never rewrites stage.
     const closedRow = await waitForPipelineItem<{ closed_at: string | null }>(
@@ -689,10 +740,18 @@ describe("task lifecycle", () => {
     );
     expect(closedRow.closed_at).toBeTruthy();
 
-    const sidebarText = await client.executeSync<string>(
-      `return document.querySelector(".sidebar")?.textContent || "";`
+    // The row leaves the sidebar on the snapshot the close reloads, which
+    // lands after the DB write this test just observed.
+    await waitForCondition(
+      async () => !(await client.executeSync<string>(
+        `return document.querySelector(".sidebar")?.textContent || "";`,
+      )).includes("Close Fast"),
+      "the closed task to leave the sidebar",
+      10_000,
+      async () => client.executeSync<string>(
+        `return document.querySelector(".sidebar")?.textContent || "";`,
+      ),
     );
-    expect(sidebarText).not.toContain("Close Fast");
   });
 
   it("removes the selected task and presents its replacement before close resolves", async () => {
@@ -716,6 +775,7 @@ describe("task lifecycle", () => {
     const replacementTaskId = await createAgentTask(replacementPrompt);
     const closingTaskId = await createAgentTask(closingPrompt);
     await client.waitForText(".task-header", closingPrompt, 10_000);
+    await waitForCurrentTask(client, closingTaskId);
 
     await client.executeSync(
       `const originalFetch = globalThis.fetch;
@@ -825,7 +885,9 @@ describe("task lifecycle", () => {
       );
       expect(closedRow.closed_at).toBeTruthy();
 
-      const completedState = await client.executeSync<{
+      // The row leaves the sidebar on the snapshot the close response reloads,
+      // which lands after the DB write observed above.
+      const readCompletedState = () => client.executeSync<{
         closingVisible: boolean;
         selectedTaskId: string | null;
         header: string;
@@ -838,7 +900,13 @@ describe("task lifecycle", () => {
            header: document.querySelector(".task-header")?.textContent?.trim() ?? "",
          };`,
       );
-      expect(completedState).toEqual({
+      await waitForCondition(
+        async () => !(await readCompletedState()).closingVisible,
+        "the closed task to leave the sidebar",
+        10_000,
+        readCompletedState,
+      );
+      expect(await readCompletedState()).toEqual({
         closingVisible: false,
         selectedTaskId: optimisticState.selectedTaskId,
         header: optimisticState.header,
@@ -900,7 +968,8 @@ describe("task lifecycle", () => {
       ],
     );
     await persistWindowSelection(client, { repoId, itemId: closedTaskId });
-    await client.executeSync("window.__KANNA_E2E__.appMetrics.clear(); location.reload();");
+    await client.executeSync("window.__KANNA_E2E__.appMetrics.clear();");
+    await client.executeSync(RELOAD_APP_SCRIPT);
     await client.waitForAppReady();
 
     await waitForCondition(async () => {
@@ -1050,7 +1119,7 @@ describe("task lifecycle", () => {
     });
 
     await persistWindowSelection(client, { repoId, itemId: dependentTaskId });
-    await client.executeSync("location.reload();");
+    await client.executeSync(RELOAD_APP_SCRIPT);
     await client.waitForAppReady();
     await waitForCondition(
       async () => client.executeSync<boolean>(
@@ -1061,10 +1130,11 @@ describe("task lifecycle", () => {
            `.repo-section[data-repo-id="${repoId}"] .workflow-item[data-task-id="${dependentTaskId}"]`,
          )});
          const sectionLabel = row?.closest(".type-zone")?.previousElementSibling?.textContent?.trim() ?? null;
-         return currentItem?.id === ${JSON.stringify(dependentTaskId)}
+         return read(ctx.store.selectedItemId) === ${JSON.stringify(dependentTaskId)}
+           && currentItem?.id === ${JSON.stringify(dependentTaskId)}
            && sectionLabel === "in progress";`,
       ),
-      "resolved-blocker dependent to hydrate in its normal stage",
+      "resolved-blocker dependent to hydrate selected in its normal stage",
       10_000,
       async () => client.executeSync(
         `const ctx = window.__KANNA_E2E__.setupState;
@@ -1282,7 +1352,7 @@ describe("task lifecycle", () => {
 
       await assertEmptyRepoASelection(repoBTaskId);
 
-      await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
+      await client.executeSync(RELOAD_APP_SCRIPT);
       await client.waitForAppReady();
       await waitForCondition(async () => {
         const selectedRepoId = await getVueState(client, "selectedRepoId");
@@ -1300,7 +1370,7 @@ describe("task lifecycle", () => {
         testRepoPath,
         "Close response delayed in repository A",
       );
-      await callVueMethod(client, "handleSelectItem", delayedRepoATaskId);
+      await callVueMethod(client, "selectSidebarItemById", delayedRepoATaskId);
       await persistWindowSelection(client, { repoId: repoAId, itemId: delayedRepoATaskId });
 
       try {
@@ -1411,13 +1481,37 @@ describe("task lifecycle", () => {
           selectedTaskId: createdDuringCloseTaskId,
         });
 
-        await client.executeSync("window.__KANNA_E2E__.ready = false; location.reload();");
+        // Read the durable record before the reload, so a lost write is told
+        // apart from a restore that never applied it.
+        const persistedBeforeReload = await queryDb(
+          client,
+          "SELECT value FROM settings WHERE key = 'window_workspace_v1'",
+        ) as Array<{ value: string }>;
+
+        await client.executeSync(RELOAD_APP_SCRIPT);
         await client.waitForAppReady();
+        // App-ready only means Vue mounted; restoring the persisted window
+        // workspace selection is a further round trip through the server.
         await waitForCondition(async () => {
           const selectedRepoId = await getVueState(client, "selectedRepoId");
           const selectedTaskId = await getVueState(client, "selectedTaskId");
           return selectedRepoId === repoBId && selectedTaskId === createdDuringCloseTaskId;
-        }, "persisted newly created repository B task selection after delayed close and reload", 10_000);
+        }, "persisted newly created repository B task selection after delayed close and reload", 30_000,
+        async () => ({
+          selectedRepoId: await getVueState(client, "selectedRepoId"),
+          selectedItemId: await getVueState(client, "selectedItemId"),
+          selectedTaskId: await getVueState(client, "selectedTaskId"),
+          expectedTaskId: createdDuringCloseTaskId,
+          // The restore matches the persisted entry by this window's id, which
+          // it reads from the URL — so a reload that loses the parameter reads
+          // as a lost selection.
+          windowLocation: await client.executeSync<string>("return location.search;").catch(() => "<unavailable>"),
+          persistedBeforeReload: persistedBeforeReload[0]?.value ?? null,
+          persistedAfterReload: ((await queryDb(
+            client,
+            "SELECT value FROM settings WHERE key = 'window_workspace_v1'",
+          )) as Array<{ value: string }>)[0]?.value ?? null,
+        }));
       } finally {
         await client.executeSync(
           `const gate = window.__KANNA_TASK_CLOSE_GATE__;

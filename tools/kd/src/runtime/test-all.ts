@@ -1,7 +1,7 @@
 import type { CommandResult, CommandRunner } from "./process";
 
 export interface TestAllCommand {
-  lane: "workspace" | "bazel-build-script" | "rust";
+  lane: "workspace" | "bazel-build-script" | "rust" | "desktop-mock-e2e";
   command: "pnpm" | "bazel" | "./kd";
   args: string[];
 }
@@ -17,6 +17,11 @@ export function buildTestAllCommands(): TestAllCommand[] {
       args: ["build", "//crates/daemon:daemon_build_script"],
     },
     { lane: "rust", command: "./kd", args: ["test", "rust"] },
+    // The desktop mock E2E suite drives the real app through WebDriver, so a
+    // bare `vitest run` cannot collect it (`apps/desktop/vitest.config.ts`
+    // excludes `tests/e2e/mock/**`) and it never ran inside the workspace lane.
+    // Left out of every gate, it rotted until a third of the suite was red.
+    { lane: "desktop-mock-e2e", command: "./kd", args: ["test", "desktop-mock-e2e"] },
   ];
 }
 

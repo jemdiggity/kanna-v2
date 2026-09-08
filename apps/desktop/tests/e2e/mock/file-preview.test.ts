@@ -6,7 +6,7 @@ import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
-import { callVueMethod, execDb } from "../helpers/vue";
+import { callVueMethod, execDb, tauriInvoke } from "../helpers/vue";
 
 describe("file preview", () => {
   const client = new WebDriverClient();
@@ -170,27 +170,95 @@ describe("file preview", () => {
     );
   }
 
+  /**
+   * Select a seeded task and prove it took.
+   *
+   * The fixture repo ships no `.kanna`, so importing it launches a setup task
+   * that becomes the current item — and `store.selectItem` returns quietly
+   * when the seeded id resolves to no sidebar slot yet. Left unchecked the
+   * file picker then points at the setup task's worktree instead of the repo.
+   */
   async function selectTask(taskId: string): Promise<void> {
+    const slotDeadline = Date.now() + 10_000;
+    let slotKnown = false;
+    while (Date.now() < slotDeadline) {
+      slotKnown = await client.executeSync<boolean>(
+        `const ctx = window.__KANNA_E2E__.setupState;
+         const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+         return Array.from(unwrap(ctx.store.taskUiSlots) ?? [])
+           .some((slot) => slot.task_id === ${JSON.stringify(taskId)});`,
+      );
+      if (slotKnown) break;
+      await sleep(100);
+    }
+    expect(slotKnown, `seeded task ${taskId} never reached the sidebar slots`).toBe(true);
+
     const result = await callVueMethod(client, "store.selectItem", taskId);
     if (isVueCallError(result)) {
       throw new Error(result.__error);
     }
+
+    const selectedDeadline = Date.now() + 5_000;
+    let selectedTaskId: string | null = null;
+    while (Date.now() < selectedDeadline) {
+      selectedTaskId = await client.executeSync<string | null>(
+        "return window.__KANNA_E2E__.setupState.store.selectedTaskId ?? null;",
+      );
+      if (selectedTaskId === taskId) return;
+      await sleep(100);
+    }
+    throw new Error(`timed out selecting ${taskId}; selected task was ${JSON.stringify(selectedTaskId)}`);
+  }
+
+  // The picker renders at most 100 entries for an empty query, so a miss has to
+  // report what it actually listed before it can be told from a slow load.
+  async function pickFileFromPicker(path: string): Promise<void> {
+    const element = await client.waitForText(".file-item", path, 15000)
+      .catch(async (error: unknown) => {
+        const listed = await client.executeSync<{
+          query: string;
+          items: string[];
+          selectedRepoPath: string | null;
+          currentBranch: string | null;
+        }>(
+          `const ctx = window.__KANNA_E2E__.setupState;
+           const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+           return {
+             query: document.querySelector(".picker-modal .picker-input")?.value ?? "",
+             items: Array.from(document.querySelectorAll(".picker-modal .file-item"))
+               .map((item) => (item.textContent || "").trim()),
+             selectedRepoPath: unwrap(ctx.store?.selectedRepo)?.path ?? null,
+             currentBranch: unwrap(ctx.store?.currentItem)?.branch ?? null,
+           };`,
+        ).catch(() => ({
+          query: "<unavailable>",
+          items: [] as string[],
+          selectedRepoPath: null,
+          currentBranch: null,
+        }));
+        const backendFiles = listed.selectedRepoPath
+          ? await tauriInvoke(client, "list_files", { path: listed.selectedRepoPath })
+            .catch((listError: unknown) => ({ __error: String(listError) }))
+          : null;
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; picker query ${JSON.stringify(listed.query)} listed ${listed.items.length} entries: ${JSON.stringify(listed.items.slice(0, 20))}; selectedRepoPath=${JSON.stringify(listed.selectedRepoPath)} currentBranch=${JSON.stringify(listed.currentBranch)}; list_files: ${JSON.stringify(Array.isArray(backendFiles) ? backendFiles.slice(0, 20) : backendFiles)}`,
+        );
+      });
+    await client.click(element);
   }
 
   it("opens the picker from preview, selects another file, and recalls it with Option+Command+P", async () => {
     await pressKey("p", { meta: true });
     await client.waitForElement(".picker-modal", 5000);
 
-    const firstFile = await client.waitForText(".file-item", "src/index.txt", 15000);
-    await client.click(firstFile);
+    await pickFileFromPicker("src/index.txt");
 
     expect(await previewedFilePath()).toBe("src/index.txt");
 
     await pressKey("p", { meta: true });
     await client.waitForElement(".picker-modal", 5000);
 
-    const secondFile = await client.waitForText(".file-item", "README.md", 15000);
-    await client.click(secondFile);
+    await pickFileFromPicker("README.md");
 
     expect(await previewedFilePath()).toBe("README.md");
     await waitForPickerHidden();
@@ -209,7 +277,14 @@ describe("file preview", () => {
     await pressKey("π", { meta: true, alt: true, code: "KeyP" });
     expect(await previewedFilePath()).toBe("README.md");
 
+    // Markdown previews open rendered (`DEFAULT_MARKDOWN_PREVIEW_MODE`), so
+    // toggle away and back to leave the badge on a mode the user chose.
     const modeBadge = await client.waitForElement(".preview-modal .mode-badge", 5000);
+    await waitForRenderedMarkdown();
+    expect(await client.getText(modeBadge)).toBe("Rendered");
+    await client.click(modeBadge);
+    await client.waitForNoElement(".preview-content.markdown-rendered", 5000);
+    expect(await client.getText(modeBadge)).toBe("Raw");
     await client.click(modeBadge);
     await waitForRenderedMarkdown();
     expect(await client.getText(modeBadge)).toBe("Rendered");

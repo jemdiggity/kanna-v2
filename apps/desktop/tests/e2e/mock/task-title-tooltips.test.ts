@@ -59,7 +59,7 @@ describe("task title tooltips", () => {
     }
     taskId = createResult;
 
-    const selectResult = await callVueMethod(client, "handleSelectItem", taskId);
+    const selectResult = await callVueMethod(client, "selectSidebarItemById", taskId);
     if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
   });
 

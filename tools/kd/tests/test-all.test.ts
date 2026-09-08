@@ -3,7 +3,7 @@ import { buildTestAllCommands, executeTestAll } from "../src/runtime/test-all";
 import type { CommandRunner } from "../src/runtime/process";
 
 describe("canonical local verification orchestration", () => {
-  it("plans the workspace and Bazel build-script lanes before the Rust lane", () => {
+  it("plans the workspace, Bazel build-script, Rust and desktop mock E2E lanes in order", () => {
     expect(buildTestAllCommands()).toEqual([
       { lane: "workspace", command: "pnpm", args: ["test"] },
       {
@@ -12,10 +12,15 @@ describe("canonical local verification orchestration", () => {
         args: ["build", "//crates/daemon:daemon_build_script"],
       },
       { lane: "rust", command: "./kd", args: ["test", "rust"] },
+      {
+        lane: "desktop-mock-e2e",
+        command: "./kd",
+        args: ["test", "desktop-mock-e2e"],
+      },
     ]);
   });
 
-  it("executes both lanes in order with streamed output", async () => {
+  it("executes every lane in order with streamed output", async () => {
     const planned = buildTestAllCommands();
     const env: NodeJS.ProcessEnv = { KANNA_DEV_PORT: "1421" };
     const calls: Array<{ command: string; args: string[] }> = [];
@@ -47,7 +52,7 @@ describe("canonical local verification orchestration", () => {
     });
   });
 
-  it("stops before the Bazel and Rust lanes when the workspace lane fails", async () => {
+  it("stops before the later lanes when the workspace lane fails", async () => {
     const calls: string[] = [];
     const runner: CommandRunner = {
       async run(command, args) {
@@ -109,5 +114,32 @@ describe("canonical local verification orchestration", () => {
     ]);
     expect(result.ok).toBe(false);
     expect(result.message).toBe("rust lane failed with exit code 9.");
+  });
+
+  it("reports the desktop mock E2E lane after every other lane passes", async () => {
+    const outcomes = [
+      { exitCode: 0, stdout: "workspace passed", stderr: "" },
+      { exitCode: 0, stdout: "bazel passed", stderr: "" },
+      { exitCode: 0, stdout: "rust passed", stderr: "" },
+      { exitCode: 3, stdout: "", stderr: "mock e2e failed" },
+    ];
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return outcomes[calls.length - 1];
+      },
+    };
+
+    const result = await executeTestAll({ repoRoot: "/repo", env: {}, runner });
+
+    expect(calls).toEqual([
+      "pnpm test",
+      "bazel build //crates/daemon:daemon_build_script",
+      "./kd test rust",
+      "./kd test desktop-mock-e2e",
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe("desktop-mock-e2e lane failed with exit code 3.");
   });
 });

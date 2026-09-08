@@ -1,10 +1,11 @@
-import { computed, type ComputedRef } from "vue";
+import { computed, watch, type ComputedRef } from "vue";
 import { watchDebounced } from "@vueuse/core";
 import { DEFAULT_STAGE_ORDER } from "@kanna/core";
 import type { PipelineItem, Repo } from "../types/kanna";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import { beginTaskSwitch } from "../perf/taskSwitchPerf";
 import { markDesktopTaskRead, postDesktopOperatorEvent, putDesktopSetting } from "../services/desktopServerClient";
+import { parseServerTimestamp } from "../utils/serverTimestamp";
 import {
   replacementSidebarItemAfterRemoval,
   sortSidebarItemsForRepo,
@@ -78,6 +79,18 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     return write;
   }
 
+  // Selecting a task the moment it is created persists nothing durable: the
+  // sidebar slot is still a creating draft, so `selectedTaskId` — the id the
+  // window workspace stores — is null, and the choice is gone on the next
+  // reload. Persist again as soon as that same slot names its task.
+  watch(
+    () => [context.state.selectedItemId.value, selectedTaskId.value] as const,
+    ([slotId, taskId], [previousSlotId, previousTaskId]) => {
+      if (!taskId || previousTaskId || slotId !== previousSlotId) return;
+      void persistSelection();
+    },
+  );
+
   function emitTaskSelected(itemId: string) {
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
     postDesktopOperatorEvent({
@@ -136,7 +149,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
       const selectionTime = Date.now() - 1000;
       const item = context.state.items.value.find((candidate) => candidate.id === taskId);
       if (!item || item.activity !== "unread") return;
-      if (item.activity_changed_at && new Date(item.activity_changed_at).getTime() > selectionTime) return;
+      if (item.activity_changed_at && parseServerTimestamp(item.activity_changed_at).getTime() > selectionTime) return;
       const response = await markDesktopTaskRead(taskId);
       if (response.activity == null) return;
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();

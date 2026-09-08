@@ -1972,9 +1972,18 @@ pub(super) async fn request_revision(
             )
             .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
             let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
+            // The event reports the budget this revision leaves behind: an
+            // agent round consumes one, a human request resets the counter,
+            // which is the same write the transaction below makes. Reporting
+            // the pre-reset count made a human revision announce a spent
+            // budget (`rounds == limit`) alongside `exhausted: false`.
             let revision_event_payload = revision_requested_event_payload(
                 &payload,
-                budget.rounds + i64::from(origin.is_agent()),
+                if origin.is_agent() {
+                    budget.rounds + 1
+                } else {
+                    0
+                },
                 budget.limit,
                 false,
             );

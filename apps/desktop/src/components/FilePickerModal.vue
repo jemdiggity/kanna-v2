@@ -117,6 +117,18 @@ function highlightPath(entry: ScoredFile): HighlightSegment[] {
 // Reset selection when query changes
 watch(query, () => { selectedIndex.value = 0; });
 
+// The picker is kept mounted while hidden, so `onMounted` alone leaves it
+// showing whatever it listed the first time it opened — another repo's files,
+// or nothing at all when that first load pointed at a path that had gone away.
+watch(
+  () => [props.worktreePath, props.repoRoot],
+  () => {
+    query.value = "";
+    selectedIndex.value = 0;
+    void loadFiles();
+  },
+);
+
 onMounted(async () => {
   await loadFiles();
   await nextTick();

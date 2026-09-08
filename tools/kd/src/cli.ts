@@ -922,6 +922,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "test" && command === "desktop-e2e-operator") {
     return { taskId: "test.desktop-e2e-operator", input: {} };
   }
+  if (group === "test" && command === "desktop-mock-e2e") {
+    return { taskId: "test.desktop-mock-e2e", input: {} };
+  }
   if (group === "test" && command === "app-update-bundle") {
     return { taskId: "test.app-update-bundle", input: {} };
   }
@@ -1044,6 +1047,7 @@ const helpTopics: Record<string, string[]> = {
     "  test rust",
     "  test desktop-e2e",
     "  test desktop-e2e-operator",
+    "  test desktop-mock-e2e",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
@@ -1559,6 +1563,7 @@ const helpTopics: Record<string, string[]> = {
     "  test rust",
     "  test desktop-e2e",
     "  test desktop-e2e-operator",
+    "  test desktop-mock-e2e",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
@@ -1586,6 +1591,12 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd test desktop-e2e-operator",
     "",
     "Run credentialed and operator-only desktop real E2E files.",
+  ],
+  "test desktop-mock-e2e": [
+    "Usage: kd test desktop-mock-e2e",
+    "",
+    "Run the desktop mock E2E suite. It drives the real app through WebDriver,",
+    "so a bare `vitest run` cannot collect it and `pnpm test` never runs it.",
   ],
   "test app-update-bundle": [
     "Usage: kd test app-update-bundle",

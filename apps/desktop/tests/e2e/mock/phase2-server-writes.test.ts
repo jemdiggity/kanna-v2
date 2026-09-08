@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { cleanupFixtureRepos, createFixtureRepo, publishFixtureChanges } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -83,13 +83,16 @@ function isVueCallError(result: unknown): result is { __error: string } {
   );
 }
 
+// `selectedItemId` is a sidebar SLOT id — for a task created through the app it
+// stays `create:<uuid>` after the row lands. `selectedTaskId` is the durable
+// task the selected slot resolves to.
 async function selectTask(client: WebDriverClient, taskId: string): Promise<void> {
   const result = await callVueMethod(client, "store.selectItem", taskId);
   if (isVueCallError(result)) throw new Error(result.__error);
   const deadline = Date.now() + 5_000;
   let lastSelected: unknown = null;
   while (Date.now() < deadline) {
-    lastSelected = await getVueState(client, "selectedItemId");
+    lastSelected = await getVueState(client, "selectedTaskId");
     if (lastSelected === taskId) return;
     await sleep(100);
   }
@@ -206,10 +209,9 @@ describe("Phase 2 server-owned task writes", () => {
     );
     await chmod(join(kannaDir, "fake-bin", "codex"), 0o755);
 
-    await tauriInvoke(client, "run_script", {
-      cwd: testRepoPath,
-      script: "git add .kanna && git commit -m 'test: add phase2 fixtures'",
-    });
+    // Definitions resolve from the origin snapshot, not the working tree, so
+    // committed-but-unpushed workflow files are invisible to the server.
+    await publishFixtureChanges(testRepoPath, "test: add phase2 fixtures");
     repoId = await importTestRepo(client, testRepoPath, "phase2-server-writes-test");
   });
 

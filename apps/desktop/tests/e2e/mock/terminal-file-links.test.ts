@@ -138,26 +138,62 @@ describe("terminal file links", () => {
       ],
     );
 
-    const selected = await client.executeAsync<string>(
+    const refreshed = await client.executeAsync<string>(
       `const cb = arguments[arguments.length - 1];
        const ctx = window.__KANNA_E2E__.setupState;
        Promise.resolve(ctx.refreshAllItems())
          .then(function() { return ctx.store.selectRepo(${JSON.stringify(repoId)}); })
-         .then(function() { return ctx.store.selectItem(${JSON.stringify(taskId)}); })
+         .then(function() { cb("ok"); })
+         .catch(function(error) { cb("err:" + error); });`,
+    );
+    expect(refreshed).toBe("ok");
+
+    // Sidebar slots are reconciled from the refreshed items on a later tick,
+    // and `store.selectItem` returns quietly when the id resolves to no slot —
+    // which leaves a previous file's terminal mounted and satisfying the
+    // container wait below with the wrong task.
+    const slotDeadline = Date.now() + 10_000;
+    let slotKnown = false;
+    while (Date.now() < slotDeadline) {
+      slotKnown = await client.executeSync<boolean>(
+        `const ctx = window.__KANNA_E2E__.setupState;
+         const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+         return Array.from(unwrap(ctx.store.taskUiSlots) ?? [])
+           .some((slot) => slot.task_id === ${JSON.stringify(taskId)});`,
+      );
+      if (slotKnown) break;
+      await sleep(100);
+    }
+    expect(slotKnown, `seeded task ${taskId} never reached the sidebar slots`).toBe(true);
+
+    const selected = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       Promise.resolve(ctx.store.selectItem(${JSON.stringify(taskId)}))
          .then(function() { cb("ok"); })
          .catch(function(error) { cb("err:" + error); });`,
     );
     expect(selected).toBe("ok");
+    const selectedTaskId = await client.executeSync<string | null>(
+      "return window.__KANNA_E2E__.setupState.store.selectedTaskId ?? null;",
+    );
+    expect(selectedTaskId).toBe(taskId);
     await client.waitForElement(".terminal-container .xterm-helper-textarea", 10_000);
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + 30_000;
+    let registeredSessionIds: string[] = [];
     while (Date.now() < deadline) {
-      const registered = await client.executeSync<boolean>(
-        `return window.__KANNA_E2E__.terminalBuffers?.sessionIds().includes(${JSON.stringify(taskId)}) === true;`,
+      registeredSessionIds = await client.executeSync<string[]>(
+        `return window.__KANNA_E2E__.terminalBuffers?.sessionIds() ?? [];`,
       );
-      if (registered) return;
+      if (registeredSessionIds.includes(taskId)) return;
       await sleep(100);
     }
-    throw new Error(`terminal buffer ${taskId} was not registered`);
+    // Any task's terminal satisfies the container wait above, so name what did
+    // register — otherwise "not registered" cannot distinguish a slow mount
+    // from the wrong session being on screen.
+    throw new Error(
+      `terminal buffer ${taskId} was not registered; registered sessions: ${JSON.stringify(registeredSessionIds)}`,
+    );
   }
 
   it("opens the newest valid agent file with Cmd+L while the terminal has focus", async () => {
