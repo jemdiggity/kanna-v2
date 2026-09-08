@@ -413,7 +413,7 @@ describe("createDesktopRelayTerminalClient", () => {
       relayUrl: "ws://relay.test",
     });
 
-    client.observeTerminal({
+    const subscription = client.observeTerminal({
       desktopId: "desktop-owner",
       taskId: "task-1",
       listener: (event) => events.push(event),
@@ -438,7 +438,19 @@ describe("createDesktopRelayTerminalClient", () => {
       }),
     });
     await Promise.resolve();
+    expect(socket.sent).toHaveLength(3);
+    subscription.registerViewer(80, 24);
     expect(JSON.parse(socket.sent[3])).toEqual({
+      type: "term_viewer_register",
+      task_id: "task-1",
+      viewer_id: "terminal-viewer-1",
+      role: "remote",
+      generation: 1,
+      cols: 80,
+      rows: 24,
+      visible: true,
+    });
+    expect(JSON.parse(socket.sent[4])).toEqual({
       type: "attach",
       task_id: "task-1",
       kind: "terminal",

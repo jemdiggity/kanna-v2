@@ -987,6 +987,19 @@ export class StreamClient {
             attachment.handlers.onUnavailable();
             continue;
           }
+          // Authentication can complete before a remote view's first layout
+          // measurement. Keep the same register-before-attach gate used by
+          // attachTerminal; registerTerminalViewer will send the held attach
+          // as soon as that measurement arrives. Legacy peers negotiate no
+          // geometry capability and retain their original attach behavior.
+          if (
+            attachment.kind === "terminal" &&
+            this.options.terminalViewerRole === "remote" &&
+            this.supportsCapability("terminal_geometry") &&
+            !this.terminalViewerRegistrations.has(taskId)
+          ) {
+            continue;
+          }
           const sent = this.rawSend({
             type: "attach",
             task_id: taskId,

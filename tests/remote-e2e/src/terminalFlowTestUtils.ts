@@ -1,9 +1,11 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
+import { StreamClient } from "../../../packages/stream-client/src/index";
+import { NodeRelaySocket } from "./nodeRelayClient";
 import { runCommand } from "./processes";
 import {
   SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL,
@@ -61,6 +63,8 @@ export interface RawRelayClient {
 export interface TerminalEventCollector {
   close(): void;
   outputText(): string;
+  resize(cols: number, rows: number): void;
+  takeControl(): void;
   sendInput(dataB64: string, submissionBoundary?: boolean, controlInput?: boolean): void;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
@@ -193,7 +197,55 @@ export function collectTerminalEvents(
   harness: RemoteHarness,
   taskId: string
 ): TerminalEventCollector {
-  return new TerminalEventCollectorImpl(harness, taskId);
+  return new TerminalEventCollectorImpl(
+    (listener) => harness.client.observeTaskTerminal({ desktopId: harness.desktopId, taskId }, listener),
+    taskId,
+  );
+}
+
+export async function collectLocalTerminalEvents(
+  harness: RemoteHarness,
+  taskId: string,
+): Promise<TerminalEventCollector> {
+  const credential = (await readFile(join(harness.paths.daemonDir, "task-events.token"), "utf8")).trim();
+  const client = new StreamClient({
+    url: `ws://127.0.0.1:${harness.ports.server}/v1/stream`,
+    // Match the desktop webview boundary: a browser-originated loopback KSP
+    // connection is the only mode authorized to declare a local viewer, and
+    // proves the local control token in-band.
+    webSocketFactory: (url) => new NodeRelaySocket(url, { Origin: "http://localhost" }),
+    credentialProvider: async () => credential,
+    terminalScrollbackWindow: true,
+    terminalViewerRole: "local",
+  });
+  return new TerminalEventCollectorImpl((listener) => {
+    client.attachTerminal(taskId, {
+      onSnapshot(cols, rows, dataB64, _agentProvider, window) {
+        listener({ type: "snapshot", taskId, cols, rows, dataB64, ...(window ? { window } : {}) });
+      },
+      onOutput(dataB64) {
+        if (dataB64) listener({ type: "output", taskId, dataB64 });
+      },
+      onResumed(window) { listener({ type: "resumed", taskId, window }); },
+      onScrollbackChunk(chunk) { listener({ type: "scrollback", taskId, chunk }); },
+      onSessionExit(code) { listener({ type: "exit", taskId, code }); },
+      onError(code, message) { listener({ type: "error", taskId, code, message }); },
+    });
+    return {
+      close() { client.close(); },
+      // This fixture models the desktop renderer's measured local viewer.
+      // Register the proposal without also sending the legacy resize frame:
+      // followers must observe the daemon-elected grid, and the control route
+      // deliberately has one latest-value slot before it binds.
+      resize(cols, rows) { client.registerTerminalViewer(taskId, cols, rows); },
+      takeControl() { client.takeTerminalControl(taskId); },
+      releaseControl() { client.releaseTerminalControl(taskId); },
+      sendInput(dataB64, submissionBoundary, controlInput) {
+        client.sendTermInput(taskId, dataB64, submissionBoundary, controlInput);
+      },
+      requestScrollback(request) { client.requestTerminalScrollback(taskId, request); },
+    };
+  }, taskId);
 }
 
 export async function waitForTerminalOutput(
@@ -435,11 +487,11 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
   private exitCode: number | null = null;
   private readonly subscription: TaskTerminalSubscription;
 
-  constructor(harness: RemoteHarness, private readonly taskId: string) {
-    this.subscription = harness.client.observeTaskTerminal({
-      desktopId: harness.desktopId,
-      taskId
-    }, (event) => this.onEvent(event));
+  constructor(
+    observe: (listener: (event: TaskTerminalStreamEvent) => void) => TaskTerminalSubscription,
+    private readonly taskId: string,
+  ) {
+    this.subscription = observe((event) => this.onEvent(event));
   }
 
   close(): void {
@@ -448,6 +500,14 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
 
   outputText(): string {
     return this.chunks.join("");
+  }
+
+  resize(cols: number, rows: number): void {
+    this.subscription.resize?.(cols, rows);
+  }
+
+  takeControl(): void {
+    this.subscription.takeControl?.();
   }
 
   sendInput(dataB64: string, submissionBoundary = false, controlInput = false): void {
@@ -506,7 +566,8 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
           : "none";
         reject(new Error(
           `timed out waiting for terminal snapshot from ${this.taskId}; ` +
-            `last encoded length=${lastEncodedChars}, dimensions=${lastDimensions}; ` +
+            `last encoded length=${lastEncodedChars}, dimensions=${lastDimensions}, ` +
+            `scrollbackLines=${this.lastSnapshot?.scrollbackLines ?? "none"}; ` +
             `expected >${expectation.minEncodedChars} chars` +
             `${expectation.cols === undefined || expectation.rows === undefined
               ? ""

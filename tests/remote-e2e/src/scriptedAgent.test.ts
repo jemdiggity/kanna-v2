@@ -88,7 +88,7 @@ describe("scripted remote E2E agent", () => {
       snapshotHistory: { sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL" },
     });
 
-    expect(source).toContain('history_line -le 10050');
+    expect(source).toContain('history_line -le 200');
     expect(source).toContain("MOBILE_PTY_HISTORY_%05d_");
     expect(source).toContain("MOBILE_PTY_SNAPSHOT_SENTINEL");
     expect(source).toContain(

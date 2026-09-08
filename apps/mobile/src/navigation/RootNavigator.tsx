@@ -774,6 +774,8 @@ function TaskDetailRoute({
       terminalOutputEpoch={state.taskTerminalOutputEpoch}
       terminalOutputStart={state.taskTerminalOutputStart}
       terminalOutputSource={terminalOutputSource}
+      terminalCols={state.taskTerminalCols}
+      terminalRows={state.taskTerminalRows}
       terminalStatus={state.taskTerminalStatus}
       agentErrorMessage={state.taskAgentErrorMessage}
       agentEvents={state.taskAgentEvents}

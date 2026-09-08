@@ -205,6 +205,7 @@ export function buildTerminalDocument({
       // chunks and then be redrawn away by the rest of that snapshot.
       const terminalMutationQueue = [];
       let terminalMutationActive = false;
+      const documentInstanceId = String(Date.now()) + "-" + Math.random().toString(36).slice(2);
 
       term.loadAddon(fitAddon);
       term.open(root);
@@ -1375,6 +1376,7 @@ export function buildTerminalDocument({
             cursorRow: Number.isInteger(term.buffer.active.cursorY)
               ? term.buffer.active.cursorY
               : null,
+            documentInstanceId,
             frameCount: Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0,
             mentionedFiles: {
               mentions: Array.from(terminalFileMentionHistory.values()).reverse(),
@@ -1388,7 +1390,12 @@ export function buildTerminalDocument({
             })
           }
         }));
-      }` : ""}
+      }
+
+      window.__kannaE2EScrollTerminalToTop = function scrollTerminalToTop() {
+        term.scrollToTop();
+        notifyTerminalInspection();
+      };` : ""}
 
       function notifyTerminalTap() {
         if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {

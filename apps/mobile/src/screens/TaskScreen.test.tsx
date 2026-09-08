@@ -205,11 +205,14 @@ interface RenderTaskScreenOptions {
   }>;
   terminalOutputEpoch?: number;
   terminalOutputStart?: number;
+  terminalCols?: number | null;
+  terminalRows?: number | null;
   e2eTaskSnapshotMarker?: string;
   activity?: "idle" | "working" | "unread";
   draftInput?: string;
   terminalOutput?: string;
   terminalStatus?: TaskTerminalStatus;
+  terminalErrorMessage?: string | null;
   taskCreationPhase?: TaskCreationPhase;
   taskCreationErrorMessage?: string | null;
   onRecoverTaskCreation?: () => void;
@@ -282,11 +285,14 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     blockerTasks,
     terminalOutputEpoch = 1,
     terminalOutputStart = 0,
+    terminalCols = null,
+    terminalRows = null,
     e2eTaskSnapshotMarker,
     activity = "idle",
     draftInput = "",
     terminalOutput = "terminal",
     terminalStatus = "live",
+    terminalErrorMessage = null,
     taskCreationPhase = "idle",
     taskCreationErrorMessage = null,
     onRecoverTaskCreation = vi.fn(),
@@ -355,8 +361,10 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     terminalOutput,
     terminalOutputEpoch,
     terminalOutputStart,
+    terminalCols,
+    terminalRows,
     terminalStatus,
-    terminalErrorMessage: null,
+    terminalErrorMessage,
     taskCreationPhase,
     taskCreationErrorMessage,
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
@@ -739,6 +747,57 @@ describe("TaskScreen", () => {
       expect(
         findByType(renderTaskScreen({ terminalStatus }), "LoadingText")
       ).toBeNull();
+    }
+  );
+
+  it.each(["idle", "connecting", "restarting"] as const)(
+    "retains the authoritative terminal through transient %s state",
+    (terminalStatus) => {
+      const snapshot = {
+        terminalCols: 132,
+        terminalRows: 43,
+        terminalOutput: "authoritative snapshot"
+      };
+      const liveTerminal = findByType(
+        renderTaskScreen({ ...snapshot, terminalStatus: "live" }),
+        "TerminalWebView"
+      );
+      const reconnectingTerminal = findByType(
+        renderTaskScreen({ ...snapshot, terminalStatus }),
+        "TerminalWebView"
+      );
+
+      expect(liveTerminal).not.toBeNull();
+      expect(reconnectingTerminal).not.toBeNull();
+      expect(reconnectingTerminal?.props).toMatchObject({
+        cols: liveTerminal?.props?.cols,
+        rows: liveTerminal?.props?.rows,
+        output: liveTerminal?.props?.output,
+        taskId: liveTerminal?.props?.taskId
+      });
+    }
+  );
+
+  it.each([
+    ["closed", "Offline", null],
+    ["error", "Terminal unavailable", "Terminal unavailable"]
+  ] as const)(
+    "shows the %s overlay instead of a stale authoritative terminal",
+    (terminalStatus, overlayText, terminalErrorMessage) => {
+      const tree = renderTaskScreen({
+        terminalStatus,
+        terminalErrorMessage,
+        terminalOutput: "authoritative snapshot",
+        terminalCols: 132,
+        terminalRows: 43
+      });
+
+      expect(findByType(tree, "TerminalWebView")).toBeNull();
+      expect(
+        JSON.stringify(
+          findByTestId(tree, MOBILE_E2E_IDS.terminalOverlay)?.props?.children
+        )
+      ).toContain(overlayText);
     }
   );
 
@@ -1232,21 +1291,31 @@ describe("TaskScreen", () => {
     expect(onSendTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
   });
 
-  it("uses the mobile viewport geometry instead of a never-rendered PTY snapshot", () => {
+  it("renders the authoritative grid while proposing the mobile viewport", () => {
     const onResizeTerminal = vi.fn();
-    const tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+    const tree = renderTaskScreen({
+      agentType: "pty",
+      onResizeTerminal,
+      terminalCols: 132,
+      terminalRows: 43
+    });
     const terminal = findByType(tree, "TerminalWebView");
 
     expect(terminal?.props).toMatchObject({
-      cols: 80,
-      rows: 48
+      cols: 132,
+      rows: 43
     });
     expect(onResizeTerminal).toHaveBeenCalledWith(80, 48);
   });
 
-  it("resizes xterm and the PTY from a measured tablet layout", () => {
+  it("keeps the authoritative xterm grid while updating a tablet proposal", () => {
     const onResizeTerminal = vi.fn();
-    let tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+    let tree = renderTaskScreen({
+      agentType: "pty",
+      onResizeTerminal,
+      terminalCols: 180,
+      terminalRows: 51
+    });
 
     invokeLayout(findByTestId(tree, MOBILE_E2E_IDS.taskDetailScreen), {
       height: 1366,
@@ -1254,11 +1323,16 @@ describe("TaskScreen", () => {
       x: 0,
       y: 0
     });
-    tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onResizeTerminal,
+      terminalCols: 180,
+      terminalRows: 51
+    });
 
     expect(findByType(tree, "TerminalWebView")?.props).toMatchObject({
-      cols: 128,
-      rows: 72
+      cols: 180,
+      rows: 51
     });
     expect(onResizeTerminal).toHaveBeenLastCalledWith(128, 72);
   });

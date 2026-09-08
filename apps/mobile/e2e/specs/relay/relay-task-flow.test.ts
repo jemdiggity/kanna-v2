@@ -99,10 +99,10 @@ describe("relay task flow orchestration", () => {
       "close",
       "open",
       "rendered",
+      "file-preview",
       "quick-reply",
       "transport",
       "task-actions",
-      "file-preview",
       "visual-companion",
       "composer-reset",
     ]);

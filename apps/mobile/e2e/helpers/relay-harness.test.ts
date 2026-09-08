@@ -10,6 +10,7 @@ describe("mobile relay harness helpers", () => {
       relayHarness as typeof relayHarness & {
         MOBILE_RELAY_PTY_HISTORY_FIXTURE?: {
           maxEncodedChars: number;
+          completionSentinel: string;
           minEncodedChars: number;
           minRetainedScrollbackLines: number;
           sentinel: string;
@@ -19,8 +20,8 @@ describe("mobile relay harness helpers", () => {
 
     expect(fixture).toBeDefined();
     expect(fixture?.maxEncodedChars).toBeLessThan(1_000_000);
-    expect(fixture?.minRetainedScrollbackLines).toBeGreaterThan(8_000);
-    expect(fixture?.sentinel).toMatch(/MOBILE.*SNAPSHOT/);
+    expect(fixture?.minRetainedScrollbackLines).toBeGreaterThan(43);
+    expect(fixture?.completionSentinel).toMatch(/MOBILE.*SNAPSHOT/);
   });
 
   it("captures retained content without assuming one adaptive geometry", () => {

@@ -138,6 +138,7 @@ type TerminalWebViewInspection =
       cols: number | null;
       cursorColumn?: number | null;
       cursorRow?: number | null;
+      documentInstanceId?: string;
       frameCount: number;
       mentionedFiles?: {
         mentions: Array<{ line?: number; path: string; raw: string }>;
@@ -716,6 +717,43 @@ export async function inspectTerminalWebView(
     if (previousContext) {
       await driver.switchContext(previousContext);
     }
+  }
+}
+
+export async function scrollTerminalWebViewToTop(
+  driver: WebViewContextDriver
+): Promise<void> {
+  if (!driver.getContexts || !driver.switchContext) {
+    throw new Error("Appium driver does not expose WebView context APIs");
+  }
+  const contexts = await driver.getContexts();
+  const webViewContexts = contexts
+    .map(contextName)
+    .filter((context): context is string => Boolean(context?.includes("WEBVIEW")));
+  if (webViewContexts.length === 0) {
+    throw new Error("No terminal WebView context was available for scrollback inspection");
+  }
+  const previousContext = driver.getContext
+    ? contextName(await driver.getContext()) ?? "NATIVE_APP"
+    : "NATIVE_APP";
+  try {
+    for (const webViewContext of webViewContexts) {
+      await driver.switchContext(webViewContext);
+      const scrolled = await driver.execute(() => {
+        const scrollToTop = (
+          window as unknown as {
+            __kannaE2EScrollTerminalToTop?: () => void;
+          }
+        ).__kannaE2EScrollTerminalToTop;
+        if (!scrollToTop) return false;
+        scrollToTop();
+        return true;
+      });
+      if (scrolled) return;
+    }
+    throw new Error("Terminal E2E scrollback hook was unavailable");
+  } finally {
+    await driver.switchContext(previousContext);
   }
 }
 

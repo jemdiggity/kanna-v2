@@ -1462,6 +1462,48 @@ describe("TerminalWebView", () => {
     );
   });
 
+  it("applies authoritative snapshot geometry before replacing its bytes", async () => {
+    let sourceSnapshot: TaskTerminalOutputSnapshot = {
+      taskId: "task-1",
+      cols: 132,
+      rows: 43,
+      output: createTerminalOutput("d2lkZQ==\n"),
+      outputEpoch: 7,
+      outputStart: 0,
+      status: "live",
+      prependedScrollback: false
+    };
+    let sourceListener: (() => void) | null = null;
+    const terminalOutputSource: TaskTerminalOutputSource = {
+      getSnapshot: () => sourceSnapshot,
+      subscribe(listener) {
+        sourceListener = listener;
+        return () => {
+          sourceListener = null;
+        };
+      }
+    };
+    const webView = await renderTerminalWebView({ terminalOutputSource });
+    (webView.props.onLoadStart as () => void)();
+    runEffects();
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+    injectedScripts.length = 0;
+
+    sourceSnapshot = {
+      ...sourceSnapshot,
+      cols: 180,
+      rows: 51,
+      output: createTerminalOutput("bmV3IHdpZGUgc25hcHNob3Q=\n"),
+      outputEpoch: 8
+    };
+    sourceListener?.();
+
+    expect(injectedScripts.at(-2)).toBe(buildTerminalResizeScript(180, 51));
+    expect(injectedScripts.at(-1)).toContain("__replaceTerminalState");
+  });
+
   it("bounds pre-ready coalescing and steady-state xterm work for large bursts", async () => {
     const frameCount = 2_000;
     const frames = Array.from({ length: frameCount }, (_, index) =>

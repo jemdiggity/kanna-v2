@@ -21,15 +21,15 @@ if (!createRelayDesktopClient) {
   throw new Error("Could not load createRelayDesktopClient from the mobile relay transport module.");
 }
 
-class NodeRelaySocket implements RelaySocketLike {
+export class NodeRelaySocket implements RelaySocketLike {
   private readonly socket: WebSocket;
   onclose: ((event?: unknown) => void) | null = null;
   onerror: ((event?: unknown) => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onopen: (() => void) | null = null;
 
-  constructor(url: string) {
-    this.socket = new WebSocket(url);
+  constructor(url: string, headers?: Record<string, string>) {
+    this.socket = new WebSocket(url, headers ? { headers } : undefined);
     this.socket.on("open", () => this.onopen?.());
     this.socket.on("message", (data: RawData) => {
       this.onmessage?.({ data: data.toString() });
