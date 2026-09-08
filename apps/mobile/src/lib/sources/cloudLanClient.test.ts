@@ -247,6 +247,57 @@ describe("mergeCloudAndLanTasks", () => {
     expect(legacyLan.tasks[0]?.parentTaskId).toBe("local-parent");
   });
 
+  it("prefers the LAN singleton agent, keeping the cloud value when LAN is silent", () => {
+    const cloudTask = task({
+      id: "cloud-X",
+      repoId: "cloud-repo",
+      ownerDesktopId: "desktop-lan",
+      ownerLocalRepoId: "local-repo",
+      ownerLocalTaskId: "local-task"
+    });
+
+    // The desktop that owns the task is the authority on what it is, so a LAN
+    // read replaces a stale cloud value in both directions.
+    const claimed = mergeCloudAndLanTasks({
+      cloudTasks: [cloudTask],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [
+          {
+            ...task({ id: "local-task", repoId: "local-repo" }),
+            singletonAgent: "merge"
+          }
+        ]
+      }
+    });
+    expect(claimed.tasks[0]?.singletonAgent).toBe("merge");
+
+    const cleared = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, singletonAgent: "merge" }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [
+          {
+            ...task({ id: "local-task", repoId: "local-repo" }),
+            singletonAgent: null
+          }
+        ]
+      }
+    });
+    expect(cleared.tasks[0]?.singletonAgent).toBeNull();
+
+    // A desktop too old to report the field says nothing, so the cloud value
+    // stands rather than being erased.
+    const legacyLan = mergeCloudAndLanTasks({
+      cloudTasks: [{ ...cloudTask, singletonAgent: "merge" }],
+      lan: {
+        desktopId: "desktop-lan",
+        tasks: [task({ id: "local-task", repoId: "local-repo" })]
+      }
+    });
+    expect(legacyLan.tasks[0]?.singletonAgent).toBe("merge");
+  });
+
   it("prefers the LAN blocker list, including an empty resolution", () => {
     const cloudTask = task({
       id: "cloud-X",

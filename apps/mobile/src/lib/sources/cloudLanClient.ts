@@ -174,6 +174,9 @@ export function mergeCloudAndLanTasks({
       if (lanTask.blockedByTaskIds !== undefined) {
         mergedTask.blockedByTaskIds = lanTask.blockedByTaskIds;
       }
+      if (lanTask.singletonAgent !== undefined) {
+        mergedTask.singletonAgent = lanTask.singletonAgent;
+      }
       if (lanTask.pinned !== undefined) {
         mergedTask.pinned = lanTask.pinned;
       }
