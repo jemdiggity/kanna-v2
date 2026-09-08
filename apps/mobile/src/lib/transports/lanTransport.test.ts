@@ -1060,7 +1060,6 @@ describe("createLanTransport", () => {
           "term_scrollback_window",
           "terminal_geometry"
         ] },
-      { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
       { type: "term_input_control", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" },
       { type: "term_input", task_id: "task-1", data_b64: "aHVtYW4gZHJhZnQ=" },
       { type: "term_input_boundary", task_id: "task-1", data_b64: "DQ==" },

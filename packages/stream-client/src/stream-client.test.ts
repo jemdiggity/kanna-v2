@@ -2919,6 +2919,59 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("holds auth replay until a geometry-aware remote viewer registers", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    client.attachTerminal("task-pty", { onOutput() {} });
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+
+    expect(socket.sent).not.toContainEqual(
+      expect.objectContaining({ type: "attach", task_id: "task-pty" }),
+    );
+
+    client.sendTermResize("task-pty", 42, 18);
+    expect(socket.sent.slice(-2)).toEqual([
+      expect.objectContaining({
+        type: "term_viewer_register",
+        task_id: "task-pty",
+        cols: 42,
+        rows: 18,
+      }),
+      {
+        type: "attach",
+        task_id: "task-pty",
+        kind: "terminal",
+        from_seq: 0,
+      },
+    ]);
+    client.close();
+  });
+
+  it("keeps legacy remote auth replay compatible without registration", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    client.attachTerminal("task-pty", { onOutput() {} });
+    socket.open();
+    socket.receive({ type: "auth_ok", capabilities: [] });
+
+    expect(socket.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    });
+    client.close();
+  });
+
   it("coalesces remote geometry bursts while preserving the first registration order", async () => {
     const client = new StreamClient({
       url: "ws://test/v1/stream",

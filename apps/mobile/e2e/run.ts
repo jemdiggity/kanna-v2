@@ -356,6 +356,7 @@ async function main(): Promise<void> {
         customizedReply: relayHarness.quickReply.text,
         fixture: relayHarness.fixture,
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
+        resyncTerminalConnection: relayHarness.resyncTerminalConnection,
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,
         taskOrdering: relayHarness.taskOrdering,

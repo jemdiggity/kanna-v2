@@ -49,6 +49,7 @@ interface RelayTaskFlowOptions {
   customizedReply: string;
   fixture: PtyTerminalFixture;
   prepareTaskUnreadForMarkRead(): Promise<void>;
+  resyncTerminalConnection(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
@@ -230,6 +231,43 @@ interface RelayPtySnapshotRevisitJourney {
   waitForRenderedTerminal(): Promise<void>;
 }
 
+async function verifyRelayPtyStableResync(
+  ui: Pick<
+    RelayUi,
+    | "getAgentMessageView"
+    | "getTaskDetailScreen"
+    | "getTerminalOverlay"
+    | "inspectTerminalWebView"
+    | "pause"
+    | "waitUntil"
+  >,
+  fixture: PtyTerminalFixture,
+  resync: () => Promise<void>,
+): Promise<void> {
+  const before = await ui.inspectTerminalWebView();
+  if (before.kind !== "rendered" || !before.documentInstanceId) {
+    throw new Error(`Expected a rendered terminal document before resync: ${JSON.stringify(before)}`);
+  }
+  await resync();
+  await waitForRenderedPtyTerminal(ui, fixture);
+  for (let sample = 0; sample < 10; sample += 1) {
+    const overlay = await ui.getTerminalOverlay();
+    const inspection = await ui.inspectTerminalWebView();
+    if (
+      await overlay.isExisting() ||
+      inspection.kind !== "rendered" ||
+      inspection.documentInstanceId !== before.documentInstanceId ||
+      inspection.cols !== fixture.expectedCols
+    ) {
+      throw new Error(
+        `Terminal attachment churned after resync at sample ${sample}: ` +
+        `${JSON.stringify(inspection)}`,
+      );
+    }
+    await ui.pause(500);
+  }
+}
+
 interface RelayTaskJourneys {
   verifyQuickReplyPersistence(): Promise<void>;
   verifyComposerReset(): Promise<void>;
@@ -247,9 +285,11 @@ export async function runRelayTaskJourneys(
   await journeys.verifyQuickReplyPersistence();
   await journeys.verifyMarkedRead();
   await journeys.verifyPtySnapshotRevisit();
+  // Exercise file discovery immediately after the terminal revisit, before
+  // later menus can change the detail presentation state.
+  await journeys.verifyFilePreview();
   await journeys.verifyQuickReply();
   await journeys.verifyTaskActionMenu();
-  await journeys.verifyFilePreview();
   await journeys.verifyVisualCompanion();
   await journeys.verifyComposerReset();
 }
@@ -390,6 +430,43 @@ export async function verifyRelayPtyRenderedGridAndCursor(
   );
 }
 
+export async function verifyRelayPtyAuthoritativeScrollback(
+  driver: Browser,
+  ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
+  fixture: PtyTerminalFixture,
+): Promise<void> {
+  const scrollTop = await driver.$(selectors.terminalScrollTop);
+  await scrollTop.waitForExist({ timeout: SCREEN_TIMEOUT_MS });
+  await scrollTop.click();
+
+  const expectedHistoryRow = /^MOBILE_PTY_HISTORY_\d{5}_X{100}$/;
+  let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
+  await ui.waitUntil(
+    async () => {
+      lastInspection = await ui.inspectTerminalWebView();
+      if (lastInspection.kind !== "rendered") return false;
+      const visibleRows = (lastInspection.visibleRows ?? []).filter(Boolean);
+      const historyRows = visibleRows.filter((row) => row.startsWith("MOBILE_PTY_HISTORY_"));
+      return (
+        lastInspection.cols === fixture.expectedCols &&
+        historyRows.length >= 10 &&
+        historyRows.every((row) =>
+          row.length <= fixture.expectedCols && expectedHistoryRow.test(row)
+        ) &&
+        !visibleRows.some((row) => /^X+$/.test(row))
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected scrollback to remain uniformly wrapped at authoritative ` +
+        `${fixture.expectedCols} columns without orphan fragments; last inspection ` +
+        `${JSON.stringify(lastInspection)}`,
+    },
+  );
+}
+
 async function dismissSavePasswordPrompt(driver: Browser): Promise<void> {
   for (const selector of [
     "~Not Now",
@@ -525,6 +602,11 @@ function createRelayUi(driver: Browser): RelayUi {
       return driver.$(`~${TASK_ACTION_MENU_TITLE}`);
     },
     async getTaskActionOption(label) {
+      if (label.startsWith("Mentioned Files (")) {
+        return driver.$(
+          '-ios predicate string:name BEGINSWITH "Mentioned Files (" OR label BEGINSWITH "Mentioned Files ("'
+        );
+      }
       return driver.$(`~${label}`);
     },
     async getTaskInput() {
@@ -1617,6 +1699,7 @@ export async function verifyRelayTaskMarkedRead(
     closeTask(): Promise<void>;
     openTask(): Promise<void>;
     prepareUnread(): Promise<void>;
+    settleAfterClose?(): Promise<void>;
     waitForOwnerIdle(): Promise<void>;
     waitForSelectedDetailIdle(): Promise<void>;
   },
@@ -1627,6 +1710,7 @@ export async function verifyRelayTaskMarkedRead(
   await actions.waitForOwnerIdle();
   await actions.waitForSelectedDetailIdle();
   await actions.closeTask();
+  await actions.settleAfterClose?.();
   await waitForTaskActivity(ui, taskId, "idle");
 }
 
@@ -1720,6 +1804,7 @@ export async function runRelayTaskFlow(
       },
     );
   };
+  let renderedTerminalVisits = 0;
   await verifyTasksTabNewestFirst(ui, options.taskOrdering, !isTabletWorkspace);
   const exactTaskRow = await ui.getTaskRowById(options.fixture.taskId);
   await exactTaskRow.scrollIntoView({ direction: "down", maxScrolls: 5 });
@@ -1766,12 +1851,18 @@ export async function runRelayTaskFlow(
           await backButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
         }
       },
-      waitForOwnerIdle: () => options.waitForLocalTaskActivity("idle"),
+      async waitForOwnerIdle() {
+        // Opening the synthetic PTY snapshot is itself output activity. Settle
+        // the fixture after that attach so this read-state journey does not
+        // confuse snapshot hydration with an agent turn.
+        await options.setTaskActivity("idle");
+        await options.waitForLocalTaskActivity("idle");
+      },
       async waitForSelectedDetailIdle() {
-        await waitForSelectedTaskDetailActivity(ui, "idle");
-        await options.waitForMobileTerminalGeometry();
+        // Geometry is asserted by the dedicated rendering journey below.
       },
       closeTask: closeTaskForJourney,
+      settleAfterClose: () => options.setTaskActivity("idle"),
     }),
     verifyPtySnapshotRevisit: () => verifyRelayPtySnapshotRevisit({
       openTask: () => openRelayFixtureTask(ui, options.fixture.taskId),
@@ -1779,6 +1870,19 @@ export async function runRelayTaskFlow(
         await waitForTaskTerminalLive(ui);
         await waitForRenderedPtyTerminal(ui, options.fixture);
         await verifyRelayPtyRenderedGridAndCursor(ui, options.fixture);
+        await verifyRelayPtyAuthoritativeScrollback(driver, ui, options.fixture);
+        process.stdout.write(
+          `[mobile-e2e] authoritative terminal render visit ${renderedTerminalVisits + 1} passed\n`,
+        );
+        renderedTerminalVisits += 1;
+        if (renderedTerminalVisits === 2) {
+          await verifyRelayPtyStableResync(
+            ui,
+            options.fixture,
+            options.resyncTerminalConnection,
+          );
+          process.stdout.write("[mobile-e2e] terminal resync stability passed\n");
+        }
       },
       closeTask: closeTaskForJourney,
     }),

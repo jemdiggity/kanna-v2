@@ -94,6 +94,7 @@ interface TerminalInspection {
   cols: number | null;
   cursorColumn?: number | null;
   cursorRow?: number | null;
+  documentInstanceId?: string;
   frameCount: number;
   mentionedFiles?: TerminalFileMentionHistory;
   rows: number | null;
@@ -307,6 +308,16 @@ export function TerminalWebViewComponent({
         appendTerminalChunk(mutation.chunk);
         break;
       case "replace":
+        // A daemon snapshot is serialized for its authoritative grid. Apply
+        // that grid before writing any replacement bytes so xterm never
+        // parses one frame at the phone proposal width and then reflows it at
+        // the owner width. Ordinary appends keep the existing grid untouched.
+        if (snapshot.cols && snapshot.rows) {
+          injectOrQueueScript(
+            buildTerminalResizeScript(snapshot.cols, snapshot.rows),
+            "resize"
+          );
+        }
         replaceTerminalState({
           contentRevision: snapshot.outputEpoch,
           output: mutation.output,
@@ -345,6 +356,8 @@ export function TerminalWebViewComponent({
           ? sourceSnapshot
           : {
               taskId,
+              cols,
+              rows,
               output: normalizedOutput,
               outputEpoch,
               outputStart,
@@ -362,6 +375,12 @@ export function TerminalWebViewComponent({
       previousOutputEpochRef.current = initialSnapshot.outputEpoch;
       previousOutputStartRef.current = initialSnapshot.outputStart;
       previousStatusRef.current = initialSnapshot.status;
+      if (initialSnapshot.cols && initialSnapshot.rows) {
+        injectOrQueueScript(
+          buildTerminalResizeScript(initialSnapshot.cols, initialSnapshot.rows),
+          "resize"
+        );
+      }
       replaceTerminalState(latestTerminalStateRef.current);
       return;
     }
@@ -372,6 +391,8 @@ export function TerminalWebViewComponent({
 
     applyTerminalOutputSnapshot({
       taskId,
+      cols,
+      rows,
       output: normalizedOutput,
       outputEpoch,
       outputStart,
@@ -611,6 +632,16 @@ export function TerminalWebViewComponent({
           {JSON.stringify(terminalInspection)}
         </Text>
       ) : null}
+      {ENABLE_E2E_TERMINAL_INSPECTION ? (
+        <Pressable
+          accessibilityLabel="Scroll terminal to top for E2E inspection"
+          onPress={() => webViewRef.current?.injectJavaScript(
+            "window.__kannaE2EScrollTerminalToTop?.(); true;"
+          )}
+          style={styles.e2eTerminalAction}
+          testID={MOBILE_E2E_IDS.terminalScrollTop}
+        />
+      ) : null}
       {terminalSelection ? (
         <View
           accessibilityLabel="Terminal text selection controls"
@@ -711,6 +742,15 @@ export function TerminalWebViewComponent({
 export const TerminalWebView = React.memo(TerminalWebViewComponent);
 
 const styles = StyleSheet.create({
+  e2eTerminalAction: {
+    height: 1,
+    left: 0,
+    opacity: 0.01,
+    position: "absolute",
+    top: 0,
+    width: 1,
+    zIndex: 20
+  },
   contentLoading: {
     alignItems: "center",
     alignSelf: "center",

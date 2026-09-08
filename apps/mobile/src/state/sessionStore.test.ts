@@ -196,7 +196,6 @@ describe("createSessionStore", () => {
       repoCommandStatus: "ready",
       runningRepoCommandId: "custom:ship"
     });
-
     store.finishRepoCommandRun("custom:ship");
     store.selectRepo("repo-2");
     expect(store.getState()).toMatchObject({
@@ -1140,6 +1139,10 @@ describe("createSessionStore", () => {
       taskTerminalCols: 132,
       taskTerminalRows: 43,
       taskTerminalErrorMessage: null
+    });
+    expect(store.taskTerminalOutputSource.getSnapshot()).toMatchObject({
+      cols: 132,
+      rows: 43
     });
     expect(terminalText(store)).toBe("fresh-snapshot\n");
     expect(publishes).toBe(1);

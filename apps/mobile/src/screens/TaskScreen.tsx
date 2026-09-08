@@ -111,6 +111,8 @@ interface TaskScreenProps {
   terminalOutputEpoch: number;
   terminalOutputStart: number;
   terminalOutputSource?: TaskTerminalOutputSource;
+  terminalCols?: number | null;
+  terminalRows?: number | null;
   terminalStatus: TaskTerminalStatus;
   terminalErrorMessage: string | null;
   agentEvents: FrameAgentEvent[];
@@ -226,6 +228,8 @@ export function TaskScreen({
   terminalOutputEpoch,
   terminalOutputStart,
   terminalOutputSource,
+  terminalCols = null,
+  terminalRows = null,
   terminalStatus,
   terminalErrorMessage,
   agentEvents,
@@ -457,6 +461,12 @@ export function TaskScreen({
   );
   const terminalSelectionToolbarTop =
     getTerminalSelectionToolbarTop(topChromeBottom);
+  // A transient transport reconnect does not invalidate the authoritative
+  // snapshot already on screen. Keep the same xterm document mounted so the
+  // resumed generation replaces its buffer atomically instead of briefly
+  // rebuilding a phone-width terminal and presenting that as a reconnect.
+  const hasAuthoritativeTerminalSnapshot =
+    terminalOutput.length > 0 && terminalCols !== null && terminalRows !== null;
   // An attachment is a file the desktop writes and names in the injected
   // message, which only the HTTP input path does. SDK-mode tasks answer over
   // the agent stream instead, so they get no attach control rather than an
@@ -1006,7 +1016,7 @@ export function TaskScreen({
             onRequestHistory={onRequestAgentHistory}
             onResolvePermission={onResolveAgentPermission}
           />
-        ) : model.isTerminalHealthy ? (
+        ) : model.isTerminalHealthy || hasAuthoritativeTerminalSnapshot ? (
           <>
             <TerminalWebView
               fullscreen
@@ -1016,8 +1026,8 @@ export function TaskScreen({
               outputStart={terminalOutputStart}
               terminalOutputSource={terminalOutputSource}
               status={terminalStatus}
-              cols={terminalGeometry.cols}
-              rows={terminalGeometry.rows}
+              cols={terminalCols}
+              rows={terminalRows}
               taskId={task.id}
               bottomInset={terminalBottomInset}
               selectionToolbarTop={terminalSelectionToolbarTop}

@@ -70,6 +70,7 @@ export const MOBILE_E2E_IDS = {
   },
   taskBlockedPlaceholder: "mobile.task-blocked-placeholder",
   terminalInspection: "mobile.terminal-inspection",
+  terminalScrollTop: "mobile.terminal-scroll-top",
   visualCompanionButton: "mobile.visual-companion.button",
   visualCompanionUnread: "mobile.visual-companion.unread",
   visualCompanionModal: "mobile.visual-companion.modal",

@@ -31,6 +31,7 @@ export const selectors = {
   agentMessageReady: `~${MOBILE_E2E_IDS.agentMessageReady}`,
   terminalOverlay: `~${MOBILE_E2E_IDS.terminalOverlay}`,
   terminalInspection: `~${MOBILE_E2E_IDS.terminalInspection}`,
+  terminalScrollTop: `~${MOBILE_E2E_IDS.terminalScrollTop}`,
   visualCompanionButton: `~${MOBILE_E2E_IDS.visualCompanionButton}`,
   visualCompanionClose: `~${MOBILE_E2E_IDS.visualCompanionClose}`,
   visualCompanionModal: `~${MOBILE_E2E_IDS.visualCompanionModal}`,

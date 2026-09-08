@@ -102,10 +102,16 @@ export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string 
   const inputTrace = options.inputTraceFile
     ? `printf '%s\\000' "$line" >> ${shellSingleQuote(options.inputTraceFile)}`
     : ":";
+  // Avoid CSI bytes here: the file-mention scanner intentionally ignores
+  // control-bearing lines. Fill one row without reaching its wrap cell, then
+  // return to column zero so the asserted input bytes overwrite a clean row.
+  const inputLineReset = options.snapshotHistory
+    ? `\\r${" ".repeat(131)}\\r`
+    : "";
   const inputReport = options.redactInput
     ? "printf 'SCRIPT_REDACTED_INPUT\\n'"
     : `${inputTrace}
-    printf 'SCRIPT_INPUT:%s\\n' "$line"`;
+    printf '${inputLineReset}SCRIPT_INPUT:%s\\n' "$line"`;
   const snapshotHistorySentinel =
     options.snapshotHistory?.sentinel ?? SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL;
   const snapshotHistoryTrigger = options.snapshotHistory
@@ -162,8 +168,11 @@ esac`;
   const snapshotHistory = `${snapshotHistoryTrigger}
 if [ "$snapshot_history_enabled" -eq 1 ]; then
   history_line=1
-  while [ $history_line -le 10050 ]; do
-    printf 'MOBILE_PTY_HISTORY_%05d_%s\\r\\n' "$history_line" '${"X".repeat(54)}'
+  while [ $history_line -le 200 ]; do
+    # 125 columns: one row in the relay fixture's authoritative 132-column
+    # grid, but two rows (including an orphan X fragment) if mobile parses the
+    # snapshot at its 80-column proposal width.
+    printf 'MOBILE_PTY_HISTORY_%05d_%s\\r\\n' "$history_line" '${"X".repeat(100)}'
     history_line=$((history_line + 1))
   done
   printf '%s\\r\\n' ${shellSingleQuote(snapshotHistorySentinel)}

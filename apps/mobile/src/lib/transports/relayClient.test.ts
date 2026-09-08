@@ -434,8 +434,22 @@ describe("createRelayDesktopClient", () => {
       }),
     });
     await flushPromises();
+    subscription.resize?.(80, 48);
     expect(socket.send).toHaveBeenNthCalledWith(
       4,
+      JSON.stringify({
+        type: "term_viewer_register",
+        task_id: "task-1",
+        viewer_id: "terminal-viewer-1",
+        role: "remote",
+        generation: 1,
+        cols: 80,
+        rows: 48,
+        visible: true
+      })
+    );
+    expect(socket.send).toHaveBeenNthCalledWith(
+      5,
       JSON.stringify({
         type: "attach",
         task_id: "task-1",
@@ -489,21 +503,10 @@ describe("createRelayDesktopClient", () => {
         data_b64: "G1s8NjU7MTsxTQ=="
       })
     );
+    const sendsBeforeRepeatedResize = socket.send.mock.calls.length;
     subscription.resize?.(80, 48);
     await flushPromises();
-    expect(socket.send).toHaveBeenNthCalledWith(
-      socket.send.mock.calls.length - 1,
-      JSON.stringify({
-        type: "term_viewer_register",
-        task_id: "task-1",
-        viewer_id: "terminal-viewer-1",
-        role: "remote",
-        generation: 1,
-        cols: 80,
-        rows: 48,
-        visible: true
-      })
-    );
+    expect(socket.send).toHaveBeenCalledTimes(sendsBeforeRepeatedResize);
 
     subscription.close();
     await flushPromises();

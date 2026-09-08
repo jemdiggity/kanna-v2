@@ -280,6 +280,8 @@ function scrollbackFromWindow(
 
 export interface TaskTerminalOutputSnapshot {
   taskId: string | null;
+  cols: number | null;
+  rows: number | null;
   output: TerminalOutputBuffer;
   outputEpoch: number;
   outputStart: number;
@@ -539,6 +541,8 @@ export function createSessionStore(): SessionStore {
   const terminalOutputListeners = new Set<() => void>();
   let terminalOutputSnapshot: TaskTerminalOutputSnapshot = {
     taskId: state.taskTerminalTaskId,
+    cols: state.taskTerminalCols,
+    rows: state.taskTerminalRows,
     output: state.taskTerminalOutput,
     outputEpoch: state.taskTerminalOutputEpoch,
     outputStart: state.taskTerminalOutputStart,
@@ -553,6 +557,8 @@ export function createSessionStore(): SessionStore {
   const publishTerminalOutput = (prependedScrollback = false) => {
     terminalOutputSnapshot = {
       taskId: state.taskTerminalTaskId,
+      cols: state.taskTerminalCols,
+      rows: state.taskTerminalRows,
       output: state.taskTerminalOutput,
       outputEpoch: state.taskTerminalOutputEpoch,
       outputStart: state.taskTerminalOutputStart,

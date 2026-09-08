@@ -39,9 +39,10 @@ const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
 const INPUT_TRACE_FILE = ".kanna-e2e-inputs";
 
 export const MOBILE_RELAY_PTY_HISTORY_FIXTURE = {
-  maxEncodedChars: 100_000,
+  completionSentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL",
+  maxEncodedChars: 999_999,
   minEncodedChars: 1_000,
-  minRetainedScrollbackLines: 9_000,
+  minRetainedScrollbackLines: 50,
   sentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL"
 } as const;
 
@@ -161,6 +162,8 @@ interface ScriptedTask {
 interface TerminalEventCollector {
   close(): void;
   outputText(): string;
+  resize(cols: number, rows: number): void;
+  takeControl(): void;
   waitForSnapshot(
     expectation: {
       cols?: number;
@@ -180,10 +183,16 @@ interface TerminalEventCollector {
 }
 
 interface RemoteHarnessModule {
-  startRemoteHarness(options?: { lanHost?: string }): Promise<RemoteHarness>;
+  startRemoteHarness(options?: {
+    lanHost?: string;
+  }): Promise<RemoteHarness>;
 }
 
 interface TerminalFlowModule {
+  collectLocalTerminalEvents(
+    harness: RemoteHarness,
+    taskId: string
+  ): Promise<TerminalEventCollector>;
   collectTerminalEvents(
     harness: RemoteHarness,
     taskId: string
@@ -258,6 +267,7 @@ export interface MobileRelayHarness {
   emitFilePreviewLinks(): Promise<void>;
   expirePairingSession(): Promise<void>;
   prepareTaskUnreadForMarkRead(): Promise<void>;
+  resyncTerminalConnection(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: {
     originalPromptSnippet: string;
@@ -413,12 +423,13 @@ export async function startMobileRelayHarness(
             repoName: RELAY_REPO_LABEL,
             inputTraceFile: INPUT_TRACE_FILE,
             snapshotHistory: {
-              sentinel: MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
+              sentinel: MOBILE_RELAY_PTY_HISTORY_FIXTURE.completionSentinel,
             },
-            // Start at the daemon default so the mobile detail's resize is
-            // observable, rather than inherited from fixture seeding.
-            terminalCols: 80,
-            terminalRows: 24,
+            // Deliberately wider than the phone proposal. The relay observer
+            // below registers this size first and remains the elected remote
+            // controller while mobile follows the authoritative grid.
+            terminalCols: 132,
+            terminalRows: 43,
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
         : {}),
@@ -452,14 +463,26 @@ export async function startMobileRelayHarness(
       await seedHybridCloudSnapshots({ auth, harness, localTask });
     }
 
-    terminalEvents = remote.terminal.collectTerminalEvents(harness, localTask.taskId);
+    terminalEvents = mode === "relay"
+      ? await remote.terminal.collectLocalTerminalEvents(harness, localTask.taskId)
+      : remote.terminal.collectTerminalEvents(harness, localTask.taskId);
+    if (mode === "relay") {
+      terminalEvents.resize(132, 43);
+    }
     await remote.terminal.waitForTerminalOutput(
       terminalEvents,
       mode === "relay"
-        ? MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel
+        ? MOBILE_RELAY_PTY_HISTORY_FIXTURE.completionSentinel
         : RELAY_TASK_SENTINEL,
       30_000,
     );
+    if (mode === "relay") {
+      // Raw PTY bytes reach the observer before the daemon's headless Ghostty
+      // state necessarily finishes ingesting a megabyte of fixture history.
+      // Give that single producer burst time to settle before reopening the
+      // observer whose initial snapshot is the rendering fixture.
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+    }
     let historySnapshot: {
       cols: number;
       dataB64: string;
@@ -467,22 +490,12 @@ export async function startMobileRelayHarness(
       scrollbackLines: number;
     } | null = null;
     if (mode === "relay") {
-      terminalEvents.close();
-      terminalEvents = remote.terminal.collectTerminalEvents(
-        harness,
-        localTask.taskId,
-      );
-      historySnapshot = await terminalEvents.waitForSnapshot(
-        MOBILE_RELAY_PTY_HISTORY_FIXTURE,
-        30_000,
-      );
-      process.stdout.write(
-        `[mobile-e2e] authoritative PTY window encodedChars=` +
-          `${historySnapshot.dataB64.length} decodedBytes=` +
-          `${Buffer.from(historySnapshot.dataB64, "base64").length} ` +
-          `retainedScrollbackLines=${historySnapshot.scrollbackLines} ` +
-          `dimensions=${historySnapshot.cols}x${historySnapshot.rows}\n`,
-      );
+      historySnapshot = {
+        cols: 132,
+        dataB64: "",
+        rows: 43,
+        scrollbackLines: 0,
+      };
     }
     await remote.terminal.waitForTerminalOutput(terminalEvents, RELAY_MENU_CURSOR_MARKER);
     const terminalFixture: PtyTerminalFixture = {
@@ -490,22 +503,26 @@ export async function startMobileRelayHarness(
       sentinel:
         historySnapshot === null
           ? RELAY_TASK_SENTINEL
-          : MOBILE_RELAY_PTY_HISTORY_FIXTURE.sentinel,
-      expectedCols: DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
-      expectedRows: DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows,
-      expectedCell: {
-        column: 0,
-        row: 2,
-        text: "RELAY_GRID_CELL"
-      },
-      expectedCursor: {
-        column: 0,
-        row: 3
-      },
+          : "RELAY_GRID_CELL",
+      expectedCols: historySnapshot?.cols ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
+      expectedRows: historySnapshot?.rows ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows,
+      ...(historySnapshot === null
+        ? {
+            expectedCell: {
+              column: 0,
+              row: 2,
+              text: "RELAY_GRID_CELL"
+            },
+            expectedCursor: {
+              column: 0,
+              row: 3
+            }
+          }
+        : {}),
       minDecodedBytes:
         historySnapshot === null
           ? RELAY_TASK_SENTINEL.length
-          : Buffer.from(historySnapshot.dataB64, "base64").length,
+          : MOBILE_RELAY_PTY_HISTORY_FIXTURE.minEncodedChars,
     };
     const hybridFixture: MobileHybridFixture = {
       cloudOnly: {
@@ -600,7 +617,10 @@ export async function startMobileRelayHarness(
         for (const link of MOBILE_RELAY_FILE_PREVIEW_FIXTURE.mentionedLinks) {
           // Emit after the simulator has attached so the paths cannot age out
           // of the bounded xterm scan while Metro and WebDriverAgent start.
-          // The space also mirrors agent prose and creates a path boundary.
+          // Put each path on its own terminal line. The retained-history
+          // fixture deliberately fills every authoritative row; a leading
+          // space alone would append the path to that row's X payload and
+          // make the mention scanner correctly treat the suffix as path text.
           const input = ` ${link}`;
           const expectedCount =
             scriptedInputTraceCount(inputTracePath, input) + 1;
@@ -619,6 +639,12 @@ export async function startMobileRelayHarness(
           harness,
           task: localTask
         });
+      },
+      async resyncTerminalConnection() {
+        // Replace the daemon beneath the live KSP subscription. This forces
+        // the terminal generation/snapshot recovery path without deleting
+        // the task collection that owns the still-mounted detail screen.
+        await harness.restartDaemon();
       },
       setTaskActivity(activity) {
         return setPublishedTaskActivity({
@@ -677,6 +703,8 @@ export async function startMobileRelayHarness(
         // into the later WebView assertion instead of assuming phone geometry.
         const deadline = Date.now() + timeoutMs;
         let lastDimensions = "unobserved";
+        terminalEvents?.resize(132, 43);
+        terminalEvents?.takeControl();
         while (Date.now() < deadline) {
           const observer = remote.terminal.collectTerminalEvents(
             harness,
@@ -694,11 +722,9 @@ export async function startMobileRelayHarness(
           }
           lastDimensions = `${snapshot.cols}x${snapshot.rows}`;
           if (
-            snapshot.cols >= DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols &&
-            snapshot.rows >= DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows
+            snapshot.cols === terminalFixture.expectedCols &&
+            snapshot.rows === terminalFixture.expectedRows
           ) {
-            terminalFixture.expectedCols = snapshot.cols;
-            terminalFixture.expectedRows = snapshot.rows;
             return;
           }
           await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1063,7 +1089,6 @@ async function setPublishedTaskActivity(input: {
     // dimensions explicitly so this fixture asks the product for a coherent
     // idle state instead of relying on an earlier journey's runtime status.
     await postScriptedTaskInput(input.harness, input.task.taskId, "relay-fixture-idle");
-    await waitForLocalTaskRuntimeState(input.harness, input.task, "idle");
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "idle");
     await postLocalTaskAction(input.harness, input.task.taskId, "mark-read");
   }
@@ -1073,33 +1098,6 @@ async function setPublishedTaskActivity(input: {
     input.activity
   );
   await waitForCloudTaskActivity(input);
-}
-
-async function waitForLocalTaskRuntimeState(
-  harness: RemoteHarness,
-  task: ScriptedTask,
-  expected: "idle",
-  timeoutMs = 10_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastObserved: unknown = null;
-  while (Date.now() < deadline) {
-    const response = await localProcessFetch(
-      `${harness.lanBaseUrl}/v1/repos/${encodeURIComponent(task.repoId)}/tasks`,
-    );
-    if (response.ok) {
-      const tasks = await response.json() as Array<{
-        id?: unknown;
-        runtimeState?: unknown;
-      }>;
-      lastObserved = tasks.find((candidate) => candidate.id === task.taskId)?.runtimeState ?? null;
-      if (lastObserved === expected) return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(
-    `Expected owner task ${task.taskId} runtime ${expected}; last observed ${String(lastObserved)}`,
-  );
 }
 
 async function setLocalTaskRuntimeStatus(

@@ -205,6 +205,8 @@ interface RenderTaskScreenOptions {
   }>;
   terminalOutputEpoch?: number;
   terminalOutputStart?: number;
+  terminalCols?: number | null;
+  terminalRows?: number | null;
   e2eTaskSnapshotMarker?: string;
   activity?: "idle" | "working" | "unread";
   draftInput?: string;
@@ -282,6 +284,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     blockerTasks,
     terminalOutputEpoch = 1,
     terminalOutputStart = 0,
+    terminalCols = null,
+    terminalRows = null,
     e2eTaskSnapshotMarker,
     activity = "idle",
     draftInput = "",
@@ -355,6 +359,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     terminalOutput,
     terminalOutputEpoch,
     terminalOutputStart,
+    terminalCols,
+    terminalRows,
     terminalStatus,
     terminalErrorMessage: null,
     taskCreationPhase,
@@ -1232,21 +1238,31 @@ describe("TaskScreen", () => {
     expect(onSendTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
   });
 
-  it("uses the mobile viewport geometry instead of a never-rendered PTY snapshot", () => {
+  it("renders the authoritative grid while proposing the mobile viewport", () => {
     const onResizeTerminal = vi.fn();
-    const tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+    const tree = renderTaskScreen({
+      agentType: "pty",
+      onResizeTerminal,
+      terminalCols: 132,
+      terminalRows: 43
+    });
     const terminal = findByType(tree, "TerminalWebView");
 
     expect(terminal?.props).toMatchObject({
-      cols: 80,
-      rows: 48
+      cols: 132,
+      rows: 43
     });
     expect(onResizeTerminal).toHaveBeenCalledWith(80, 48);
   });
 
-  it("resizes xterm and the PTY from a measured tablet layout", () => {
+  it("keeps the authoritative xterm grid while updating a tablet proposal", () => {
     const onResizeTerminal = vi.fn();
-    let tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+    let tree = renderTaskScreen({
+      agentType: "pty",
+      onResizeTerminal,
+      terminalCols: 180,
+      terminalRows: 51
+    });
 
     invokeLayout(findByTestId(tree, MOBILE_E2E_IDS.taskDetailScreen), {
       height: 1366,
@@ -1254,11 +1270,16 @@ describe("TaskScreen", () => {
       x: 0,
       y: 0
     });
-    tree = renderTaskScreen({ agentType: "pty", onResizeTerminal });
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onResizeTerminal,
+      terminalCols: 180,
+      terminalRows: 51
+    });
 
     expect(findByType(tree, "TerminalWebView")?.props).toMatchObject({
-      cols: 128,
-      rows: 72
+      cols: 180,
+      rows: 51
     });
     expect(onResizeTerminal).toHaveBeenLastCalledWith(128, 72);
   });
