@@ -619,6 +619,62 @@ describe("kd mobile OTA", () => {
     });
   });
 
+  it("publishes successfully but prominently reports a paired iPhone stranded on an older runtime", async () => {
+    const repoRoot = await makeRepoFixture();
+    const base = publishRunner(repoRoot);
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        if (command === "curl" && args.at(-1)?.endsWith("/v1/mobile/builds")) return {
+          exitCode: 0, stderr: "", stdout: JSON.stringify({ desktopId: "owner-mac", devices: [{
+            deviceId: "iphone", deviceName: "Owner iPhone", build: {
+              environment: "staging", channel: "staging", runtimeVersion: "0.9.0",
+              nativeVersion: "0.9.0", nativeBuild: "42", updateId: "old-update", source: "ota", reportedAtUnixMs: Date.now()
+            }
+          }] })
+        };
+        return base.run(command, args, options);
+      }
+    };
+    const result = await executeMobileOtaPublishWithContext(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner, validateOtaCertificate: acceptOtaCertificate }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Published mobile OTA update");
+    expect(result.message).toContain("WARNING OTA DRIFT");
+    expect(result.message).toContain("cannot receive runtime 1.0.0");
+    expect(result.message).toContain("Reported runtimes: 0.9.0");
+  });
+
+  it("status places historical channel pointers beside the paired-device picture", async () => {
+    const repoRoot = await makeRepoFixture();
+    const prefix = `gs://${resolveKdEnvironment("staging").otaBucket}/ota/ios/`;
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "curl") return { exitCode: 0, stderr: "", stdout: JSON.stringify({
+          desktopId: "owner-mac", devices: [{ deviceId: "iphone", deviceName: "Owner iPhone", build: {
+            environment: "staging", channel: "staging", runtimeVersion: "0.9.0",
+            nativeVersion: "0.9.0", nativeBuild: "42", updateId: "old", source: "ota", reportedAtUnixMs: Date.now()
+          } }]
+        }) };
+        const path = args.at(-1) ?? "";
+        if (path.includes("*/channels/")) return { exitCode: 0, stderr: "", stdout: `${prefix}0.9.0/channels/staging.json\n${prefix}1.0.0/channels/staging.json` };
+        if (args.includes("cat")) return { exitCode: 0, stderr: "", stdout: JSON.stringify({
+          currentUpdateId: path.includes("0.9.0") ? "old" : "new",
+          createdAt: path.includes("0.9.0") ? "2026-09-02" : "2026-09-08"
+        }) };
+        return { exitCode: 0, stderr: "", stdout: "recent update listing" };
+      }
+    };
+    const result = await mobileOtaRuntime.executeMobileOtaStatusWithContext(
+      { staging: true, production: false }, { repoRoot, env: {}, runner }
+    );
+    expect(result.message).toContain("runtime 0.9.0: old; pointer published 2026-09-02 [STALE");
+    expect(result.message).toContain("runtime 1.0.0: new");
+    expect(result.message).toContain("WARNING OTA DRIFT");
+    expect(result.data).toMatchObject({ devices: { status: "WARN" }, pointers: { status: "PASS" } });
+  });
+
   it("provisions a missing staging OTA bucket and relay storage access", async () => {
     const repoRoot = await makeRepoFixture();
     const calls: Array<{ command: string; args: string[] }> = [];
@@ -951,9 +1007,10 @@ describe("kd mobile OTA", () => {
       { repoRoot, env: {}, runner }
     );
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(result.message).toContain("Mobile OTA staging preflight");
-    expect(result.message).toContain("human-only: install/launch the staging iOS app and confirm the OTA applies on a device");
+    expect(result.message).toContain("WARN device compatibility:");
+    expect(result.message).toContain("reachability UNKNOWN");
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("cp"))).toBe(false);
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("rsync"))).toBe(false);
     expect(calls.some((call) => call.command === "gcloud" && call.args.includes("create"))).toBe(false);

@@ -16,8 +16,8 @@ use super::machine_stats::machine_stats;
 use super::mobile_notifications::{mobile_push_registration, notify_mobile};
 use super::operator_events::post_operator_events;
 use super::pairing::{
-    claim_pairing_session, create_pairing_session, reissue_push_pairing_certificate,
-    remove_trusted_device,
+    claim_pairing_session, create_pairing_session, mobile_builds, reissue_push_pairing_certificate,
+    remove_trusted_device, report_mobile_build,
 };
 use super::preview::{close_task_preview, open_task_preview};
 use super::repo_browser::{list_task_directory, read_task_file_range};
@@ -390,6 +390,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/transfers/cloud-proxies/{peer_id}",
             axum::routing::delete(remove_cloud_transfer_proxy),
         )
+        .route("/v1/mobile/build", post(report_mobile_build))
+        .route("/v1/mobile/builds", get(mobile_builds))
         .route("/v1/pairing/sessions", post(create_pairing_session))
         .route("/v1/pairing/sessions/claim", post(claim_pairing_session))
         .route(

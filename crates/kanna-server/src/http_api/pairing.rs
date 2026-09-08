@@ -100,3 +100,93 @@ pub(super) async fn reissue_push_pairing_certificate(
             (status, error.to_string())
         })
 }
+
+/// Only a device proving its own pairing secret can report its installed build.
+pub(super) async fn report_mobile_build(
+    State(state): State<Arc<AppState>>,
+    trusted: Option<Extension<TrustedLanDeviceAccess>>,
+    Json(build): Json<pairing_domain::MobileBuildReport>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let Some(Extension(trusted)) = trusted else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "build report requires a paired LAN device".into(),
+        ));
+    };
+    if !matches!(build.environment.as_str(), "dev" | "staging" | "prod")
+        || !matches!(build.channel.as_str(), "staging" | "production" | "None")
+        || !matches!(
+            build.source.as_str(),
+            "ota" | "embedded" | "development" | "unknown"
+        )
+        || [
+            &build.runtime_version,
+            &build.native_version,
+            &build.native_build,
+            &build.update_id,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| {
+            value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control)
+        })
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid mobile build report".into(),
+        ));
+    }
+    let _mutation = state.pairing_persistence_mutation.lock().await;
+    let path = std::path::Path::new(&state.config.pairing_store_path);
+    let mut store = pairing_domain::PairingStore::load(path)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let device = store
+        .trusted_devices
+        .get_mut(&state.config.desktop_id)
+        .and_then(|devices| {
+            devices
+                .iter_mut()
+                .find(|device| device.device_id == trusted.device_id())
+        })
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "device is no longer paired".into(),
+        ))?;
+    device.mobile_build = Some(pairing_domain::MobileBuildObservation {
+        build,
+        reported_at_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    });
+    store
+        .save(path)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Explicit projection: never return pairing secrets or push credentials.
+pub(super) async fn mobile_builds(
+    _access: super::lan_trust::DesktopLocalAccess,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store =
+        pairing_domain::PairingStore::load(std::path::Path::new(&state.config.pairing_store_path))
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let devices: Vec<_> = store
+        .trusted_devices
+        .get(&state.config.desktop_id)
+        .into_iter()
+        .flatten()
+        .map(|device| {
+            serde_json::json!({
+                "deviceId": device.device_id,
+                "deviceName": device.device_name,
+                "build": device.mobile_build,
+            })
+        })
+        .collect();
+    Ok(Json(
+        serde_json::json!({"desktopId": state.config.desktop_id, "devices": devices}),
+    ))
+}

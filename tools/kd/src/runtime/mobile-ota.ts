@@ -1,3 +1,4 @@
+import { observeMobileDevices, observeRuntimePointers } from "./mobile-ota-observations";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -130,7 +131,7 @@ interface OtaSourceRecord {
 }
 
 interface OtaDoctorCheck {
-  status: "PASS" | "FAIL";
+  status: "PASS" | "FAIL" | "WARN";
   name: string;
   detail: string;
 }
@@ -284,7 +285,7 @@ export async function executeMobileOtaPublishWithContext(
     }
     return {
       ok: true,
-      message: formatRollbackMessage({
+      message: (await observeMobileDevices(context, identity.otaChannel, runtimeVersion, input.rollbackTo)).detail + "\n" + formatRollbackMessage({
         dryRun: input.dryRun === true,
         bucket: identity.otaBucket,
         channel: identity.otaChannel,
@@ -352,15 +353,17 @@ export async function executeMobileOtaPublishWithContext(
     ], context.repoRoot, context.env);
   }
 
+  const devices = await observeMobileDevices(context, plan.channel, plan.runtimeVersion, plan.updateId);
   return {
     ok: true,
-    message: formatPublishMessage(plan),
+    message: `${formatPublishMessage(plan)}\n${devices.detail}`,
     data: {
       updateId: plan.updateId,
       runtimeVersion: plan.runtimeVersion,
       channel: plan.channel,
       bucket: plan.bucket,
       dryRun: plan.dryRun,
+      devices,
       source,
     },
   };
@@ -392,6 +395,8 @@ export async function executeMobileOtaStatusWithContext(
     `gs://${identity.otaBucket}/ota/ios/${runtimeVersion}/updates/`,
   ], { cwd: context.repoRoot, env: context.env });
 
+  const pointers = await observeRuntimePointers(context, identity.otaBucket, identity.otaChannel, runtimeVersion);
+  const devices = await observeMobileDevices(context, identity.otaChannel, runtimeVersion, parsePointer(pointer.stdout)?.currentUpdateId);
   return {
     ok: pointer.exitCode === 0,
     message: [
@@ -401,12 +406,16 @@ export async function executeMobileOtaStatusWithContext(
       `runtimeVersion: ${runtimeVersion}`,
       pointer.exitCode === 0 ? `pointer: ${pointer.stdout.trim()}` : `pointer: ${pointer.stderr.trim() || "missing"}`,
       updates.exitCode === 0 ? `recent updates:\n${updates.stdout.trim()}` : "recent updates: unavailable",
+      pointers.detail,
+      devices.detail,
     ].join("\n"),
     data: {
       bucket: identity.otaBucket,
       channel: identity.otaChannel,
       runtimeVersion,
       pointerObject,
+      pointers,
+      devices,
     },
   };
 }
@@ -711,6 +720,8 @@ export async function executeMobileOtaDoctorWithContext(
     });
   }
 
+  checks.push({ name: "runtime channel pointers", ...await observeRuntimePointers(context, bucket, channel, runtimeVersion) });
+  checks.push({ name: "device compatibility", ...await observeMobileDevices(context, channel, runtimeVersion, updateId) });
   const ok = checks.every((check) => check.status === "PASS");
   return {
     ok,
@@ -1163,7 +1174,7 @@ function formatDoctorMessage(input: {
     `manifest: ${input.relayManifestUrl}`,
     ...input.checks.map((check) => `${check.status} ${check.name}: ${check.detail}`),
     "writes: none",
-    `human-only: install/launch the ${input.channel} iOS app and confirm the OTA applies on a device`,
+    "Device reports describe last observed state; compatibility alone does not confirm application.",
   ].join("\n");
 }
 

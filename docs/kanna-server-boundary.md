@@ -2184,3 +2184,24 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 
 The provider support and daemon-loss trigger matrix is documented in
 [`2026-07-30-session-death-recovery.md`](2026-07-30-session-death-recovery.md).
+
+### Mobile build observations
+
+`POST /v1/mobile/build` accepts the paired installation's self-reported
+`environment`, `channel`, `runtimeVersion`, `nativeVersion`, `nativeBuild`,
+`updateId`, and `source` (`ota`, `embedded`, `development`, `unknown`). Nullable
+identity fields mean unknown; embedded/development launches report no applied
+OTA id. The existing LAN pairing credential authenticates the installation;
+the server derives the device id from that credential, never the body. Relay
+account authority alone cannot report for an installation. Reports persist in
+the pairing store under its existing mutation lock, with a server-written
+`reportedAtUnixMs` (Unix milliseconds). Unpairing removes the observation. These are diagnostic claims,
+never authorization inputs.
+
+`GET /v1/mobile/builds` requires desktop-local access and returns `desktopId`
+and `devices: [{deviceId, deviceName, build}]`. `build` is null for older clients
+that have never reported. It explicitly projects public diagnostic fields and
+never exposes secret hashes or push credentials. `kd mobile ota` reads this
+endpoint; it does not read the pairing file or SQLite. Mobile reporting is best
+effort during trusted LAN connection setup and does not block using an older
+server. Remote-only operation does not refresh this observation.

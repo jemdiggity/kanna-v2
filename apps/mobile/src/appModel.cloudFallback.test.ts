@@ -1,3 +1,4 @@
+import * as buildIdentity from "./lib/updates/buildIdentity";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppModel } from "./appModel";
 import type { TaskAgentSubscription } from "./lib/api/client";
@@ -490,7 +491,12 @@ describe("createAppModel cloud routing", () => {
     app.controller.dispose();
   });
 
-  it("reissues and persists pairing certificates when a trusted LAN route appears", async () => {
+  it("reports the installed build and refreshes pairing material when a trusted LAN route appears", async () => {
+    const readIdentity = vi.spyOn(buildIdentity, "getCurrentBuildIdentity").mockReturnValue({
+      nativeVersion: "2.2.2", nativeBuild: "42", nativeSummary: "2.2.2 (42)",
+      runtimeVersion: "2.2.2", environment: "staging", channel: "staging",
+      source: { kind: "ota", label: "old-update", updateId: "old-update" }
+    });
     const fixture = createLanFixture(async () => []);
     const material = {
       desktopPushIdentity: {
@@ -507,6 +513,15 @@ describe("createAppModel cloud routing", () => {
     };
     const fetchImpl = vi.fn<FetchLike>(async (input, init) => {
       const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/v1/mobile/build")) {
+        expect(init?.headers).toMatchObject({
+          "X-Kanna-Device-Id": "phone-1", "X-Kanna-Device-Secret": "lan-secret"
+        });
+        expect(JSON.parse(init?.body ?? "{}")).toMatchObject({
+          runtimeVersion: "2.2.2", updateId: "old-update", nativeBuild: "42", channel: "staging"
+        });
+        return { ok: true, status: 204, json: async () => null };
+      }
       if (url.endsWith("/v1/pairing/push-certificate")) {
         expect(init).toMatchObject({
           method: "POST",
@@ -551,6 +566,8 @@ describe("createAppModel cloud routing", () => {
     await app.client.listDesktops();
     await flushAsyncWork(5);
 
+    expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith("/v1/mobile/build"))).toHaveLength(1);
+    readIdentity.mockRestore();
     expect(app.sessionStore.getState().trustedDesktops[0]).toMatchObject(material);
     expect(persistence.save).toHaveBeenCalledWith(
       expect.objectContaining({
