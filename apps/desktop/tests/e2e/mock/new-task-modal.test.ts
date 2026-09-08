@@ -566,7 +566,9 @@ describe("new task modal", () => {
       defaultAgentType: "agent",
     });
 
-    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    // Preferences is a tab, not an overlay: Escape goes to the window and the
+    // dismiss handler routes it to the tab in front.
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
   }
 
