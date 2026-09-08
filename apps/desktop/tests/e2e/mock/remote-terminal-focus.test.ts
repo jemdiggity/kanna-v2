@@ -1,3 +1,5 @@
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -197,5 +199,19 @@ describe("remote terminal focus", () => {
     await client.click(remoteRow);
     await client.waitForElement(`${remoteRowSelector}.selected`, 5_000);
     await waitForFocusedTerminal(client, remoteTextareaSelector);
+
+    // The mentioned-files control sat beside the companion control at
+    // right: 138px; only the companion control is left on this shell.
+    const controls = await client.executeSync<string[]>(
+      `return Array.from(document.querySelectorAll(".cloud-terminal-shell > button"))
+         .map(function(button) { return button.className; });`,
+    );
+    expect(controls).toEqual(["open-companion-control"]);
+
+    const evidenceDir = process.env.KANNA_VISUAL_EVIDENCE_DIR;
+    if (evidenceDir) {
+      await mkdir(evidenceDir, { recursive: true });
+      await client.screenshot(join(evidenceDir, "desktop-cloud-terminal-controls.png"));
+    }
   });
 });
