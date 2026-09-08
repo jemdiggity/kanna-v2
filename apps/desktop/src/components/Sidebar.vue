@@ -9,7 +9,7 @@ import { computed, ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";
 import { taskSearchMatch } from "../utils/taskSearch";
-import { isTaskWorking, showsUnreadMark } from "../utils/taskActivityDisplay";
+import { isTaskWorking, taskSidebarFontWeight } from "../utils/taskActivityDisplay";
 import {
   groupedSidebarTaskItemsByStage,
   sidebarTaskSubtreeRows,
@@ -787,14 +787,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     v-else
                     class="item-title"
                     :style="{
-                      fontWeight: 'normal',
+                      fontWeight: taskSidebarFontWeight(row.item),
                       fontStyle: isTaskWorking(row.item) ? 'italic' : 'normal',
                       textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
                       opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span><span v-if="showsUnreadMark(row.item)" class="unread-task-dot" aria-hidden="true"></span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <button
                     v-if="canDetachSubtask(row)"
                     type="button"
@@ -896,14 +896,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       v-else
                       class="item-title"
                       :style="{
-                        fontWeight: 'normal',
+                        fontWeight: taskSidebarFontWeight(row.item),
                         fontStyle: isTaskWorking(row.item) ? 'italic' : 'normal',
                         textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
                         opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
                       }"
                       :title="itemTooltip(row.item)"
                     >
-                      <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span><span v-if="showsUnreadMark(row.item)" class="unread-task-dot" aria-hidden="true"></span>
+                      <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                     <button
                       v-if="canDetachSubtask(row)"
                       type="button"
@@ -961,12 +961,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     class="item-title"
                     :style="{
                       color: 'var(--kn-text-muted)',
+                      fontWeight: taskSidebarFontWeight(row.item),
+                      fontStyle: isTaskWorking(row.item) ? 'italic' : 'normal',
                       textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
                       opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span><span v-if="showsUnreadMark(row.item)" class="unread-task-dot" aria-hidden="true"></span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <span
                     v-if="row.item.task_id && blockerNames?.[row.item.task_id]"
                     class="blocked-by-text"
@@ -1020,14 +1022,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   v-else
                   class="item-title"
                   :style="{
-                    fontWeight: 'normal',
+                    fontWeight: taskSidebarFontWeight(item),
                     fontStyle: isTaskWorking(item) ? 'italic' : 'normal',
                     textDecoration: isTaskTearingDown(item) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(item) ? 0.5 : 1,
                   }"
                   :title="itemTooltip(item)"
                 >
-                  <span v-if="transferMarker(item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(item)?.state}`" :aria-label="transferMarker(item)?.label">{{ transferMarker(item)?.glyph }} </span><span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span><span v-if="showsUnreadMark(item)" class="unread-task-dot" aria-hidden="true"></span>
+                  <span v-if="transferMarker(item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(item)?.state}`" :aria-label="transferMarker(item)?.label">{{ transferMarker(item)?.glyph }} </span><span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span>
               </div>
             </div>
           </template>
@@ -1345,15 +1347,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   white-space: nowrap;
   flex: 1;
   min-width: 0;
-  pointer-events: none;
-}
-
-.unread-task-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  border-radius: 50%;
-  background: var(--kn-accent);
   pointer-events: none;
 }
 
