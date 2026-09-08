@@ -1,0 +1,9 @@
+# Mobile terminal keys E2E verification record
+
+The mobile relay Appium journey now taps the native `Esc` and `Enter` controls and observes byte-specific markers in the two-instance desktop PTY. It records the PTY's Enter count before tapping `Esc`, waits for `SCRIPT_KEY:ESC`, proves no `SCRIPT_KEY:ENTER` follows during a 750 ms window, then taps `Enter` and waits for `SCRIPT_KEY:ENTER`. This covers mobile UI → relay KSP → server → daemon → PTY when the suite reaches the journey.
+
+On 2026-09-05, task `182f8d59` fixed both pre-existing setup failures. The former oversized-snapshot check was measuring a bounded KSP window after terminal windowing moved retained history into separate metadata; the fixture now proves a bounded current window plus at least 9,000 retained scrollback lines. The cloud row was already published under its stable `cloudTaskId`, while the harness searched only for the retired composite fallback; later journeys now use the publisher's authoritative id.
+
+The full two-instance Appium lane now reaches and passes the terminal-keys journey on the iOS 26.5 iPhone 17 Pro simulator. Temporary end-to-end tracing confirmed Esc reaches the scripted child PTY byte-for-byte. Because bounded snapshots and heartbeat output can replace transient terminal markers, the fixture records exact child-read Esc/Enter acknowledgements in its disposable worktree and asserts that durable evidence without relaxing the journey.
+
+The same run continued through quick reply, task actions, file preview, visual companion, and composer reset. The unrelated native composer-height regression it exposed was fixed independently by task `392e1e6e` and integrated at the owner's direction. A cold run of `KANNA_IOS_SIMULATOR_NAME='iPhone 17 Pro' ./kd test remote-e2e --dev --mobile-relay` passed the complete lane on iOS 26.5. The terminal-keys E2E gap is resolved.

@@ -37,6 +37,7 @@ const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 const BUFFY_PASSWORD = "password123";
 const CLOUD_PUBLICATION_TIMEOUT_MS = 30_000;
 const INPUT_TRACE_FILE = ".kanna-e2e-inputs";
+const TERMINAL_KEY_TRACE_FILE = ".kanna-e2e-terminal-keys";
 
 export const MOBILE_RELAY_PTY_HISTORY_FIXTURE = {
   completionSentinel: "MOBILE_PTY_SNAPSHOT_SENTINEL",
@@ -146,6 +147,7 @@ interface RemoteHarness {
     desktopId: string;
     desktopSecret?: string | null;
   }): Promise<void>;
+  restartDaemon(): Promise<void>;
   startServer(): Promise<void>;
   stopRelay(): Promise<void>;
   stopServer(): Promise<void>;
@@ -208,6 +210,7 @@ interface TerminalFlowModule {
       snapshotHistory?: {
         sentinel: string;
       };
+      terminalKeyTraceFile?: string;
       terminalCols?: number;
       terminalRows?: number;
       waitingPromptSnippet?: string;
@@ -279,6 +282,10 @@ export interface MobileRelayHarness {
   };
   taskOrdering: RelayTaskOrderingFixture;
   terminalEvents: TerminalEventCollector;
+  terminalKeys: {
+    count(key: "ESC" | "ENTER"): number;
+    waitForCount(key: "ESC" | "ENTER", count: number): Promise<void>;
+  };
   publishHybridCloudRefresh(): Promise<void>;
   setLanHttpEnabled(enabled: boolean): Promise<void>;
   stop(): Promise<void>;
@@ -430,6 +437,8 @@ export async function startMobileRelayHarness(
             // controller while mobile follows the authoritative grid.
             terminalCols: 132,
             terminalRows: 43,
+            terminalKeyTraceFile: TERMINAL_KEY_TRACE_FILE,
+            traceTerminalKeys: true,
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
         : {}),
@@ -555,6 +564,9 @@ export async function startMobileRelayHarness(
       unresolvedTaskId: HYBRID_UNRESOLVED_TASK_ID
     };
     const taskOrdering = relayTaskOrderingFixture(localTask.repoId);
+    const terminalKeyTracePath = localTask.worktreePath === null
+      ? null
+      : join(localTask.worktreePath, TERMINAL_KEY_TRACE_FILE);
     const inputTracePath = localTask.worktreePath === null
       ? null
       : join(localTask.worktreePath, INPUT_TRACE_FILE);
@@ -664,6 +676,21 @@ export async function startMobileRelayHarness(
       },
       taskOrdering,
       terminalEvents,
+      terminalKeys: {
+        count(key) {
+          return terminalKeyTraceCount(terminalKeyTracePath, key);
+        },
+        async waitForCount(key, count) {
+          const deadline = Date.now() + 10_000;
+          while (Date.now() < deadline) {
+            if (terminalKeyTraceCount(terminalKeyTracePath, key) >= count) {
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          throw new Error(`Expected desktop PTY to receive ${key} ${count} times`);
+        }
+      },
       publishHybridCloudRefresh: () =>
         publishHybridCloudRefresh({ harness }),
       setLanHttpEnabled: (enabled) => updateHarnessMobileMachineControls(
@@ -956,6 +983,16 @@ export function publishedCloudTaskId(
   fallbackId: string,
 ): string {
   return fields?.cloudTaskId?.stringValue?.trim() || fallbackId;
+}
+
+export function terminalKeyTraceCount(
+  path: string | null,
+  key: "ESC" | "ENTER",
+): number {
+  if (path === null || !existsSync(path)) return 0;
+  return readFileSync(path, "utf8")
+    .split(/\r?\n/)
+    .filter((candidate) => candidate === key).length;
 }
 
 export function scriptedInputTraceCount(

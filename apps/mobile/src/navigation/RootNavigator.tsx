@@ -777,6 +777,9 @@ function TaskDetailRoute({
       terminalCols={state.taskTerminalCols}
       terminalRows={state.taskTerminalRows}
       terminalStatus={state.taskTerminalStatus}
+      terminalInputUnavailableReason={
+        state.taskTerminalInputUnavailableReason
+      }
       agentErrorMessage={state.taskAgentErrorMessage}
       agentEvents={state.taskAgentEvents}
       agentStatus={state.taskAgentStatus}
@@ -870,10 +873,10 @@ function TaskDetailRoute({
           ? controller.sendTaskInput(durableTaskId, input, attachment)
           : controller.sendTaskInput(durableTaskId, input);
       }}
-      onSendTerminalInput={(dataB64) => {
+      onSendTerminalInput={(dataB64, kind) => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) {
-          controller.sendTaskTerminalInput(durableTaskId, dataB64);
+          controller.sendTaskTerminalInput(durableTaskId, dataB64, kind);
         }
       }}
       onResizeTerminal={(cols, rows) => {

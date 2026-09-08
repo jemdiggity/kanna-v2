@@ -53,6 +53,10 @@ interface RelayTaskFlowOptions {
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
+  terminalKeys: {
+    count(key: "ESC" | "ENTER"): number;
+    waitForCount(key: "ESC" | "ENTER", count: number): Promise<void>;
+  };
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
   waitForMobileTerminalGeometry(): Promise<void>;
   waitForQuickReplyInput(): Promise<void>;
@@ -276,6 +280,7 @@ interface RelayTaskJourneys {
   verifyPtySnapshotRevisit(): Promise<void>;
   verifyQuickReply(): Promise<void>;
   verifyTaskActionMenu(): Promise<void>;
+  verifyTerminalKeys(): Promise<void>;
   verifyVisualCompanion(): Promise<void>;
 }
 
@@ -288,10 +293,46 @@ export async function runRelayTaskJourneys(
   // Exercise file discovery immediately after the terminal revisit, before
   // later menus can change the detail presentation state.
   await journeys.verifyFilePreview();
+  await journeys.verifyTerminalKeys();
   await journeys.verifyQuickReply();
   await journeys.verifyTaskActionMenu();
   await journeys.verifyVisualCompanion();
   await journeys.verifyComposerReset();
+}
+
+async function verifyRelayTerminalKeys(
+  driver: Browser,
+  observation: RelayTaskFlowOptions["terminalKeys"]
+): Promise<void> {
+  const directInputToggle = await driver.$(
+    selectors.taskTerminalDirectInputToggle
+  );
+  await directInputToggle.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await directInputToggle.click();
+  const escape = await driver.$(selectors.taskTerminalKey("escape"));
+  const enter = await driver.$(selectors.taskTerminalKey("enter"));
+  await escape.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await enter.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  if (!(await escape.isEnabled()) || !(await enter.isEnabled())) {
+    throw new Error("Expected terminal keys to enable for the authenticated relay PTY");
+  }
+
+  const escapeCount = observation.count("ESC");
+  const enterCount = observation.count("ENTER");
+  await escape.click();
+  await observation.waitForCount("ESC", escapeCount + 1);
+  await driver.pause(750);
+  if (observation.count("ENTER") !== enterCount) {
+    throw new Error("Esc delivered a trailing Enter to the desktop PTY");
+  }
+
+  await enter.click();
+  await observation.waitForCount("ENTER", enterCount + 1);
+
+  await directInputToggle.click();
+  await (await driver.$(selectors.taskInput)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS,
+  });
 }
 
 function createRelayQuickReplyPersistenceJourney(
@@ -1886,6 +1927,8 @@ export async function runRelayTaskFlow(
       },
       closeTask: closeTaskForJourney,
     }),
+    verifyTerminalKeys: () =>
+      verifyRelayTerminalKeys(driver, options.terminalKeys),
     verifyTaskActionMenu: () => verifyRelayTaskActionMenuJourney(
       ui,
       isTabletWorkspace

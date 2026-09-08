@@ -8915,7 +8915,7 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
-    controller.sendTaskTerminalInput("task-1", "G1s8NjU7MTsxTQ==");
+    controller.sendTaskTerminalInput("task-1", "G1s8NjU7MTsxTQ==", "control");
 
     expect(client.__terminalStream.subscription.sendInput).toHaveBeenCalledWith(
       "G1s8NjU7MTsxTQ==",
@@ -8931,8 +8931,8 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     controller.openTask("task-1");
-    controller.sendTaskTerminalInput("task-other", "G1s8NjU7MTsxTQ==");
-    controller.sendTaskTerminalInput("task-1", "");
+    controller.sendTaskTerminalInput("task-other", "G1s8NjU7MTsxTQ==", "control");
+    controller.sendTaskTerminalInput("task-1", "", "control");
 
     expect(client.__terminalStream.subscription.sendInput).not.toHaveBeenCalled();
   });
