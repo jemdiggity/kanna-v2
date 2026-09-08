@@ -84,6 +84,13 @@ fn insert_optional(args: &mut Value, key: &str, value: Option<String>) {
 /// object — so both resolve the same catalog declaration and print what the
 /// server returned, rather than each rendering its own idea of the result.
 async fn run_transfer_tool(name: &str, args: &Value, server_url: Option<&str>) {
+    run_catalog_tool(name, args, server_url).await;
+}
+
+/// Resolve a catalog declaration, call it, and print exactly what the server
+/// returned. Any command whose CLI answer must be the same object the MCP tool
+/// produces goes through here rather than rendering its own idea of the result.
+async fn run_catalog_tool(name: &str, args: &Value, server_url: Option<&str>) {
     let catalog =
         crate::commands::tool::load_tool_catalog_from_current_dir().unwrap_or_else(|error| {
             eprintln!("Error: {error}");
@@ -645,6 +652,25 @@ pub(crate) async fn run(command: TaskCommands) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }
+        }
+        TaskCommands::OpenFile {
+            task_id,
+            path,
+            line,
+            machine_id,
+            server_url,
+        } => {
+            let mut args = serde_json::json!({
+                "task_id": task_id,
+                "path": path,
+            });
+            // `line` is a catalog integer, so it goes in as a number rather
+            // than through the string-valued optional helper.
+            if let (Some(object), Some(line)) = (args.as_object_mut(), line) {
+                object.insert("line".to_string(), Value::from(line));
+            }
+            insert_optional(&mut args, "machine_id", machine_id);
+            run_catalog_tool("kanna_open_file", &args, server_url.as_deref()).await;
         }
         TaskCommands::Logs {
             task_id,

@@ -1761,6 +1761,7 @@ mod tests {
                 "kanna_notify_mobile",
                 "kanna_set_task_workflow",
                 "kanna_replace_task_workflow",
+                "kanna_open_file",
                 "kanna_task_logs",
                 "kanna_task_inputs",
                 "kanna_task_transfers",
