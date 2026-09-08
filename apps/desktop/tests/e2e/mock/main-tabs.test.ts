@@ -259,6 +259,70 @@ describe("main content area tabs", () => {
     expect(await openTabIds(client)).toEqual(["agent", "diff"]);
   });
 
+  it("gives a repository with no task selected a tab set of its own", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    // Deselect the task: the main area belongs to the repository now.
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const store = ctx.store;
+       if (store?.selectedItemId?.__v_isRef) store.selectedItemId.value = null;
+       else store.selectedItemId = null;
+       setTimeout(function() { cb("ok"); }, 200);`
+    );
+    await sleep(400);
+
+    // A repository has no agent session, so its tab set starts empty.
+    expect(await openTabIds(client)).toEqual([]);
+
+    await pressShortcut(client, { key: "g", meta: true });
+    await waitForActiveTab(client, "graph");
+    await pressShortcut(client, { key: "A", meta: true, shift: true });
+    await waitForActiveTab(client, "analytics");
+    expect(await openTabIds(client)).toEqual(["graph", "analytics"]);
+
+    // ⌘J has no worktree to run in here, so it opens the repo-root shell.
+    await pressShortcut(client, { key: "j", meta: true });
+    await waitForActiveTab(client, "shell:repo");
+
+    await closeViewTabs(client);
+    expect(await openTabIds(client)).toEqual([]);
+
+    // Back on the task, its own tabs are untouched by any of that.
+    await selectTask(taskId);
+    await sleep(400);
+    expect(await openTabIds(client)).toEqual(["agent"]);
+  });
+
+  it("opens the remaining views as tabs of the selected task", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+    await waitForActiveTab(client, "agent");
+
+    await pressShortcut(client, { key: "E", meta: true, shift: true });
+    await waitForActiveTab(client, "tree");
+    await pressShortcut(client, { key: ",", meta: true });
+    await waitForActiveTab(client, "preferences");
+    await pressShortcut(client, { key: "J", meta: true, shift: true });
+    await waitForActiveTab(client, "shell:repo");
+
+    // The worktree shell and the repo-root shell are separate tabs.
+    await pressShortcut(client, { key: "j", meta: true });
+    await waitForActiveTab(client, "shell");
+    expect(await openTabIds(client)).toEqual([
+      "agent",
+      "tree",
+      "preferences",
+      "shell:repo",
+      "shell",
+    ]);
+
+    await closeViewTabs(client);
+    await waitForActiveTab(client, "agent");
+  });
+
   it("opens a file an agent asked for through kanna_open_file", async () => {
     await selectTask(taskId);
     await closeViewTabs(client);

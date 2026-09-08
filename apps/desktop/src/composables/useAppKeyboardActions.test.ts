@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PipelineItem } from "../types/kanna";
 import type { WorkspaceTask } from "../workspace/types";
 import { useAppKeyboardActions } from "./useAppKeyboardActions";
+import { useMainTabs } from "./useMainTabs";
 
 vi.mock("./useKeyboardShortcuts", () => ({
   useKeyboardShortcuts: vi.fn(),
@@ -57,7 +58,7 @@ function createHarness(options: {
   currentItem?: PipelineItem | null;
   workspaceTask?: WorkspaceTask | null;
   workspaceTaskBlocked?: boolean;
-  diffOpen?: boolean;
+  activeTabKind?: "agent" | "diff";
 } = {}) {
   const openWindow = vi.fn(async () => {});
   const advanceStage = vi.fn(async () => {});
@@ -80,8 +81,12 @@ function createHarness(options: {
     selectedWorkspaceTask: computed(() => options.workspaceTask ?? null),
     selectedWorkspaceTaskBlocked: computed(() => options.workspaceTaskBlocked ?? false),
     advanceSelectedRemoteWorkspaceTask,
-    showDiffModal: ref(options.diffOpen ?? false),
-    diffModalRef: ref(null),
+    mainTabs: (() => {
+      const tabs = useMainTabs({ scopeKey: computed(() => "item:task-durable") });
+      if (options.activeTabKind === "diff") tabs.openTab({ kind: "diff" });
+      return tabs;
+    })(),
+    mainPanelRef: ref(null),
     currentShortcutContext: computed(() => "main"),
     showShortcutsModal: ref(false),
     navigateBack,
@@ -142,10 +147,10 @@ describe("useAppKeyboardActions durable selection", () => {
     expect(advanceStage).toHaveBeenCalledWith("task-durable");
   });
 
-  it("advances a selected task while its diff modal is open", () => {
+  it("advances a selected task while its diff tab is in front", () => {
     const { keyboardActions, advanceStage } = createHarness({
-      diffOpen: true,
       currentItem: item("task-durable"),
+      activeTabKind: "diff",
     });
 
     keyboardActions.advanceStage();

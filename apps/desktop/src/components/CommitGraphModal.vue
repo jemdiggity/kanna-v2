@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from "vue";
 import CommitGraphView from "./CommitGraphView.vue";
-import { useShortcutContext } from "../composables/useShortcutContext";
-import { useModalZIndex } from "../composables/useModalZIndex";
-useShortcutContext("graph");
-const { zIndex, bringToFront } = useModalZIndex();
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
+
+const props = defineProps<EmbeddableViewProps & {
+  repoPath: string;
+  worktreePath?: string;
+}>();
+
+const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick } =
+  useEmbeddableView(props, { context: "graph" });
 const graphViewRef = ref<InstanceType<typeof CommitGraphView> | null>(null);
 
 function dismiss(): boolean {
@@ -14,11 +22,6 @@ function dismiss(): boolean {
 defineExpose({ zIndex, bringToFront, dismiss });
 
 const modalRef = ref<HTMLElement | null>(null);
-
-defineProps<{
-  repoPath: string;
-  worktreePath?: string;
-}>();
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -30,7 +33,12 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')">
+  <div
+    class="modal-overlay"
+    :class="overlayClass"
+    :style="overlayStyle"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
+  >
     <div ref="modalRef" class="graph-modal" tabindex="-1">
       <CommitGraphView
         ref="graphViewRef"
@@ -43,6 +51,21 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.modal-overlay.embedded {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+  background: none;
+}
+
+.embedded .graph-modal {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;

@@ -9,6 +9,9 @@ import ja from "../../i18n/locales/ja.json";
 import ko from "../../i18n/locales/ko.json";
 import type { PipelineItem } from "../../types/kanna";
 import type { TaskUiSlot } from "../../types/taskUi";
+import { computed } from "vue";
+import { useMainTabs } from "../../composables/useMainTabs";
+import type { MainTabViewsController } from "../MainPanel.types";
 
 const invokeMock = vi.fn();
 const fetchTaskDetailMock = vi.fn();
@@ -331,6 +334,75 @@ describe("MainPanel", () => {
 
     expect(openCodeCard()?.find(".installed").exists()).toBe(true);
     expect(openCodeCard()?.text()).toContain("Version 1.2.3");
+  });
+
+  it("rechecks agent CLIs when the setup shell tab closes", async () => {
+    let opencodeInstalled = false;
+    invokeMock.mockImplementation((command: string, args?: { name?: string }) => {
+      if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
+      if (command === "which_binary" && args?.name === "opencode" && opencodeInstalled) {
+        return Promise.resolve("/Users/tester/.opencode/bin/opencode");
+      }
+      if (command === "which_binary") return Promise.reject(new Error(`missing ${args?.name ?? "agent"}`));
+      if (command === "run_script") return Promise.resolve("opencode 1.2.3\n");
+      return Promise.resolve("");
+    });
+
+    const scopeKey = computed<string | null>(() => "app");
+    let panel: { onTabClosed?: (tab: { kind: string }) => void } | null = null;
+    const tabs = useMainTabs({
+      scopeKey,
+      onTabClosed: (tab) => panel?.onTabClosed?.(tab),
+    });
+
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: null,
+        hasRepos: false,
+        views: {
+          tabs,
+          modals: {
+            finishTransferredModal: vi.fn(),
+            homePath: computed(() => "/home/tester"),
+          },
+          preferences: {},
+          store: {},
+        } as unknown as MainTabViewsController,
+      },
+      global: {
+        mocks: {
+          $t: (key: string, values?: Record<string, string>) =>
+            key === "mainPanel.agentVersion"
+              ? `Version ${values?.version ?? "?"}`
+              : key === "mainPanel.agentOpenCodeName"
+                ? "OpenCode"
+                : key,
+        },
+        stubs: {
+          TaskHeader: true,
+          TerminalTabs: true,
+          MainTabBar: true,
+          ShellModal: true,
+        },
+      },
+    });
+    await flushPromises();
+    panel = wrapper.vm as unknown as { onTabClosed?: (tab: { kind: string }) => void };
+
+    const openCodeCard = () => wrapper.findAll(".agent-card")
+      .find(card => card.text().includes("OpenCode"));
+    expect(openCodeCard()?.find(".not-installed").exists()).toBe(true);
+
+    // The shell is how an agent CLI gets installed before there are repos, so
+    // closing that tab is the moment to look again.
+    const shellTabId = tabs.openTab({ kind: "shell", shellScope: "repo" });
+    await flushPromises();
+    opencodeInstalled = true;
+    tabs.closeTab(shellTabId!);
+    await flushPromises();
+
+    expect(openCodeCard()?.find(".installed").exists()).toBe(true);
   });
 
   it("shows the Antigravity install command when agy is missing", async () => {

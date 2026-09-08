@@ -1,16 +1,8 @@
 import { type ComputedRef, type Ref } from "vue";
 
 import Sidebar from "../components/Sidebar.vue";
-import FilePickerModal from "../components/FilePickerModal.vue";
-import FilePreviewModal from "../components/FilePreviewModal.vue";
-import TreeExplorerModal from "../components/TreeExplorerModal.vue";
-import DiffModal from "../components/DiffModal.vue";
-import CommitGraphModal from "../components/CommitGraphModal.vue";
-import ShellModal from "../components/ShellModal.vue";
-import PreferencesPanel from "../components/PreferencesPanel.vue";
 import { invoke } from "../invoke";
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
-import { isTopModal } from "./useModalZIndex";
 import type { ShortcutContext } from "./useShortcutContext";
 import type { WorkspaceTask } from "../workspace/types";
 import type { MainTabsController } from "./useMainTabs";
@@ -46,42 +38,16 @@ interface UseAppKeyboardActionsOptions {
   shortcutsStartFull: Ref<boolean>;
   shortcutsContext: Ref<ShortcutContext>;
   showFilePickerModal: Ref<boolean>;
-  filePickerHidden: Ref<boolean>;
-  showFilePreviewModal: Ref<boolean>;
-  previewHidden: Ref<boolean>;
-  previewFromPicker: Ref<boolean>;
-  previewFromTree: Ref<boolean>;
-  showDiffModal: Ref<boolean>;
-  showTreeExplorer: Ref<boolean>;
-  showShellModal: Ref<boolean>;
-  shellRepoRoot: Ref<boolean>;
   showCommandPalette: Ref<boolean>;
-  showAnalyticsModal: Ref<boolean>;
-  showCommitGraphModal: Ref<boolean>;
   showPeerPicker: Ref<boolean>;
-  showPreferencesPanel: Ref<boolean>;
   maximizedModal: Ref<ShortcutContext | null>;
   sidebarHidden: Ref<boolean>;
   sidebarRef: Ref<InstanceType<typeof Sidebar> | null>;
-  shellModalRef: Ref<InstanceType<typeof ShellModal> | null>;
-  diffModalRef: Ref<InstanceType<typeof DiffModal> | null>;
-  commitGraphModalRef: Ref<InstanceType<typeof CommitGraphModal> | null>;
-  treeExplorerRef: Ref<InstanceType<typeof TreeExplorerModal> | null>;
-  filePickerRef: Ref<InstanceType<typeof FilePickerModal> | null>;
-  filePreviewRef: Ref<InstanceType<typeof FilePreviewModal> | null>;
-  preferencesRef: Ref<InstanceType<typeof PreferencesPanel> | null>;
   openNewTaskModal: () => Promise<void>;
   requestCloseCurrentWindow: () => Promise<void>;
   showFilePickerOnTop: () => void;
   getCurrentPreviewRecall: () => { filePath: string; initialLine?: number } | undefined;
-  openFilePreview: (
-    filePath: string,
-    initialLine: number | undefined,
-    fromPicker: boolean,
-    fromTree?: boolean,
-  ) => void;
-  closeTreeExplorer: () => void;
-  closeDiffModal: () => void;
+  openFilePreview: (filePath: string, initialLine?: number) => void;
   advanceSelectedRemoteWorkspaceTask: (workspaceTask: WorkspaceTask) => Promise<void>;
   closeSelectedWorkspaceTask: () => Promise<boolean>;
   navigateItems: (direction: -1 | 1) => Promise<void>;
@@ -92,8 +58,6 @@ interface UseAppKeyboardActionsOptions {
   navigateRepos: (direction: -1 | 1) => Promise<void>;
   closePeerPicker: () => void;
   closeFilePicker: () => void;
-  closeFileFlow: () => void;
-  onShellClose: () => void;
   scanRepoCommands: (repoId: string) => void;
   handleBlockTask: () => void;
   handleEditBlockedTask: () => void;
@@ -118,37 +82,16 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     shortcutsStartFull,
     shortcutsContext,
     showFilePickerModal,
-    filePickerHidden,
-    showFilePreviewModal,
-    previewHidden,
-    previewFromPicker,
-    previewFromTree,
-    showDiffModal,
-    showTreeExplorer,
-    showShellModal,
-    shellRepoRoot,
     showCommandPalette,
-    showAnalyticsModal,
-    showCommitGraphModal,
     showPeerPicker,
-    showPreferencesPanel,
     maximizedModal,
     sidebarHidden,
     sidebarRef,
-    shellModalRef,
-    diffModalRef,
-    commitGraphModalRef,
-    treeExplorerRef,
-    filePickerRef,
-    filePreviewRef,
-    preferencesRef,
     openNewTaskModal,
     requestCloseCurrentWindow,
     showFilePickerOnTop,
     getCurrentPreviewRecall,
     openFilePreview,
-    closeTreeExplorer,
-    closeDiffModal,
     advanceSelectedRemoteWorkspaceTask,
     closeSelectedWorkspaceTask,
     navigateItems,
@@ -159,30 +102,28 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     navigateRepos,
     closePeerPicker,
     closeFilePicker,
-    closeFileFlow,
-    onShellClose,
     scanRepoCommands,
     handleBlockTask,
     handleEditBlockedTask,
   } = options;
 
-  // The Preferences panel owns tab cycling while it is open; otherwise the
-  // keys move between the main content area's tabs.
+  // The Preferences tab owns section cycling while it is the tab in front;
+  // otherwise the keys move between the main content area's tabs.
   function cycleTabs(direction: -1 | 1) {
-    if (showPreferencesPanel.value) {
-      preferencesRef.value?.cycleTab(direction);
+    if (mainTabs.activeTab.value?.kind === "preferences") {
+      mainPanelRef.value?.cyclePreferencesSection?.(direction);
       return;
     }
     mainTabs.cycleTab(direction);
   }
 
   /**
-   * Which shortcut list ⌘/ shows. It follows the active tab as well as the
-   * open modals, so a file tab still documents its own reading keys — but it
-   * deliberately does not narrow which shortcuts *fire*: a tab is a view, not
-   * a mode, and the task shortcuts stay live behind it.
+   * The surface the operator is actually looking at: the dialog on top, else
+   * the tab in front. It decides which shortcut list ⌘/ shows and what ⇧⌘⏎
+   * maximizes — but deliberately not which shortcuts *fire*, because a tab is
+   * a view, not a mode, and the task shortcuts stay live behind it.
    */
-  function shortcutsDisplayContext(): ShortcutContext {
+  function activeSurfaceContext(): ShortcutContext {
     const modalContext = currentShortcutContext.value;
     if (modalContext !== "main") return modalContext;
     return mainTabs.activeTabContext.value ?? "main";
@@ -211,14 +152,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       await requestCloseCurrentWindow();
     },
     openFile: () => {
+      // The picker is the only preview-flow modal left, so it is always the
+      // top one when it is open: ⌘P toggles it rather than raising it.
       if (showFilePickerModal.value) {
-        const z = filePickerRef.value?.zIndex ?? 0;
-        if (isTopModal(z)) {
-          showFilePickerModal.value = false;
-          filePickerHidden.value = true;
-        } else {
-          filePickerRef.value?.bringToFront();
-        }
+        closeFilePicker();
       } else {
         showFilePickerOnTop();
       }
@@ -231,53 +168,25 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (!opened) toast.info(t("toasts.noTerminalFileLink"));
     },
     toggleFilePreview: () => {
-      if (mainTabs.scopeKey.value) {
-        const activeTab = mainTabs.activeTab.value;
-        if (activeTab?.kind === "file") {
-          mainTabs.closeTab(activeTab.id);
-          return;
-        }
-        const openFileTab = mainTabs.tabs.value.find((tab) => tab.kind === "file");
-        if (openFileTab) {
-          mainTabs.activateTab(openFileTab.id);
-          return;
-        }
-        const recalled = getCurrentPreviewRecall();
-        if (recalled) {
-          openFilePreview(recalled.filePath, recalled.initialLine, false);
-          return;
-        }
-        showFilePickerOnTop();
+      const activeTab = mainTabs.activeTab.value;
+      if (activeTab?.kind === "file") {
+        mainTabs.closeTab(activeTab.id);
         return;
       }
-      if (showFilePreviewModal.value) {
-        showFilePreviewModal.value = false;
-        previewHidden.value = true;
-        previewFromPicker.value = false;
-        previewFromTree.value = false;
-      } else {
-        const recalledPreview = getCurrentPreviewRecall();
-        if (recalledPreview) {
-          openFilePreview(recalledPreview.filePath, recalledPreview.initialLine, false);
-          return;
-        }
-        previewHidden.value = false;
-        previewFromPicker.value = false;
-        previewFromTree.value = false;
-        showFilePickerOnTop();
+      const openFileTab = mainTabs.tabs.value.find((tab) => tab.kind === "file");
+      if (openFileTab) {
+        mainTabs.activateTab(openFileTab.id);
+        return;
       }
+      const recalled = getCurrentPreviewRecall();
+      if (recalled) {
+        openFilePreview(recalled.filePath, recalled.initialLine);
+        return;
+      }
+      showFilePickerOnTop();
     },
     toggleTreeExplorer: () => {
-      if (showTreeExplorer.value) {
-        const z = treeExplorerRef.value?.zIndex ?? 0;
-        if (isTopModal(z)) {
-          closeTreeExplorer();
-        } else {
-          treeExplorerRef.value?.bringToFront();
-        }
-      } else {
-        showTreeExplorer.value = true;
-      }
+      mainTabs.toggleTab({ kind: "tree" });
     },
     openInIDE: async () => {
       const item = store.currentItem;
@@ -322,43 +231,18 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     navigateRepoDown: () => navigateRepos(1),
     toggleSidebar: () => { sidebarHidden.value = !sidebarHidden.value; },
     toggleMaximize: () => {
-      const ctx = currentShortcutContext.value;
+      const ctx = activeSurfaceContext();
       maximizedModal.value = maximizedModal.value === ctx ? null : ctx;
     },
     dismiss: () => {
+      // Dialogs first, in stacking order; the main area's tabs are below all
+      // of them and get Escape only once none of them wanted it.
       if (showCommandPalette.value) { showCommandPalette.value = false; return true; }
       if (showShortcutsModal.value) { showShortcutsModal.value = false; return true; }
       if (showPeerPicker.value) { closePeerPicker(); return true; }
       if (showFilePickerModal.value) { closeFilePicker(); return true; }
-      if (showFilePreviewModal.value) {
-        const shouldCloseFileFlow = filePreviewRef.value?.dismiss() ?? true;
-        if (shouldCloseFileFlow) closeFileFlow();
-        return true;
-      }
-      // Shell before diff: let Escape reach the shell terminal (vim, etc.)
-      if (showShellModal.value) { return; }
-      if (showDiffModal.value) {
-        closeDiffModal();
-        return true;
-      }
-      if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return true; }
-      if (showCommitGraphModal.value) {
-        const shouldCloseCommitGraph = commitGraphModalRef.value?.dismiss() ?? true;
-        if (shouldCloseCommitGraph) {
-          showCommitGraphModal.value = false;
-        }
-        return true;
-      }
-      if (showTreeExplorer.value) {
-        const shouldCloseTreeExplorer = treeExplorerRef.value?.dismiss() ?? true;
-        if (shouldCloseTreeExplorer) {
-          closeTreeExplorer();
-        }
-        return true;
-      }
       if (showNewTaskModal.value) { showNewTaskModal.value = false; return true; }
       if (showAddRepoModal.value) { showAddRepoModal.value = false; return true; }
-      // Tabs are below every modal, so they get Escape only once none wanted it.
       if (mainPanelRef.value?.dismissActiveTab?.()) return true;
     },
     openShell: () => {
@@ -367,69 +251,27 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
         toast.warning(t("toasts.remoteShellUnavailable"));
         return;
       }
-      if (!store.selectedRepo || !store.currentItem) return;
-      if (mainTabs.scopeKey.value) {
-        mainTabs.toggleTab({ kind: "shell" });
-        return;
-      }
-      if (showShellModal.value && !shellRepoRoot.value) {
-        const z = shellModalRef.value?.zIndex ?? 0;
-        if (isTopModal(z)) {
-          onShellClose();
-        } else {
-          shellModalRef.value?.bringToFront();
-        }
-      } else {
-        shellRepoRoot.value = false;
-        showShellModal.value = true;
-      }
+      // A repository or app scope has no worktree to run in, so ⌘J opens the
+      // shell that scope does have rather than nothing at all.
+      mainTabs.toggleTab({
+        kind: "shell",
+        shellScope: mainTabs.hasAgentTab.value ? "worktree" : "repo",
+      });
     },
     openShellRepoRoot: () => {
-      if (showShellModal.value && shellRepoRoot.value) {
-        const z = shellModalRef.value?.zIndex ?? 0;
-        if (isTopModal(z)) {
-          onShellClose();
-        } else {
-          shellModalRef.value?.bringToFront();
-        }
-      } else {
-        shellRepoRoot.value = true;
-        showShellModal.value = true;
-      }
+      mainTabs.toggleTab({ kind: "shell", shellScope: "repo" });
     },
     showDiff: () => {
       if (!store.selectedRepo && !selectedWorkspaceTask.value) return;
-      if (mainTabs.scopeKey.value) {
-        mainTabs.toggleTab({ kind: "diff" });
-        return;
-      }
-      if (showDiffModal.value) {
-        const z = diffModalRef.value?.zIndex ?? 0;
-        if (isTopModal(z)) {
-          closeDiffModal();
-        } else {
-          diffModalRef.value?.bringToFront();
-        }
-      } else {
-        showDiffModal.value = true;
-      }
+      mainTabs.toggleTab({ kind: "diff" });
     },
     showCommitGraph: () => {
       if (!store.selectedRepo) return;
-      if (showCommitGraphModal.value) {
-        const z = commitGraphModalRef.value?.zIndex ?? 0;
-        if (isTopModal(z)) {
-          showCommitGraphModal.value = false;
-        } else {
-          commitGraphModalRef.value?.bringToFront();
-        }
-      } else {
-        showCommitGraphModal.value = true;
-      }
+      mainTabs.toggleTab({ kind: "graph" });
     },
     showShortcuts: () => {
       if (showShortcutsModal.value) {
-        if (shortcutsStartFull.value && shortcutsDisplayContext() !== "main") {
+        if (shortcutsStartFull.value && activeSurfaceContext() !== "main") {
           // Showing all in a modal context → switch to contextual
           shortcutsStartFull.value = false;
         } else {
@@ -465,14 +307,18 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
         if (repo) scanRepoCommands(repo.id);
       }
     },
-    showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },
+    showAnalytics: () => {
+      mainTabs.toggleTab({ kind: "analytics" });
+    },
     goBack: () => navigateBack(),
     goForward: () => navigateForward(),
     createRepo: () => { addRepoInitialTab.value = "create"; showAddRepoModal.value = true; },
     importRepo: () => { addRepoInitialTab.value = "import"; showAddRepoModal.value = true; },
     blockTask: () => { handleBlockTask(); },
     editBlockedTask: () => { handleEditBlockedTask(); },
-    openPreferences: () => { showPreferencesPanel.value = !showPreferencesPanel.value; },
+    openPreferences: () => {
+      mainTabs.toggleTab({ kind: "preferences" });
+    },
     prevTab: () => { cycleTabs(-1); },
     nextTab: () => { cycleTabs(1); },
     focusSearch: () => { sidebarRef.value?.focusSearch(); },

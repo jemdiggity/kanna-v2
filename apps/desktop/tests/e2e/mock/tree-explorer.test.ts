@@ -6,7 +6,7 @@ import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers
 import { WebDriverClient } from "../helpers/webdriver";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
-import { callVueMethod, execDb } from "../helpers/vue";
+import { callVueMethod, execDb, closeMainTabsScript } from "../helpers/vue";
 
 const REPO_NAME = "task-switch-minimal";
 const IGNORED_FILE = "ignored-output.log";
@@ -154,7 +154,7 @@ describe("tree explorer", () => {
     await ensureRepoImported();
 
     await client.executeSync(
-      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;`,
+      closeMainTabsScript(["tree"]),
     );
 
     await pressKey(client, "E", { meta: true, shift: true });
@@ -171,7 +171,7 @@ describe("tree explorer", () => {
     await ensureRepoImported();
 
     await client.executeSync(
-      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;`,
+      closeMainTabsScript(["tree"]),
     );
 
     await pressKey(client, "E", { meta: true, shift: true });
@@ -192,8 +192,7 @@ describe("tree explorer", () => {
     await ensureRepoImported();
 
     await client.executeSync(
-      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;
-       window.__KANNA_E2E__.setupState.showCommitGraphModal = false;`,
+      closeMainTabsScript(["tree", "graph"]),
     );
 
     await pressKey(client, "E", { meta: true, shift: true });
@@ -214,8 +213,7 @@ describe("tree explorer", () => {
     await ensureRepoImported();
 
     await client.executeSync(
-      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;
-       window.__KANNA_E2E__.setupState.showFilePreviewModal = false;`,
+      closeMainTabsScript(["tree", "file"]),
     );
 
     await pressKey(client, "E", { meta: true, shift: true });
@@ -265,7 +263,7 @@ describe("tree explorer", () => {
     if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
 
     await client.executeSync(
-      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;`,
+      closeMainTabsScript(["tree"]),
     );
     await pressKey(client, "E", { meta: true, shift: true });
     await client.waitForElement('[data-testid="tree-explorer-unavailable"]', 5_000);

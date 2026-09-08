@@ -59,13 +59,7 @@ interface UseAppLifecycleOptions {
   homePath: Ref<string>;
   initializeDesktopCloudAuth: () => Promise<void>;
   initializeDesktopLanTaskSync: () => void;
-  openFilePreview: (
-    filePath: string,
-    initialLine: number | undefined,
-    fromPicker: boolean,
-    fromTree?: boolean,
-    remoteContent?: string,
-  ) => void;
+  openFilePreview: (filePath: string, initialLine?: number, remoteContent?: string) => void;
   openImageUrlPreview: (imageUrl: string) => void;
   /**
    * Honour a `kanna_open_file` request from an agent: put the file in the
@@ -242,7 +236,7 @@ export function useAppLifecycle({
         const content = await invoke<string>("read_text_file", {
           path: detail.localAbsolutePath,
         });
-        openFilePreview(detail.path, detail.line, false, false, content);
+        openFilePreview(detail.path, detail.line, content);
       } catch (error: unknown) {
         console.warn("[App] local mentioned file is not text-renderable; opening with the OS:", error);
         try {
@@ -256,7 +250,7 @@ export function useAppLifecycle({
       }
       return;
     }
-    openFilePreview(detail.path, detail.line, false, false, detail.remoteContent);
+    openFilePreview(detail.path, detail.line, detail.remoteContent);
   }
   const handleFileLinkActivateEvent = (event: Event) => {
     void handleFileLinkActivate(event);

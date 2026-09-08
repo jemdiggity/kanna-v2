@@ -269,7 +269,10 @@ describe("diff view", () => {
          if (current?.__v_isRef) current.value = value;
          else if (ctx && key in ctx) ctx[key] = value;
        };
-       setRef("showDiffModal", false);
+       const tabs = window.__KANNA_E2E__?.setupState?.mainTabs;
+       for (const tab of [...(tabs?.tabs?.value ?? [])]) {
+         if (tab.kind === "diff") tabs.closeTab(tab.id);
+       }
        setRef("maximizedModal", null);
        const key = ctx?.currentDiffViewKey?.value ?? ctx?.currentDiffViewKey;
        const resetState = {

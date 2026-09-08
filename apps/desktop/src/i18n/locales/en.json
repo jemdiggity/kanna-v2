@@ -382,7 +382,13 @@
   "mainTabs": {
     "agent": "Agent",
     "diff": "Diff",
-    "shell": "Shell"
+    "shell": "Shell",
+    "repoShell": "Repo shell",
+    "files": "Files",
+    "graph": "Commits",
+    "analytics": "Analytics",
+    "preferences": "Preferences",
+    "image": "Image"
   },
   "terminalTabs": {
     "noSession": "No agent session active"

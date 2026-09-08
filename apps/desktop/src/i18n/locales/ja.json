@@ -379,7 +379,13 @@
   "mainTabs": {
     "agent": "エージェント",
     "diff": "差分",
-    "shell": "シェル"
+    "shell": "シェル",
+    "repoShell": "リポジトリシェル",
+    "files": "ファイル",
+    "graph": "コミット",
+    "analytics": "分析",
+    "preferences": "設定",
+    "image": "画像"
   },
   "terminalTabs": {
     "noSession": "アクティブなエージェントセッションがありません"

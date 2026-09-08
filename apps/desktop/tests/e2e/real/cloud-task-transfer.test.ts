@@ -16,7 +16,7 @@ import {
   pushSelectedTaskToPeerThroughUi,
   waitForTransferPeerTrusted,
 } from "../helpers/transferFlow";
-import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, queryDb, tauriInvoke, setPreferencesOpen } from "../helpers/vue";
 
 interface TaskRow {
   id: string;
@@ -68,13 +68,13 @@ async function signIn(client: typeof primary): Promise<void> {
     return session?.getState?.().status === "signedIn";
   `);
   if (alreadySignedIn) return;
-  await setSetupState(client, "showPreferencesPanel", true);
+  await setPreferencesOpen(client, true);
   await client.click(await client.waitForElement('[data-testid="preferences-account-tab"]'));
   await client.sendKeys(await client.waitForElement('[data-testid="account-email"]'), "upvote.sieve.7t@icloud.com");
   await client.sendKeys(await client.waitForElement('[data-testid="account-password"]'), "password123");
   await client.click(await client.waitForElement('[data-testid="account-sign-in"] .primary-button'));
   await client.waitForText(".prefs-panel", "upvote.sieve.7t@icloud.com", 15_000);
-  await setSetupState(client, "showPreferencesPanel", false);
+  await setPreferencesOpen(client, false);
   await setSetupState(client, "maximized", false);
   await setSetupState(client, "sidebarHidden", false);
 }
@@ -86,11 +86,11 @@ async function signOut(client: typeof primary): Promise<void> {
     return session?.getState?.().status !== "signedIn";
   `);
   if (alreadySignedOut) return;
-  await setSetupState(client, "showPreferencesPanel", true);
+  await setPreferencesOpen(client, true);
   await client.click(await client.waitForElement('[data-testid="preferences-account-tab"]'));
   await client.click(await client.waitForText(".account-signed-in button", "Sign out", 10_000));
   await client.waitForElement('[data-testid="account-sign-in"]', 15_000);
-  await setSetupState(client, "showPreferencesPanel", false);
+  await setPreferencesOpen(client, false);
 }
 
 async function createTask(

@@ -6,13 +6,15 @@ import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
 import { useLessScroll } from "../composables/useLessScroll";
 import {
-  useShortcutContext,
   registerContextShortcuts,
   setContextShortcuts,
   type ContextShortcut,
 } from "../composables/useShortcutContext";
 import { useInlineSearch } from "../composables/useInlineSearch";
-import { useModalZIndex } from "../composables/useModalZIndex";
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
 import { macOsTextInputAttrs } from "../utils/textInput";
 import { getSyntaxLanguageForPath } from "../utils/syntaxLanguage";
 import { getShikiTheme } from "../theme/theme";
@@ -27,7 +29,7 @@ const { effectiveCodeTheme } = useThemeRuntime();
 const shikiTheme = computed(() => getShikiTheme(effectiveCodeTheme.value));
 
 const props = withDefaults(
-  defineProps<{
+  defineProps<EmbeddableViewProps & {
     filePath: string;
     worktreePath: string;
     /**
@@ -42,23 +44,14 @@ const props = withDefaults(
     initialLine?: number;
     initialMarkdownMode?: MarkdownPreviewMode;
     standalone?: boolean;
-    /**
-     * Rendered inline as a main-area tab instead of as an overlay. The tab
-     * host owns visibility and the shortcut context that follows the active
-     * tab, so this instance neither claims the context nor joins the modal
-     * z-index stack.
-     */
-    embedded?: boolean;
-    /** Embedded only: false while another tab is in front of this one. */
-    active?: boolean;
   }>(),
   {
     remoteContent: null,
     initialMarkdownMode: DEFAULT_MARKDOWN_PREVIEW_MODE,
   },
 );
-const { zIndex, bringToFront } = useModalZIndex({ enabled: !props.embedded });
-const isEmbeddedAndHidden = () => props.embedded === true && props.active === false;
+const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick, isForeground } =
+  useEmbeddableView(props, { context: "file" });
 const isRemoteFile = computed(() =>
   props.remoteContent !== null || props.remoteContentLoader !== undefined
 );
@@ -71,7 +64,6 @@ const emit = defineEmits<{
 const contentRef = ref<HTMLElement | null>(null);
 const modalRef = ref<HTMLElement | null>(null);
 
-if (!props.embedded) useShortcutContext("file");
 
 const content = ref("");
 
@@ -360,7 +352,7 @@ function handleSearchInputKeydown(e: KeyboardEvent) {
 }
 
 useLessScroll(contentRef, {
-  isActive: () => !isEmbeddedAndHidden(),
+  isActive: isForeground,
   extraHandler(e) {
     const isSearchFocusKey =
       (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && e.key === "/") ||
@@ -417,7 +409,7 @@ defineExpose({ zIndex, bringToFront, dismiss });
 
 onMounted(() => {
   loadFile();
-  if (isEmbeddedAndHidden()) return;
+  if (!isForeground()) return;
   nextTick(() => modalRef.value?.focus());
 });
 
@@ -435,9 +427,9 @@ watch(
 <template>
   <div
     class="modal-overlay"
-    :class="{ maximized, standalone, embedded }"
-    :style="embedded ? undefined : { zIndex }"
-    @click.self="embedded || emit('close')"
+    :class="[{ maximized, standalone }, overlayClass]"
+    :style="overlayStyle"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
   >
     <div ref="modalRef" class="preview-modal" tabindex="-1">
       <div class="preview-header">

@@ -1,41 +1,36 @@
 <script setup lang="ts">
 import { ref, onMounted, onActivated, onDeactivated, nextTick, watch } from "vue";
 import TerminalView from "./TerminalView.vue";
-import { useShortcutContext, setContext, resetContext } from "../composables/useShortcutContext";
-import { useModalZIndex } from "../composables/useModalZIndex";
+import { setContext, resetContext } from "../composables/useShortcutContext";
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
 import { useKannaStore } from "../stores/kanna";
 
-const props = defineProps<{
+const props = defineProps<EmbeddableViewProps & {
   sessionId: string;
   cwd: string;
   fallbackCwd?: string | null;
   portEnv?: string | null;
   maximized?: boolean;
-  /**
-   * Rendered inline as a main-area tab instead of as an overlay. The tab host
-   * owns visibility (and the shortcut context that follows the active tab),
-   * so the modal's own context management and z-index stay out of the way.
-   */
-  embedded?: boolean;
-  /** Embedded only: false while another tab is in front of this one. */
-  active?: boolean;
 }>();
 
 const emit = defineEmits<{ (e: "close"): void }>();
 const termRef = ref<InstanceType<typeof TerminalView> | null>(null);
 const store = useKannaStore();
 
+const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick, isForeground } =
+  useEmbeddableView(props, { context: "shell" });
 if (!props.embedded) {
-  useShortcutContext("shell");
   // KeepAlive: onUnmounted won't fire on hide, so manage context on activate/deactivate too
   onActivated(() => setContext("shell"));
   onDeactivated(() => resetContext());
 }
-const { zIndex, bringToFront } = useModalZIndex({ enabled: !props.embedded });
 defineExpose({ zIndex, bringToFront });
 
 onMounted(async () => {
-  if (props.embedded && props.active === false) return;
+  if (!isForeground()) return;
   await nextTick();
   termRef.value?.focus();
 });
@@ -67,9 +62,9 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, _cols
 <template>
   <div
     class="modal-overlay"
-    :class="{ maximized, embedded }"
-    :style="embedded ? undefined : { zIndex }"
-    @click.self="embedded || emit('close')"
+    :class="[{ maximized }, overlayClass]"
+    :style="overlayStyle"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
   >
     <div class="shell-modal">
       <TerminalView

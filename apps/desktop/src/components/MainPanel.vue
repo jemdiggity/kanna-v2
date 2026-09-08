@@ -23,6 +23,11 @@ import MainTabBar from "./MainTabBar.vue";
 import DiffModal from "./DiffModal.vue";
 import FilePreviewModal from "./FilePreviewModal.vue";
 import ShellModal from "./ShellModal.vue";
+import TreeExplorerModal from "./TreeExplorerModal.vue";
+import CommitGraphModal from "./CommitGraphModal.vue";
+import AnalyticsModal from "./AnalyticsModal.vue";
+import ImageUrlPreviewModal from "./ImageUrlPreviewModal.vue";
+import PreferencesPanel from "./PreferencesPanel.vue";
 import { AGENT_TAB_ID, type MainTab } from "../composables/useMainTabs";
 import type { MainTabViewsController } from "./MainPanel.types";
 import type { BranchInclude, DiffScope, DiffScrollPositions } from "../composables/useAppModals";
@@ -66,6 +71,18 @@ const tabs = computed<MainTab[]>(() => props.views?.tabs.tabs.value ?? []);
 const activeTabId = computed(() => props.views?.tabs.activeTabId.value ?? AGENT_TAB_ID);
 const agentTabActive = computed(() => activeTabId.value === AGENT_TAB_ID);
 const openViewTabs = computed(() => tabs.value.filter((tab) => tab.kind !== "agent"));
+/**
+ * The panel's own empty state — "no task selected", or the agent-install help
+ * when there are no repositories — belongs to a main area with nothing in it.
+ * A repository scope with tabs open is not empty.
+ */
+const showEmptyState = computed(() => !props.uiSlot && tabs.value.length === 0);
+const scopeRepoId = computed(() =>
+  item.value?.repo_id ?? props.views?.store.selectedRepoId ?? null
+);
+const scopeRepoPath = computed(() =>
+  props.repoPath ?? props.views?.store.selectedRepo?.path ?? ""
+);
 const taskWorktreePath = computed(() =>
   item.value?.branch ? `${props.repoPath}/.kanna-worktrees/${item.value.branch}` : undefined
 );
@@ -76,6 +93,16 @@ function selectTab(id: string) {
 
 function closeTab(id: string) {
   props.views?.tabs.closeTab(id);
+}
+
+/**
+ * Consequences of a tab closing that belong to the panel. Wired into the tab
+ * store by App.vue so they run however the tab was closed.
+ */
+function onTabClosed(tab: MainTab) {
+  // The shell is how an operator installs an agent CLI before they have any
+  // repositories, so closing it is the moment to look again.
+  if (tab.kind === "shell" && !props.hasRepos) void checkAllClis();
 }
 
 /**
@@ -123,8 +150,36 @@ function fileViewProps(tab: MainTab) {
   };
 }
 
-const shellSessionId = computed(() => (item.value ? `shell-wt-${item.value.id}` : ""));
-const shellCwd = computed(() => taskWorktreePath.value ?? props.repoPath ?? "");
+function shellSessionId(tab: MainTab): string {
+  if (tab.shellScope === "repo") {
+    const repoId = scopeRepoId.value;
+    return repoId ? `shell-repo-${repoId}` : "shell-home";
+  }
+  return item.value ? `shell-wt-${item.value.id}` : "";
+}
+
+function shellCwd(tab: MainTab): string {
+  if (tab.shellScope === "repo") {
+    return scopeRepoPath.value || (props.views?.modals.homePath.value ?? "");
+  }
+  return taskWorktreePath.value ?? scopeRepoPath.value;
+}
+
+function treeViewProps() {
+  const modals = props.views?.modals;
+  const route = modals?.activeRemoteTaskRoute.value;
+  return {
+    worktreePath: modals?.treeExplorerRoot.value ?? taskWorktreePath.value ?? scopeRepoPath.value,
+    repoRoot: scopeRepoPath.value || (modals?.treeExplorerRoot.value ?? ""),
+    homePath: modals?.homePath.value,
+    remoteDirectoryLoader: modals?.activeTaskViewIsRemote.value
+      ? modals.listRemoteTaskDirectory
+      : undefined,
+    remoteDesktopId: route?.desktopId,
+    remoteTaskId: route?.taskId,
+    remoteTransport: route?.transport,
+  };
+}
 
 function onDiffScopeChange(scope: DiffScope) {
   props.views?.modals.updateCurrentDiffViewState({ scope });
@@ -146,13 +201,13 @@ interface DismissableView {
   dismiss?: () => boolean;
 }
 
-const fileViewRefs = new Map<string, DismissableView>();
+const viewRefs = new Map<string, DismissableView>();
 
-function setFileViewRef(id: string, component: Element | ComponentPublicInstance | null) {
+function setViewRef(id: string, component: Element | ComponentPublicInstance | null) {
   if (component) {
-    fileViewRefs.set(id, component as unknown as DismissableView);
+    viewRefs.set(id, component as unknown as DismissableView);
   } else {
-    fileViewRefs.delete(id);
+    viewRefs.delete(id);
   }
 }
 
@@ -167,10 +222,9 @@ function dismissActiveTab(): boolean {
   if (!controller || !tab || tab.kind === "agent") return false;
   // A shell tab is a live terminal; Escape belongs to whatever runs in it.
   if (tab.kind === "shell") return false;
-  if (tab.kind === "file" && fileViewRefs.get(tab.id)?.dismiss?.() === false) {
-    // The file view closed its own search instead.
-    return true;
-  }
+  // A view with its own layered dismiss — a file's search, the tree's filter,
+  // the graph's detail pane — gets to close that first.
+  if (viewRefs.get(tab.id)?.dismiss?.() === false) return true;
   controller.closeTab(tab.id);
   return true;
 }
@@ -469,7 +523,20 @@ watch(() => props.hasRepos, (has) => {
   if (!has) checkAllClis();
 }, { immediate: true });
 
-defineExpose({ recheckClis: checkAllClis, dismissActiveTab });
+/** ⇧⌘[ / ⇧⌘] reach the Preferences tab's own sections while it is in front. */
+function cyclePreferencesSection(direction: -1 | 1) {
+  const tab = props.views?.tabs.activeTab.value;
+  if (tab?.kind !== "preferences") return;
+  (viewRefs.get(tab.id) as { cycleTab?: (direction: -1 | 1) => void } | undefined)
+    ?.cycleTab?.(direction);
+}
+
+defineExpose({
+  recheckClis: checkAllClis,
+  dismissActiveTab,
+  cyclePreferencesSection,
+  onTabClosed,
+});
 
 async function copyCommand(agent: AgentProvider) {
   const cmd = AGENT_CARD_METADATA[agent].installCommand;
@@ -526,13 +593,6 @@ function dismissCommandHint() {
           {{ $t('mainPanel.revise') }}
         </button>
       </section>
-      <MainTabBar
-        v-if="views && tabs.length > 0"
-        :tabs="tabs"
-        :active-tab-id="activeTabId"
-        @select="selectTab"
-        @close="closeTab"
-      />
       <div v-show="agentTabActive" class="main-tab-panel" data-testid="main-tab-panel-agent">
         <CloudTerminalCache
           :active-terminal="activeCloudTerminal"
@@ -586,12 +646,22 @@ function dismissCommandHint() {
           />
         </template>
       </div>
+    </template>
+    <MainTabBar
+      v-if="views && tabs.length > 0"
+      :tabs="tabs"
+      :active-tab-id="activeTabId"
+      @select="selectTab"
+      @close="closeTab"
+    />
+    <template v-if="views">
       <template v-for="tab in openViewTabs" :key="tabKey(tab)">
         <DiffModal
           v-if="tab.kind === 'diff' && diffViewProps"
           v-show="activeTabId === tab.id"
           v-bind="diffViewProps"
           embedded
+          :active="activeTabId === tab.id"
           @scope-change="onDiffScopeChange"
           @scroll-state-change="onDiffScrollStateChange"
           @branch-include-change="onDiffBranchIncludeChange"
@@ -599,7 +669,7 @@ function dismissCommandHint() {
         />
         <FilePreviewModal
           v-else-if="tab.kind === 'file'"
-          :ref="(component) => setFileViewRef(tab.id, component)"
+          :ref="(component) => setViewRef(tab.id, component)"
           v-show="activeTabId === tab.id"
           v-bind="fileViewProps(tab)"
           embedded
@@ -608,19 +678,65 @@ function dismissCommandHint() {
           @close="closeTab(tab.id)"
         />
         <ShellModal
-          v-else-if="tab.kind === 'shell' && shellSessionId"
+          v-else-if="tab.kind === 'shell' && shellSessionId(tab)"
           v-show="activeTabId === tab.id"
-          :session-id="shellSessionId"
-          :cwd="shellCwd"
-          :fallback-cwd="repoPath"
-          :port-env="item?.port_env"
+          :session-id="shellSessionId(tab)"
+          :cwd="shellCwd(tab)"
+          :fallback-cwd="tab.shellScope === 'repo' ? undefined : scopeRepoPath"
+          :port-env="tab.shellScope === 'repo' ? undefined : item?.port_env"
           embedded
           :active="activeTabId === tab.id"
           @close="closeTab(tab.id)"
         />
+        <TreeExplorerModal
+          v-else-if="tab.kind === 'tree'"
+          :ref="(component) => setViewRef(tab.id, component)"
+          v-show="activeTabId === tab.id"
+          v-bind="treeViewProps()"
+          embedded
+          :active="activeTabId === tab.id"
+          @open-file="(filePath: string) => views?.modals.openFilePreview(filePath)"
+          @close="closeTab(tab.id)"
+        />
+        <CommitGraphModal
+          v-else-if="tab.kind === 'graph' && scopeRepoPath"
+          :ref="(component) => setViewRef(tab.id, component)"
+          v-show="activeTabId === tab.id"
+          :repo-path="scopeRepoPath"
+          :worktree-path="taskWorktreePath"
+          embedded
+          :active="activeTabId === tab.id"
+          @close="closeTab(tab.id)"
+        />
+        <AnalyticsModal
+          v-else-if="tab.kind === 'analytics'"
+          v-show="activeTabId === tab.id"
+          :repo-id="scopeRepoId"
+          embedded
+          :active="activeTabId === tab.id"
+          @close="closeTab(tab.id)"
+        />
+        <ImageUrlPreviewModal
+          v-else-if="tab.kind === 'image'"
+          v-show="activeTabId === tab.id"
+          :image-url="tab.imageUrl ?? ''"
+          embedded
+          :active="activeTabId === tab.id"
+          @close="closeTab(tab.id)"
+        />
+        <PreferencesPanel
+          v-else-if="tab.kind === 'preferences' && views"
+          :ref="(component) => setViewRef(tab.id, component)"
+          v-show="activeTabId === tab.id"
+          :preferences="views.preferences.preferences"
+          embedded
+          :active="activeTabId === tab.id"
+          @update="views.preferences.handlePreferenceUpdate"
+          @close="closeTab(tab.id)"
+        />
       </template>
     </template>
-    <div v-else class="empty-state">
+    <div v-if="showEmptyState" class="empty-state">
       <template v-if="!hasRepos">
         <div class="agent-setup">
           <p class="setup-title">{{ $t('mainPanel.agentSetupTitle') }}</p>

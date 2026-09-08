@@ -55,11 +55,69 @@ describe("useMainTabs", () => {
     expect(tabs.activeTabId.value).toBe("file:src/a.ts");
   });
 
-  it("opens nothing while no task is selected", () => {
+  it("opens nothing while there is no scope at all", () => {
     const { tabs } = setup(null);
 
     expect(tabs.openTab({ kind: "diff" })).toBeNull();
     expect(tabs.tabs.value).toEqual([]);
+  });
+
+  it("gives a repository scope no agent session and an empty start", () => {
+    const { scope, tabs } = setup("repo:repo-1");
+
+    expect(tabs.hasAgentTab.value).toBe(false);
+    expect(tabs.tabs.value).toEqual([]);
+    expect(tabs.activeTabId.value).toBe("");
+
+    tabs.openTab({ kind: "graph" });
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual(["graph"]);
+
+    // Closing the only tab leaves the main area with nothing selected, rather
+    // than falling back to an agent session the repository does not have.
+    tabs.closeTab("graph");
+    expect(tabs.activeTabId.value).toBe("");
+
+    scope.value = "item:task-a";
+    expect(tabs.hasAgentTab.value).toBe(true);
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID]);
+  });
+
+  it("keeps the worktree shell and the repo-root shell as separate tabs", () => {
+    const { tabs } = setup();
+
+    tabs.openTab({ kind: "shell", shellScope: "worktree" });
+    tabs.openTab({ kind: "shell", shellScope: "repo" });
+
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([
+      AGENT_TAB_ID,
+      "shell",
+      "shell:repo",
+    ]);
+  });
+
+  it("gives every other view exactly one tab per scope", () => {
+    const { tabs } = setup();
+
+    for (const kind of ["diff", "tree", "graph", "analytics", "preferences"] as const) {
+      tabs.openTab({ kind });
+      tabs.openTab({ kind });
+    }
+
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([
+      AGENT_TAB_ID,
+      "diff",
+      "tree",
+      "graph",
+      "analytics",
+      "preferences",
+    ]);
+  });
+
+  it("names an image tab by its URL so re-opening one focuses it", () => {
+    expect(mainTabId({ kind: "image", imageUrl: "https://example.invalid/a.png" }))
+      .toBe("image:https://example.invalid/a.png");
+    expect(mainTabId({ kind: "shell", shellScope: "repo" })).toBe("shell:repo");
+    expect(mainTabId({ kind: "shell" })).toBe("shell");
   });
 
   it("toggles a view closed only when it is the one in front", () => {

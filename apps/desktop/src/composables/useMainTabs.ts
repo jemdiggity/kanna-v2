@@ -7,9 +7,26 @@ import type { ShortcutContext } from "./useShortcutContext";
  *
  * `agent` is the task's own session — the terminal (or agent message view, or
  * the cloud terminal for a task another machine owns). It is implicit: every
- * task scope has exactly one, it is always first, and it can never be closed.
+ * *task* scope has exactly one, it is always first, and it can never be
+ * closed. A repo scope has no agent session, so its tab set starts empty.
  */
-export type MainTabKind = "agent" | "diff" | "file" | "shell";
+export type MainTabKind =
+  | "agent"
+  | "diff"
+  | "file"
+  | "shell"
+  | "tree"
+  | "graph"
+  | "analytics"
+  | "image"
+  | "preferences";
+
+/**
+ * Which shell a `shell` tab runs: the task's worktree (⌘J) or the repository
+ * root (⇧⌘J). Both can be open at once in a task scope, so they are separate
+ * tabs rather than one tab that changes directory underneath the reader.
+ */
+export type ShellTabScope = "worktree" | "repo";
 
 export interface MainTabDescriptor {
   kind: MainTabKind;
@@ -22,6 +39,10 @@ export interface MainTabDescriptor {
    * only for a file that cannot be re-read locally.
    */
   remoteContent?: string | null;
+  /** `shell` tabs: which shell this is. Defaults to the task worktree. */
+  shellScope?: ShellTabScope;
+  /** `image` tabs: the URL of the image to show. */
+  imageUrl?: string;
 }
 
 export interface MainTab extends MainTabDescriptor {
@@ -41,6 +62,11 @@ const TAB_SHORTCUT_CONTEXTS: Record<MainTabKind, ShortcutContext> = {
   diff: "diff",
   file: "file",
   shell: "shell",
+  tree: "tree",
+  graph: "graph",
+  analytics: "main",
+  image: "file",
+  preferences: "main",
 };
 
 /**
@@ -52,12 +78,15 @@ export function mainTabId(descriptor: MainTabDescriptor): string {
   switch (descriptor.kind) {
     case "agent":
       return AGENT_TAB_ID;
-    case "diff":
-      return "diff";
     case "shell":
-      return "shell";
+      return descriptor.shellScope === "repo" ? "shell:repo" : "shell";
     case "file":
       return `file:${descriptor.filePath ?? ""}`;
+    case "image":
+      return `image:${descriptor.imageUrl ?? ""}`;
+    default:
+      // One per scope: the diff, the tree, the graph, analytics, preferences.
+      return descriptor.kind;
   }
 }
 
@@ -70,41 +99,83 @@ export function mainTabScopeKeyForTask(taskId: string): string {
   return `item:${taskId}`;
 }
 
-interface UseMainTabsOptions {
-  /**
-   * Identifies the tab set. Tabs are per task: the main content area belongs
-   * to the selected task, the way the sidebar selection already scopes the
-   * diff and file-preview state, so switching tasks restores that task's tabs
-   * instead of carrying one task's views onto another.
-   *
-   * `null` when no task is selected — there is nothing to tab into, and the
-   * repo-scoped tools stay modal.
-   */
-  scopeKey: ComputedRef<string | null>;
+/**
+ * The tab-set key for a repository with no task on screen. Repo-scoped views —
+ * the commit graph, analytics, a repo-root shell, the tree explorer — belong
+ * to the repository, not to whichever task happened to be selected when they
+ * were opened, so they get a tab set of their own.
+ */
+export function mainTabScopeKeyForRepo(repoId: string): string {
+  return `repo:${repoId}`;
 }
 
-export function useMainTabs({ scopeKey }: UseMainTabsOptions) {
+/**
+ * The tab set for a window with no repository selected at all — the first-run
+ * state. It exists so the main content area always has exactly one place views
+ * open into: with no app scope, the handful of surfaces reachable before a
+ * repository is added (a home shell, the tree explorer, Preferences) would
+ * need a second, parallel rendering path that nothing else exercises.
+ */
+export function mainTabScopeKeyForApp(): string {
+  return "app";
+}
+
+/** Whether a scope is a task's (and therefore owns an agent session tab). */
+export function isTaskScopeKey(key: string | null): boolean {
+  return key?.startsWith("item:") === true;
+}
+
+interface UseMainTabsOptions {
+  /**
+   * Identifies the tab set: the selected task, else the selected repository,
+   * else the app itself. Scoping views this way is what makes switching tasks
+   * restore that task's tabs rather than carry one task's views onto another,
+   * and what keeps a repository's commit graph the repository's rather than
+   * whichever task happened to be selected when it was opened.
+   */
+  scopeKey: ComputedRef<string | null>;
+  /**
+   * Called for every tab that closes, however it was closed — the tab's own
+   * button, its shortcut, Escape. Consequences of closing a view belong here
+   * rather than at one call site, because they were silently skipped for the
+   * other two when they lived in the panel.
+   */
+  onTabClosed?: (tab: MainTab) => void;
+}
+
+export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
   const scopes = reactive<Record<string, MainTabScopeState>>({});
 
   function agentTab(): MainTab {
     return { id: AGENT_TAB_ID, kind: "agent" };
   }
 
+  /**
+   * A task scope opens on its agent session; a repository scope has none, so
+   * it starts empty and the main area keeps showing its own empty state until
+   * something is opened there.
+   */
+  function initialScopeState(key: string): MainTabScopeState {
+    return isTaskScopeKey(key)
+      ? { tabs: [agentTab()], activeId: AGENT_TAB_ID }
+      : { tabs: [], activeId: "" };
+  }
+
   function scopeState(key: string): MainTabScopeState {
-    scopes[key] ??= { tabs: [agentTab()], activeId: AGENT_TAB_ID };
+    scopes[key] ??= initialScopeState(key);
     return scopes[key];
   }
 
   const tabs = computed<MainTab[]>(() => {
     const key = scopeKey.value;
     if (!key) return [];
-    return scopes[key]?.tabs ?? [agentTab()];
+    return scopes[key]?.tabs ?? initialScopeState(key).tabs;
   });
 
   const activeTabId = computed<string>(() => {
     const key = scopeKey.value;
-    if (!key) return AGENT_TAB_ID;
-    return scopes[key]?.activeId ?? AGENT_TAB_ID;
+    if (!key) return "";
+    return scopes[key]?.activeId ?? initialScopeState(key).activeId;
   });
 
   const activeTab = computed<MainTab | null>(() =>
@@ -115,6 +186,9 @@ export function useMainTabs({ scopeKey }: UseMainTabsOptions) {
     const tab = activeTab.value;
     return tab ? mainTabShortcutContext(tab.kind) : null;
   });
+
+  /** True when this scope owns an agent session tab, i.e. it is a task's. */
+  const hasAgentTab = computed(() => isTaskScopeKey(scopeKey.value));
 
   function isOpen(id: string): boolean {
     return tabs.value.some((tab) => tab.id === id);
@@ -167,12 +241,14 @@ export function useMainTabs({ scopeKey }: UseMainTabsOptions) {
     if (!state) return;
     const index = state.tabs.findIndex((tab) => tab.id === id);
     if (index === -1) return;
-    state.tabs.splice(index, 1);
+    const [closed] = state.tabs.splice(index, 1);
+    if (closed) onTabClosed?.(closed);
     if (state.activeId !== id) return;
     // Closing the active tab moves to the tab that took its place — the one to
-    // its right — and falls back to its left neighbour when it was last. The
-    // agent session is leftmost, so closing the only open view lands there.
-    state.activeId = (state.tabs[index] ?? state.tabs[index - 1])?.id ?? AGENT_TAB_ID;
+    // its right — and falls back to its left neighbour when it was last. In a
+    // task scope the agent session is leftmost, so closing the only open view
+    // lands there; a repository scope simply runs out of tabs.
+    state.activeId = (state.tabs[index] ?? state.tabs[index - 1])?.id ?? "";
   }
 
   /**
@@ -199,7 +275,7 @@ export function useMainTabs({ scopeKey }: UseMainTabsOptions) {
 
   function closeActiveTab(): boolean {
     const id = activeTabId.value;
-    if (id === AGENT_TAB_ID) return false;
+    if (!id || id === AGENT_TAB_ID) return false;
     closeTab(id);
     return true;
   }
@@ -215,6 +291,7 @@ export function useMainTabs({ scopeKey }: UseMainTabsOptions) {
     activeTabId,
     activeTab,
     activeTabContext,
+    hasAgentTab,
     isOpen,
     openTab,
     openTabInScope,

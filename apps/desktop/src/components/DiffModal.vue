@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, nextTick } from "vue";
 import DiffView from "./DiffView.vue";
-import { useShortcutContext } from "../composables/useShortcutContext";
-import { useModalZIndex } from "../composables/useModalZIndex";
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
 import { useModalTearOff } from "../composables/useModalTearOff";
 import type { RemoteTaskViewTransport } from "../modalTearOff";
 import type {
@@ -12,7 +14,7 @@ import type {
 
 const modalRef = ref<HTMLElement | null>(null);
 
-const props = defineProps<{
+const props = defineProps<EmbeddableViewProps & {
   repoPath: string;
   worktreePath?: string;
   initialScope?: "branch" | "working";
@@ -22,20 +24,21 @@ const props = defineProps<{
   baseRef?: string;
   viewKey?: string;
   standalone?: boolean;
-  /**
-   * Rendered inline as a main-area tab instead of as an overlay: no scrim, no
-   * modal z-index, and no click-outside dismissal. The view itself — toolbar,
-   * scroll state, tear-off — is unchanged.
-   */
-  embedded?: boolean;
   remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
   remoteDesktopId?: string;
   remoteTaskId?: string;
   remoteTransport?: RemoteTaskViewTransport;
 }>();
 
-if (!props.embedded) useShortcutContext("diff");
-const { zIndex, bringToFront } = useModalZIndex({ enabled: !props.embedded });
+const {
+  zIndex,
+  bringToFront,
+  overlayClass,
+  overlayStyle,
+  dismissOnScrimClick,
+  focusWhenBrought,
+} = useEmbeddableView(props, { context: "diff" });
+focusWhenBrought(modalRef);
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -76,9 +79,9 @@ onMounted(() => {
 <template>
   <div
     class="modal-overlay"
-    :class="{ maximized, standalone, embedded }"
-    :style="embedded ? undefined : { zIndex }"
-    @click.self="embedded || emit('close')"
+    :class="[{ maximized, standalone }, overlayClass]"
+    :style="overlayStyle"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
   >
     <div
       ref="modalRef"

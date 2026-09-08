@@ -108,3 +108,66 @@ export async function tauriInvoke(
        .catch(e => cb({ __error: e.message || String(e) }));`
   );
 }
+
+/**
+ * Open or close the Preferences view.
+ *
+ * Preferences is a tab in the main content area, not an overlay, so a test
+ * that needs the account or mobile panel asks the tab set for it rather than
+ * flipping a `showPreferencesPanel` flag that no longer exists.
+ */
+export async function setPreferencesOpen(
+  client: WebDriverClient,
+  open: boolean,
+): Promise<void> {
+  await client.executeSync(`
+    const ctx = window.__KANNA_E2E__?.setupState;
+    const tabs = ctx?.mainTabs;
+    if (!tabs) throw new Error("main tabs are unavailable on setupState");
+    const existing = (tabs.tabs?.value ?? []).find((tab) => tab.kind === "preferences");
+    if (${open ? "true" : "false"}) {
+      if (existing) tabs.activateTab(existing.id);
+      else tabs.openTab({ kind: "preferences" });
+    } else if (existing) {
+      tabs.closeTab(existing.id);
+    }
+    return true;
+  `);
+}
+
+/**
+ * Close the main content area's tabs — every one, or just the kinds named.
+ *
+ * The views a test opens live in tabs now, so this is how a step resets the
+ * main area between assertions instead of clearing a modal flag.
+ */
+export async function closeMainTabs(
+  client: WebDriverClient,
+  kinds?: string[],
+): Promise<void> {
+  await client.executeSync(`
+    const tabs = window.__KANNA_E2E__?.setupState?.mainTabs;
+    if (!tabs) throw new Error("main tabs are unavailable on setupState");
+    const kinds = ${JSON.stringify(kinds ?? null)};
+    for (const tab of [...(tabs.tabs?.value ?? [])]) {
+      if (!kinds || kinds.includes(tab.kind)) tabs.closeTab(tab.id);
+    }
+    return true;
+  `);
+}
+
+/**
+ * The body of {@link closeMainTabs} as a script string, for call sites that
+ * already pass raw scripts to `executeSync`.
+ */
+export function closeMainTabsScript(kinds?: string[]): string {
+  return `
+    const tabs = window.__KANNA_E2E__?.setupState?.mainTabs;
+    if (!tabs) throw new Error("main tabs are unavailable on setupState");
+    const kinds = ${JSON.stringify(kinds ?? null)};
+    for (const tab of [...(tabs.tabs?.value ?? [])]) {
+      if (!kinds || kinds.includes(tab.kind)) tabs.closeTab(tab.id);
+    }
+    return true;
+  `;
+}

@@ -3,13 +3,6 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch, type ComputedRef
 import Sidebar from "../components/Sidebar.vue";
 import MainPanel from "../components/MainPanel.vue";
 import FilePickerModal from "../components/FilePickerModal.vue";
-import FilePreviewModal from "../components/FilePreviewModal.vue";
-import ImageUrlPreviewModal from "../components/ImageUrlPreviewModal.vue";
-import TreeExplorerModal from "../components/TreeExplorerModal.vue";
-import DiffModal from "../components/DiffModal.vue";
-import CommitGraphModal from "../components/CommitGraphModal.vue";
-import ShellModal from "../components/ShellModal.vue";
-import PreferencesPanel from "../components/PreferencesPanel.vue";
 import { type ShortcutContext } from "./useShortcutContext";
 import { useRestoreFocus } from "./useRestoreFocus";
 import {
@@ -57,12 +50,6 @@ interface FilePreviewRecallState {
   initialLine?: number;
 }
 
-interface ModalShortcutContextEntry {
-  context: ShortcutContext;
-  visible: boolean;
-  zIndex: number;
-}
-
 interface UseAppModalsOptions {
   isMobile: boolean;
   store: ReturnType<typeof useKannaStore>;
@@ -99,17 +86,6 @@ export function useAppModals({
   const shortcutsContext = ref<ShortcutContext>("main");
   const showFilePickerModal = ref(false);
   const filePickerHidden = ref(false);
-  const showFilePreviewModal = ref(false);
-  const previewFilePath = ref("");
-  const previewInitialLine = ref<number | undefined>(undefined);
-  const previewRemoteContent = ref<string | null>(null);
-  const previewHidden = ref(false);
-  const previewFromPicker = ref(false);
-  const previewFromTree = ref(false);
-  const showImageUrlPreviewModal = ref(false);
-  const previewImageUrl = ref("");
-  const showDiffModal = ref(false);
-  const showTreeExplorer = ref(false);
   const transferredTreeContext = computed<TreeExplorerTearOffContext | null>(() =>
     transferredModalContext.value?.surface === "tree"
       ? transferredModalContext.value
@@ -195,37 +171,17 @@ export function useAppModals({
     if (store.selectedRepo?.path) return store.selectedRepo.path;
     return homePath.value;
   });
-  const showShellModal = ref(false);
-  const shellRepoRoot = ref(false);
-  const shellModalCwd = computed(() => {
-    if (shellRepoRoot.value && !store.selectedRepo) return homePath.value;
-    if (shellRepoRoot.value) return store.selectedRepo?.path ?? homePath.value;
-    return currentWorktreePath.value ?? store.selectedRepo?.path ?? homePath.value;
-  });
-  const shellModalFallbackCwd = computed(() =>
-    shellRepoRoot.value ? undefined : store.selectedRepo?.path
-  );
   const showCommandPalette = ref(false);
-  const showAnalyticsModal = ref(false);
   const showBlockerSelect = ref(false);
   const blockerSelectMode = ref<"block" | "edit">("block");
   const showPeerPicker = ref(false);
-  const showPreferencesPanel = ref(false);
   const sidebarHidden = ref(false);
   const sidebarWidth = ref(DEFAULT_SIDEBAR_WIDTH);
   const maximizedModal = ref<ShortcutContext | null>(null);
   const maximized = computed(() => maximizedModal.value !== null);
   const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
   const mainPanelRef = ref<InstanceType<typeof MainPanel> | null>(null);
-  const shellModalRef = ref<InstanceType<typeof ShellModal> | null>(null);
-  const diffModalRef = ref<InstanceType<typeof DiffModal> | null>(null);
-  const showCommitGraphModal = ref(false);
-  const commitGraphModalRef = ref<InstanceType<typeof CommitGraphModal> | null>(null);
-  const treeExplorerRef = ref<InstanceType<typeof TreeExplorerModal> | null>(null);
   const filePickerRef = ref<InstanceType<typeof FilePickerModal> | null>(null);
-  const filePreviewRef = ref<InstanceType<typeof FilePreviewModal> | null>(null);
-  const imageUrlPreviewRef = ref<InstanceType<typeof ImageUrlPreviewModal> | null>(null);
-  const preferencesRef = ref<InstanceType<typeof PreferencesPanel> | null>(null);
   const sidebarShellStyle = computed(() => ({
     width: `${sidebarWidth.value}px`,
     minWidth: `${sidebarWidth.value}px`,
@@ -259,11 +215,17 @@ export function useAppModals({
     diffViewStates[key] = { ...current, ...partial };
   }
 
+  /**
+   * A torn-off window boots with the surface it was dragged out of. That
+   * surface is a tab like any other now, so the window opens it in whatever
+   * scope it restored and maximizes it, rather than raising a modal over an
+   * empty main area.
+   */
   function restoreTransferredModal() {
     const context = transferredModalContext.value;
     if (!context) return;
     if (context.surface === "tree") {
-      showTreeExplorer.value = true;
+      mainTabs?.openTab({ kind: "tree" });
       maximizedModal.value = "tree";
       return;
     }
@@ -280,10 +242,15 @@ export function useAppModals({
           : {}),
       };
     }
-    showDiffModal.value = true;
+    mainTabs?.openTab({ kind: "diff" });
     maximizedModal.value = "diff";
   }
 
+  /**
+   * Clears this window's record of the surface it was torn off with, so the
+   * window it came from stops counting it as outstanding. Called when the tab
+   * that surface restored into is closed.
+   */
   function finishTransferredModal(surface: ModalTearOffContext["surface"]): void {
     if (transferredModalContext.value?.surface !== surface) return;
     transferredModalContext.value = null;
@@ -466,68 +433,30 @@ export function useAppModals({
     }
   }
 
-  function topPreviewModalContext(): ShortcutContext | null {
-    const modalContexts: ModalShortcutContextEntry[] = [
-      { context: "diff", visible: showDiffModal.value, zIndex: diffModalRef.value?.zIndex ?? 0 },
-      { context: "graph", visible: showCommitGraphModal.value, zIndex: commitGraphModalRef.value?.zIndex ?? 0 },
-      { context: "file", visible: showFilePickerModal.value, zIndex: filePickerRef.value?.zIndex ?? 0 },
-      { context: "file", visible: showFilePreviewModal.value, zIndex: filePreviewRef.value?.zIndex ?? 0 },
-      { context: "tree", visible: showTreeExplorer.value, zIndex: treeExplorerRef.value?.zIndex ?? 0 },
-      { context: "shell", visible: showShellModal.value, zIndex: shellModalRef.value?.zIndex ?? 0 },
-    ];
-    const entries = modalContexts.filter((entry) => entry.visible);
-
-    entries.sort((a, b) => b.zIndex - a.zIndex);
-    return entries[0]?.context ?? null;
-  }
-
-  // Derive shortcut context from visible modals (more reliable than the global singleton
-  // which can be stale if a KeepAlive deactivation resets it after a modal sets it).
+  // Derived from the dialogs that are open, not from the global singleton,
+  // which a KeepAlive deactivation can leave stale. The main area's own views
+  // are tabs; their shortcut context follows the active tab instead — see
+  // `useMainTabs().activeTabContext`.
   const currentShortcutContext = computed<ShortcutContext>(() => {
-    // The shortcuts modal is topmost and should own Escape/help toggles even when
-    // it is opened on top of a context like tree or shell that doesn't expose
-    // the generic dismiss shortcut.
+    // The shortcuts modal is topmost and owns Escape/help toggles even when
+    // opened over another dialog.
     if (showShortcutsModal.value) return "main";
     if (showPeerPicker.value) return "transfer";
     if (showNewTaskModal.value) return "newTask";
-    const topPreviewContext = topPreviewModalContext();
-    if (topPreviewContext) return topPreviewContext;
+    if (showFilePickerModal.value) return "file";
     return "main";
   });
 
-  function onShellClose() {
-    showShellModal.value = false;
-    maximizedModal.value = null;
-    if (!store.repos.length) {
-      mainPanelRef.value?.recheckClis?.();
-    }
-  }
 
-  function closeTreeExplorer() {
-    showTreeExplorer.value = false;
-    maximizedModal.value = maximizedModal.value === "tree" ? null : maximizedModal.value;
-    finishTransferredModal("tree");
-  }
 
-  function closeDiffModal() {
-    showDiffModal.value = false;
-    maximizedModal.value = maximizedModal.value === "diff" ? null : maximizedModal.value;
-    finishTransferredModal("diff");
-  }
 
-  function closeFileFlow() {
-    showFilePreviewModal.value = false;
-    showFilePickerModal.value = false;
-    filePickerHidden.value = false;
-    maximizedModal.value = maximizedModal.value === "file" ? null : maximizedModal.value;
-    previewHidden.value = false;
-    previewFromPicker.value = false;
-    previewFromTree.value = false;
-  }
 
+  // Tabs are per scope, so a task switch no longer has to tear a view down —
+  // but the picker is a dialog over whatever is selected, and one left open
+  // onto the previous task's worktree is not a picker for this one.
   watch(currentFileFlowKey, (newKey, oldKey) => {
     if (!oldKey || newKey === oldKey) return;
-    closeFileFlow();
+    closeFilePicker();
   });
 
   function closeFilePicker() {
@@ -536,88 +465,51 @@ export function useAppModals({
   }
 
   function showFilePickerOnTop() {
-    previewHidden.value = false;
     showFilePickerModal.value = true;
     filePickerHidden.value = false;
     nextTick(() => filePickerRef.value?.bringToFront?.());
   }
 
+  /**
+   * Show a file in the main content area. Every caller — the picker, the tree
+   * explorer, a terminal file link, a `kanna_open_file` request — lands here,
+   * and every one of them opens a tab in the current scope.
+   */
   function openFilePreview(
     filePath: string,
-    initialLine: number | undefined,
-    fromPicker: boolean,
-    fromTree = false,
-    remoteContent?: string
+    initialLine?: number,
+    remoteContent?: string,
   ) {
-    if (mainTabs?.scopeKey.value) {
-      // Remote content is a point-in-time snapshot from another machine; it
-      // cannot be re-loaded later, so it is excluded from preview recall.
-      if (remoteContent === undefined) rememberCurrentPreview(filePath, initialLine);
-      mainTabs.openTab({
-        kind: "file",
-        filePath,
-        initialLine,
-        remoteContent: remoteContent ?? null,
-      });
-      // The picker is a launcher: once the file has a tab the flow is over, so
-      // it is not left mounted waiting to be returned to. The tree explorer is
-      // a browser, and stays open above the tabs so several files can be sent
-      // there in a row; Escape dismisses it the way it dismisses any modal.
-      showFilePickerModal.value = false;
-      filePickerHidden.value = false;
-      return;
-    }
-
-    previewFilePath.value = filePath;
-    previewInitialLine.value = initialLine;
-    previewRemoteContent.value = remoteContent ?? null;
     // Remote content is a point-in-time snapshot from another machine; it
     // cannot be re-loaded later, so it is excluded from preview recall.
     if (remoteContent === undefined) rememberCurrentPreview(filePath, initialLine);
-    previewFromPicker.value = fromPicker;
-    previewFromTree.value = fromTree;
-    previewHidden.value = false;
-    showFilePreviewModal.value = true;
-    nextTick(() => filePreviewRef.value?.bringToFront?.());
+    mainTabs?.openTab({
+      kind: "file",
+      filePath,
+      initialLine,
+      remoteContent: remoteContent ?? null,
+    });
+    // The picker is a launcher: once the file has a tab the flow is over, so
+    // it is not left mounted waiting to be returned to. The tree explorer is a
+    // browser and stays where it is, so several files can be opened in a row.
+    closeFilePicker();
   }
 
   function selectFileFromPicker(filePath: string) {
-    showFilePickerModal.value = false;
-    filePickerHidden.value = true;
-    openFilePreview(filePath, undefined, true);
+    openFilePreview(filePath);
   }
 
-  function closeFilePreview(reopenPicker: boolean) {
-    showFilePreviewModal.value = false;
-    maximizedModal.value = maximizedModal.value === "file" ? null : maximizedModal.value;
-    previewHidden.value = false;
-
-    const shouldReopenPicker = reopenPicker && previewFromPicker.value;
-    previewFromPicker.value = false;
-    previewFromTree.value = false;
-
-    if (shouldReopenPicker) {
-      showFilePickerOnTop();
-    }
-  }
 
   function openImageUrlPreview(imageUrl: string) {
-    previewImageUrl.value = imageUrl;
-    showImageUrlPreviewModal.value = true;
-    nextTick(() => imageUrlPreviewRef.value?.bringToFront?.());
+    mainTabs?.openTab({ kind: "image", imageUrl });
   }
 
-  function closeImageUrlPreview() {
-    showImageUrlPreviewModal.value = false;
-    previewImageUrl.value = "";
-  }
 
+  // Only dialogs are left to restore focus after; the main area's views are
+  // tabs, and a tab never took focus away from anything to begin with.
   const anyModalOpen = computed(() =>
     showNewTaskModal.value || showAddRepoModal.value || showShortcutsModal.value ||
-    showFilePickerModal.value || showFilePreviewModal.value || showDiffModal.value ||
-    showTreeExplorer.value || showShellModal.value || showAnalyticsModal.value ||
-    showBlockerSelect.value || showPreferencesPanel.value || showCommitGraphModal.value ||
-    showPeerPicker.value || showImageUrlPreviewModal.value
+    showFilePickerModal.value || showBlockerSelect.value || showPeerPicker.value
   );
   useRestoreFocus(anyModalOpen);
 
@@ -635,17 +527,6 @@ export function useAppModals({
     shortcutsContext,
     showFilePickerModal,
     filePickerHidden,
-    showFilePreviewModal,
-    previewFilePath,
-    previewInitialLine,
-    previewRemoteContent,
-    previewHidden,
-    previewFromPicker,
-    previewFromTree,
-    showImageUrlPreviewModal,
-    previewImageUrl,
-    showDiffModal,
-    showTreeExplorer,
     transferredModalContext,
     transferredTreeContext,
     transferredDiffContext,
@@ -661,30 +542,16 @@ export function useAppModals({
     activeDiffWorktreePath,
     homePath,
     treeExplorerRoot,
-    showShellModal,
-    shellRepoRoot,
-    shellModalCwd,
-    shellModalFallbackCwd,
     showCommandPalette,
-    showAnalyticsModal,
     showBlockerSelect,
     blockerSelectMode,
     showPeerPicker,
-    showPreferencesPanel,
     sidebarHidden,
     maximizedModal,
     maximized,
     sidebarRef,
     mainPanelRef,
-    shellModalRef,
-    diffModalRef,
-    showCommitGraphModal,
-    commitGraphModalRef,
-    treeExplorerRef,
     filePickerRef,
-    filePreviewRef,
-    imageUrlPreviewRef,
-    preferencesRef,
     sidebarShellStyle,
     canResizeSidebar,
     currentDiffViewKey,
@@ -696,23 +563,18 @@ export function useAppModals({
     currentDiffViewState,
     updateCurrentDiffViewState,
     restoreTransferredModal,
+    finishTransferredModal,
     currentPreviewMarkdownMode,
     updateCurrentPreviewMarkdownMode,
     stopSidebarResize,
     startSidebarResize,
     restoreSidebarWidth,
     currentShortcutContext,
-    onShellClose,
-    closeTreeExplorer,
-    closeDiffModal,
-    closeFileFlow,
     closeFilePicker,
     showFilePickerOnTop,
     openFilePreview,
     selectFileFromPicker,
-    closeFilePreview,
     openImageUrlPreview,
-    closeImageUrlPreview,
     getCurrentPreviewRecall,
   };
 }

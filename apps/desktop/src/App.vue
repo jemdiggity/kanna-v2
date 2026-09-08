@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, toRef, type Ref } from "vue";
+import { computed, inject, toRef, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { type BlockerDisplayItem, type DbHandle } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
@@ -16,7 +16,12 @@ import { useAppUpdate } from "./composables/useAppUpdate";
 import { useAppCloudWorkspace } from "./composables/useAppCloudWorkspace";
 import { useAppLifecycle } from "./composables/useAppLifecycle";
 import { useAppModals } from "./composables/useAppModals";
-import { mainTabScopeKeyForTask, useMainTabs } from "./composables/useMainTabs";
+import {
+  mainTabScopeKeyForApp,
+  mainTabScopeKeyForRepo,
+  mainTabScopeKeyForTask,
+  useMainTabs,
+} from "./composables/useMainTabs";
 import { useAppPreferences } from "./composables/useAppPreferences";
 import { useAppTaskTransfer } from "./composables/useAppTaskTransfer";
 import { useTransferFailureToasts } from "./composables/useTransferFailureToasts";
@@ -162,14 +167,17 @@ defineExpose({
   refreshLanTasks,
 });
 
-// Tabs are scoped to the task the main panel is actually showing — the same
-// slot that decides what the agent tab renders — so the tab bar and the views
-// its shortcuts open can never disagree about which task they belong to. With
-// no task on screen there is nothing to tab into and the repo-scoped tools
-// stay modal.
+// Tabs belong to the task the main panel is actually showing — the same slot
+// that decides what the agent tab renders — so the tab bar and the views its
+// shortcuts open can never disagree about which task they belong to. With no
+// task on screen the repository owns the tab set instead: a commit graph or a
+// repo-root shell is the repository's, not whichever task happened to be
+// selected when it was opened.
 const mainTabScopeKey = computed(() => {
   const task = mainPanelUiSlot.value?.task;
-  return task ? mainTabScopeKeyForTask(task.id) : null;
+  if (task) return mainTabScopeKeyForTask(task.id);
+  const repoId = selectedCloudRepoId.value ?? store.selectedRepoId;
+  return repoId ? mainTabScopeKeyForRepo(repoId) : mainTabScopeKeyForApp();
 });
 
 /**
@@ -184,7 +192,17 @@ function openTaskFileView(taskId: string, filePath: string, line?: number): void
     initialLine: line,
   });
 }
-const mainTabs = useMainTabs({ scopeKey: mainTabScopeKey });
+const mainTabs = useMainTabs({
+  scopeKey: mainTabScopeKey,
+  onTabClosed: (tab) => {
+    // A torn-off window restored its view from a tear-off context; closing
+    // that view is what tells the window it came from to stop counting it.
+    if (tab.kind === "tree" || tab.kind === "diff") {
+      appModals.finishTransferredModal(tab.kind);
+    }
+    mainPanelRef.value?.onTabClosed?.(tab);
+  },
+});
 const appModals = useAppModals({
   isMobile,
   store,
@@ -205,35 +223,16 @@ const {
   shortcutsStartFull,
   shortcutsContext,
   showFilePickerModal,
-  filePickerHidden,
-  showFilePreviewModal,
-  previewHidden,
-  previewFromPicker,
-  previewFromTree,
-  showDiffModal,
-  showTreeExplorer,
   homePath,
-  showShellModal,
-  shellRepoRoot,
   showCommandPalette,
-  showAnalyticsModal,
   showBlockerSelect,
   blockerSelectMode,
   showPeerPicker,
-  showPreferencesPanel,
   sidebarHidden,
   maximizedModal,
   maximized,
   sidebarRef,
   mainPanelRef,
-  shellModalRef,
-  diffModalRef,
-  showCommitGraphModal,
-  commitGraphModalRef,
-  treeExplorerRef,
-  filePickerRef,
-  filePreviewRef,
-  preferencesRef,
   sidebarShellStyle,
   canResizeSidebar,
   stopSidebarResize,
@@ -241,16 +240,22 @@ const {
   restoreSidebarWidth,
   restoreTransferredModal,
   currentShortcutContext,
-  onShellClose,
-  closeDiffModal,
-  closeTreeExplorer,
-  closeFileFlow,
   closeFilePicker,
   showFilePickerOnTop,
   openFilePreview,
   openImageUrlPreview,
   getCurrentPreviewRecall,
 } = appModals;
+// Maximizing is a property of the main content area, so it cannot outlive
+// having something in it: closing the last tab of a scope with no agent
+// session would otherwise leave a hidden sidebar over an empty panel.
+watch(
+  () => mainTabs.activeTabId.value,
+  (activeTabId) => {
+    if (!activeTabId) maximizedModal.value = null;
+  },
+);
+
 // A transfer that fails is server-side news now, so the window learns about it
 // from the snapshot rather than from a call that threw.
 useTransferFailureToasts(
@@ -387,7 +392,12 @@ const mainPanelTaskIsBlocked = computed(() =>
     : currentTaskIsBlocked.value,
 );
 
-const mainTabViews: MainTabViewsController = { tabs: mainTabs, modals: appModals, store };
+const mainTabViews: MainTabViewsController = {
+  tabs: mainTabs,
+  modals: appModals,
+  preferences: appPreferences,
+  store,
+};
 
 let keyboardActions = {} as KeyboardActions;
 const {
@@ -439,37 +449,16 @@ const appKeyboardActions = useAppKeyboardActions({
   shortcutsStartFull,
   shortcutsContext,
   showFilePickerModal,
-  filePickerHidden,
-  showFilePreviewModal,
-  previewHidden,
-  previewFromPicker,
-  previewFromTree,
-  showDiffModal,
-  showTreeExplorer,
-  showShellModal,
-  shellRepoRoot,
   showCommandPalette,
-  showAnalyticsModal,
-  showCommitGraphModal,
   showPeerPicker,
-  showPreferencesPanel,
   maximizedModal,
   sidebarHidden,
   sidebarRef,
-  shellModalRef,
-  diffModalRef,
-  commitGraphModalRef,
-  treeExplorerRef,
-  filePickerRef,
-  filePreviewRef,
-  preferencesRef,
   openNewTaskModal,
   requestCloseCurrentWindow,
   showFilePickerOnTop,
   getCurrentPreviewRecall,
   openFilePreview,
-  closeTreeExplorer,
-  closeDiffModal,
   advanceSelectedRemoteWorkspaceTask,
   closeSelectedWorkspaceTask,
   navigateItems,
@@ -480,8 +469,6 @@ const appKeyboardActions = useAppKeyboardActions({
   navigateRepos,
   closePeerPicker,
   closeFilePicker,
-  closeFileFlow,
-  onShellClose,
   scanRepoCommands,
   handleBlockTask,
   handleEditBlockedTask,

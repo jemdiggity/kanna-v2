@@ -11,7 +11,10 @@ import {
 import type { AgentProvider } from "../types/kanna"
 import type { AgentExecutionType } from "../stores/agentExecutionType"
 import { invoke } from "../invoke"
-import { useModalZIndex } from '../composables/useModalZIndex'
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from '../composables/useEmbeddableView'
 import MobileAccessPanel from './MobileAccessPanel.vue'
 import { macOsTextInputAttrs } from '../utils/textInput'
 import {
@@ -24,7 +27,6 @@ import type { AppThemePreference, CodeThemePreference } from '../theme/theme'
 import type { AgentMessageAppearance } from '../stores/state'
 
 useI18n()
-const { zIndex } = useModalZIndex()
 const isDev = import.meta.env.DEV
 
 type MobileServerStatus = "running" | "stopped" | "error"
@@ -45,7 +47,7 @@ interface PairingSessionResponse {
   expiresAtUnixMs?: number
 }
 
-const props = defineProps<{
+const props = defineProps<EmbeddableViewProps & {
   preferences: {
     suspendAfterMinutes: number
     killAfterMinutes: number
@@ -64,6 +66,8 @@ const emit = defineEmits<{
   update: [key: string, value: string]
   close: []
 }>()
+
+const { overlayClass, overlayStyle, dismissOnScrimClick } = useEmbeddableView(props)
 
 const activeTab = ref<'general' | 'account' | 'mobile' | 'developer'>('general')
 
@@ -277,7 +281,15 @@ defineExpose({ cycleTab })
 </script>
 
 <template>
-  <div ref="overlayRef" class="modal-overlay" :style="{ zIndex }" tabindex="-1" @click.self="emit('close')" @keydown="handleKeydown">
+  <div
+    ref="overlayRef"
+    class="modal-overlay"
+    :class="overlayClass"
+    :style="overlayStyle"
+    tabindex="-1"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
+    @keydown="handleKeydown"
+  >
     <div class="prefs-panel">
       <div class="prefs-header">
         <div class="tab-bar">
@@ -528,6 +540,22 @@ defineExpose({ cycleTab })
 </template>
 
 <style scoped>
+.modal-overlay.embedded {
+  position: relative;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+  background: none;
+}
+
+.embedded .prefs-panel {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;

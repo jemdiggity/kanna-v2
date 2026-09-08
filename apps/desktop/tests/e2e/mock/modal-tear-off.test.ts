@@ -109,6 +109,12 @@ async function dismissStartupShortcuts(client: WebDriverClient): Promise<void> {
   await client.waitForNoElement(".shortcuts-modal", 5_000);
 }
 
+/**
+ * A torn-off window gives its whole main content area to the view it was
+ * dragged out with: the sidebar stands down and the view fills the panel. It
+ * is not stretched to the raw viewport any more — the tab bar it belongs to
+ * is part of that window now.
+ */
 async function assertFullWindowModal(
   client: WebDriverClient,
   selector: string,
@@ -117,19 +123,20 @@ async function assertFullWindowModal(
   const dimensions = await client.executeSync<{
     viewportWidth: number;
     viewportHeight: number;
-    outerWidth: number;
-    outerHeight: number;
-    devicePixelRatio: number;
+    sidebarPresent: boolean;
+    panelWidth: number;
+    panelHeight: number;
     modalWidth: number;
     modalHeight: number;
   }>(
     `const rect = document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect();
+     const panel = document.querySelector(".main-panel")?.getBoundingClientRect();
      return {
        viewportWidth: window.innerWidth,
        viewportHeight: window.innerHeight,
-       outerWidth: window.outerWidth,
-       outerHeight: window.outerHeight,
-       devicePixelRatio: window.devicePixelRatio,
+       sidebarPresent: Boolean(document.querySelector('[data-testid="sidebar-shell"]')),
+       panelWidth: panel?.width ?? 0,
+       panelHeight: panel?.height ?? 0,
        modalWidth: rect?.width ?? 0,
        modalHeight: rect?.height ?? 0,
      };`,
@@ -137,10 +144,20 @@ async function assertFullWindowModal(
   const diagnostic = JSON.stringify({ dimensions, expectedSize });
   expect(Math.abs(dimensions.viewportWidth - expectedSize.width), diagnostic).toBeLessThanOrEqual(2);
   expect(Math.abs(dimensions.viewportHeight - expectedSize.height), diagnostic).toBeLessThanOrEqual(2);
-  expect(Math.abs(dimensions.modalWidth - dimensions.viewportWidth)).toBeLessThanOrEqual(1);
-  expect(Math.abs(dimensions.modalHeight - dimensions.viewportHeight)).toBeLessThanOrEqual(1);
+  expect(dimensions.sidebarPresent, diagnostic).toBe(false);
+  expect(Math.abs(dimensions.panelWidth - dimensions.viewportWidth), diagnostic).toBeLessThanOrEqual(1);
+  // The view owns the window's main area, minus the chrome that area keeps —
+  // its tab bar and the command hint — so it dominates rather than matching
+  // the raw viewport the way a modal stretched to a fresh window used to.
+  expect(dimensions.modalWidth, diagnostic).toBeGreaterThan(dimensions.viewportWidth * 0.85);
+  expect(dimensions.modalHeight, diagnostic).toBeGreaterThan(dimensions.viewportHeight * 0.6);
 }
 
+/**
+ * The torn-off window's view must follow a window resize. It fills its main
+ * content area rather than the raw viewport — that area also carries the tab
+ * bar the view belongs to.
+ */
 async function assertResizeReflow(client: WebDriverClient, selector: string): Promise<void> {
   const before = await client.getWindowRect();
   await client.setWindowRect({
@@ -149,21 +166,23 @@ async function assertResizeReflow(client: WebDriverClient, selector: string): Pr
   });
   await sleep(200);
   const dimensions = await client.executeSync<{
-    viewportWidth: number;
-    viewportHeight: number;
+    panelWidth: number;
+    panelHeight: number;
     modalWidth: number;
     modalHeight: number;
   }>(
     `const rect = document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect();
+     const panel = document.querySelector(".main-panel")?.getBoundingClientRect();
      return {
-       viewportWidth: window.innerWidth,
-       viewportHeight: window.innerHeight,
+       panelWidth: panel?.width ?? 0,
+       panelHeight: panel?.height ?? 0,
        modalWidth: rect?.width ?? 0,
        modalHeight: rect?.height ?? 0,
      };`,
   );
-  expect(Math.abs(dimensions.modalWidth - dimensions.viewportWidth)).toBeLessThanOrEqual(1);
-  expect(Math.abs(dimensions.modalHeight - dimensions.viewportHeight)).toBeLessThanOrEqual(1);
+  const diagnostic = JSON.stringify(dimensions);
+  expect(Math.abs(dimensions.modalWidth - dimensions.panelWidth), diagnostic).toBeLessThanOrEqual(1);
+  expect(dimensions.modalHeight, diagnostic).toBeGreaterThan(dimensions.panelHeight * 0.6);
 }
 
 async function persistedTearOffCount(client: WebDriverClient): Promise<number> {
@@ -302,7 +321,7 @@ describe("modal tear-off", () => {
     await client.waitForAppReady();
     await dismissStartupShortcuts(client);
     await client.waitForElement(".app", 5_000);
-    await client.waitForElement(".modal-overlay.maximized .tree-modal", 5_000);
+    await client.waitForElement(".modal-overlay.embedded .tree-modal", 5_000);
     await client.waitForText(".tree-modal", "README.md", 5_000);
     await client.waitForText(".tree-modal", CURRENT_FILE, 5_000);
     expect(await visibleSelection(client)).toEqual(selectedAtDrag);
@@ -326,6 +345,12 @@ describe("modal tear-off", () => {
     });
 
     await client.switchToWindow(tearOffHandle ?? "");
+    // The file it opened is the tab in front now, so bring the tree back
+    // before measuring it.
+    await client.executeSync(
+      `document.querySelector('[data-testid="main-tab-tree"]')?.click(); return true;`,
+    );
+    await sleep(200);
     await assertResizeReflow(client, ".tree-modal");
     await client.executeSync(`window.__KannaTearOffAppIdentity = "tree-window";`);
     await client.executeSync(
@@ -363,7 +388,7 @@ describe("modal tear-off", () => {
     await client.waitForAppReady();
     await dismissStartupShortcuts(client);
     await client.waitForElement(".app", 5_000);
-    await client.waitForElement(".modal-overlay.maximized .diff-modal", 5_000);
+    await client.waitForElement(".modal-overlay.embedded .diff-modal", 5_000);
     await client.waitForText(".diff-view", CURRENT_DIFF_FILE, 10_000);
     expect(await visibleSelection(client)).toEqual(selectedAtDrag);
     await assertFullWindowModal(client, ".diff-modal", modalRect);
