@@ -3246,6 +3246,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanna-worker"
+version = "0.1.0"
+dependencies = [
+ "kanna-daemon",
+ "kanna-runtime-defaults",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

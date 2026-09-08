@@ -1,0 +1,16 @@
+[package]
+name = "kanna-worker"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kanna-worker"
+path = "src/main.rs"
+
+[dependencies]
+kanna-daemon = { path = "../daemon" }
+kanna-runtime-defaults = { path = "../runtime-defaults" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }

@@ -275,9 +275,12 @@ async fn initial_pty_task_streams_setup_before_starting_setup_created_provider()
         let mut buffer = [0_u8; 4096];
         loop {
             match output_reader.read(&mut buffer) {
+                // A PTY master whose last slave has closed is a hangup, not
+                // an error: macOS spells it EOF and Linux spells it EIO.
                 Ok(0) => break,
                 Ok(count) => output.extend_from_slice(&buffer[..count]),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
                 Err(error) => panic!("failed to read PTY output: {error}"),
             }
         }
@@ -333,8 +336,9 @@ fn pty_setup_failure_keeps_output_and_prevents_provider_launch() {
         Some("/usr/bin:/bin"),
     );
 
-    let output = Command::new("/bin/zsh")
-        .args(["--login", "-c", &command])
+    let shell = crate::login_shell::login_shell();
+    let output = Command::new(shell.path())
+        .args(shell.login_args(&command))
         .current_dir(&workspace)
         .output()
         .unwrap();
@@ -575,9 +579,12 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
         let mut buffer = [0_u8; 4096];
         loop {
             match output_reader.read(&mut buffer) {
+                // A PTY master whose last slave has closed is a hangup, not
+                // an error: macOS spells it EOF and Linux spells it EIO.
                 Ok(0) => break,
                 Ok(count) => output.extend_from_slice(&buffer[..count]),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
                 Err(error) => panic!("failed to read PTY output: {error}"),
             }
         }
@@ -719,7 +726,7 @@ async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork
     // budget is. The assertions below all depend on setup having reached its
     // `printf` and having spawned the signal-proof grandchild first, and a
     // fixed budget cannot express that ordering: the setup shell is
-    // `/bin/zsh --login`, so under load the profile it sources can outlast any
+    // a login shell, so under load the profile it sources can outlast any
     // budget short enough to keep the test quick. The timeout is therefore
     // armed by an observer that has seen the grandchild running.
     let timeout_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
