@@ -55,6 +55,94 @@ interface MainTabScopeState {
   activeId: string;
 }
 
+/** Bump when the stored shape changes; an older payload is discarded, not guessed at. */
+export const PERSISTED_MAIN_TABS_VERSION = 1;
+
+export interface PersistedMainTabScope {
+  tabs: MainTabDescriptor[];
+  activeId: string;
+}
+
+export interface PersistedMainTabs {
+  version: number;
+  scopes: Record<string, PersistedMainTabScope>;
+}
+
+/**
+ * Whether a tab is worth writing down.
+ *
+ * A restart may only rebuild a view it can rebuild *honestly*. The agent tab
+ * is implicit — every task scope re-creates its own — so storing it would only
+ * risk contradicting that. An `image` tab holds a URL minted for one session,
+ * and a `file` tab carrying `remoteContent` holds bytes read from another
+ * machine at a moment that has passed: restoring either would show the reader
+ * something the app can no longer stand behind. A shell tab is restorable
+ * because its session id is derived, not remembered — the daemon outlives the
+ * app, so the tab reattaches to the surviving session and otherwise starts a
+ * fresh one in the same directory.
+ */
+export function isRestorableTab(tab: MainTabDescriptor): boolean {
+  switch (tab.kind) {
+    case "agent":
+    case "image":
+      return false;
+    case "file":
+      return Boolean(tab.filePath) && !tab.remoteContent;
+    default:
+      return true;
+  }
+}
+
+function persistedDescriptor(tab: MainTabDescriptor): MainTabDescriptor {
+  const descriptor: MainTabDescriptor = { kind: tab.kind };
+  if (tab.filePath !== undefined) descriptor.filePath = tab.filePath;
+  if (tab.initialLine !== undefined) descriptor.initialLine = tab.initialLine;
+  if (tab.shellScope !== undefined) descriptor.shellScope = tab.shellScope;
+  return descriptor;
+}
+
+/**
+ * Reads a stored payload back, keeping only what this version understands.
+ *
+ * Anything unrecognized — a future version, a hand-edited setting, a kind that
+ * no longer exists — is dropped rather than trusted, because the alternative
+ * is a startup that throws on a value nobody can see to fix.
+ */
+export function parsePersistedMainTabs(raw: string | null | undefined): PersistedMainTabs | null {
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const candidate = parsed as Partial<PersistedMainTabs>;
+  if (candidate.version !== PERSISTED_MAIN_TABS_VERSION) return null;
+  if (typeof candidate.scopes !== "object" || candidate.scopes === null) return null;
+
+  const scopes: Record<string, PersistedMainTabScope> = {};
+  for (const [key, value] of Object.entries(candidate.scopes)) {
+    if (typeof value !== "object" || value === null) continue;
+    const rawTabs = Array.isArray((value as PersistedMainTabScope).tabs)
+      ? (value as PersistedMainTabScope).tabs
+      : [];
+    const tabs = rawTabs.filter((tab): tab is MainTabDescriptor =>
+      typeof tab === "object"
+      && tab !== null
+      && typeof (tab as MainTabDescriptor).kind === "string"
+      && (tab as MainTabDescriptor).kind in TAB_SHORTCUT_CONTEXTS
+      && isRestorableTab(tab as MainTabDescriptor)
+    ).map(persistedDescriptor);
+    if (tabs.length === 0) continue;
+    const activeId = typeof (value as PersistedMainTabScope).activeId === "string"
+      ? (value as PersistedMainTabScope).activeId
+      : "";
+    scopes[key] = { tabs, activeId };
+  }
+  return { version: PERSISTED_MAIN_TABS_VERSION, scopes };
+}
+
 export const AGENT_TAB_ID = "agent";
 
 const TAB_SHORTCUT_CONTEXTS: Record<MainTabKind, ShortcutContext> = {
@@ -272,9 +360,55 @@ export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
     return true;
   }
 
-  /** Drops a scope's tabs — used when its task leaves the window. */
+  /**
+   * Drops a scope's tabs. Called when a task the window was holding tabs for
+   * is gone — closed here, closed on another machine, or transferred away —
+   * so a tab set cannot outlive the thing it was a view of.
+   */
   function dropScope(key: string): void {
     delete scopes[key];
+  }
+
+  /** The tab sets worth restoring, in the stored shape. */
+  function snapshotScopes(): PersistedMainTabs {
+    const persisted: Record<string, PersistedMainTabScope> = {};
+    for (const [key, state] of Object.entries(scopes)) {
+      const tabs = state.tabs.filter(isRestorableTab).map(persistedDescriptor);
+      if (tabs.length === 0) continue;
+      // An active tab that is not being stored cannot be restored as active
+      // either; the scope reopens on its own default instead of on a tab the
+      // reader would find missing.
+      const activeId = tabs.some((tab) => mainTabId(tab) === state.activeId) ? state.activeId : "";
+      persisted[key] = { tabs, activeId };
+    }
+    return { version: PERSISTED_MAIN_TABS_VERSION, scopes: persisted };
+  }
+
+  /**
+   * Rebuilds stored tab sets, keeping whatever is already open.
+   *
+   * `isLiveScope` decides which stored scopes still have something to be a
+   * view of: a task closed while the app was shut down should not come back as
+   * a tab set. Restoring never disturbs a scope the reader has already touched
+   * this session.
+   */
+  function restoreScopes(
+    persisted: PersistedMainTabs | null,
+    isLiveScope: (key: string) => boolean = () => true,
+  ): void {
+    if (!persisted) return;
+    for (const [key, stored] of Object.entries(persisted.scopes)) {
+      if (scopes[key] || !isLiveScope(key)) continue;
+      const state = initialScopeState(key);
+      for (const descriptor of stored.tabs) {
+        const id = mainTabId(descriptor);
+        if (state.tabs.some((tab) => tab.id === id)) continue;
+        state.tabs.push({ ...descriptor, id });
+      }
+      const active = state.tabs.find((tab) => tab.id === stored.activeId);
+      state.activeId = active?.id ?? state.tabs[0]?.id ?? "";
+      scopes[key] = state;
+    }
   }
 
   return {
@@ -292,6 +426,8 @@ export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
     activateTab,
     cycleTab,
     dropScope,
+    snapshotScopes,
+    restoreScopes,
   };
 }
 

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { computed, ref } from "vue";
 
-import { AGENT_TAB_ID, mainTabId, useMainTabs } from "./useMainTabs";
+import {
+  AGENT_TAB_ID,
+  mainTabId,
+  parsePersistedMainTabs,
+  PERSISTED_MAIN_TABS_VERSION,
+  useMainTabs,
+} from "./useMainTabs";
 
 function setup(initialScope: string | null = "item:task-a") {
   const scope = ref<string | null>(initialScope);
@@ -212,5 +218,126 @@ describe("useMainTabs", () => {
       mainTabId({ kind: "file", filePath: "src/a.ts" }),
     );
     expect(mainTabId({ kind: "diff" })).toBe("diff");
+  });
+
+  it("stores only the tabs a restart can honestly rebuild", () => {
+    const { tabs } = setup();
+
+    tabs.openTab({ kind: "diff" });
+    tabs.openTab({ kind: "file", filePath: "src/a.ts", initialLine: 12 });
+    tabs.openTab({ kind: "shell", shellScope: "repo" });
+    tabs.openTab({ kind: "image", imageUrl: "asset://one-session-only.png" });
+    tabs.openTab({ kind: "file", filePath: "remote/b.ts", remoteContent: "read elsewhere" });
+
+    const stored = tabs.snapshotScopes();
+
+    expect(stored.version).toBe(PERSISTED_MAIN_TABS_VERSION);
+    // The agent tab is implicit, the image URL is minted per session, and the
+    // remote file's bytes cannot be re-read on this machine.
+    expect(stored.scopes["item:task-a"].tabs).toEqual([
+      { kind: "diff" },
+      { kind: "file", filePath: "src/a.ts", initialLine: 12 },
+      { kind: "shell", shellScope: "repo" },
+    ]);
+  });
+
+  it("does not store an active tab it is not storing", () => {
+    const { tabs } = setup();
+
+    tabs.openTab({ kind: "diff" });
+    tabs.openTab({ kind: "image", imageUrl: "asset://gone.png" });
+    expect(tabs.activeTabId.value).toBe("image:asset://gone.png");
+
+    expect(tabs.snapshotScopes().scopes["item:task-a"].activeId).toBe("");
+  });
+
+  it("omits a scope with nothing worth restoring", () => {
+    const { tabs } = setup();
+
+    expect(tabs.snapshotScopes().scopes["item:task-a"]).toBeUndefined();
+  });
+
+  it("restores a scope with its agent session first and its stored tab in front", () => {
+    const { tabs } = setup();
+
+    tabs.restoreScopes({
+      version: PERSISTED_MAIN_TABS_VERSION,
+      scopes: {
+        "item:task-a": {
+          tabs: [{ kind: "diff" }, { kind: "file", filePath: "src/a.ts", initialLine: 4 }],
+          activeId: "file:src/a.ts",
+        },
+      },
+    });
+
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([
+      AGENT_TAB_ID,
+      "diff",
+      "file:src/a.ts",
+    ]);
+    expect(tabs.activeTabId.value).toBe("file:src/a.ts");
+    expect(tabs.tabs.value[2].initialLine).toBe(4);
+  });
+
+  it("leaves a scope whose subject is gone unrestored", () => {
+    const { tabs } = setup();
+
+    tabs.restoreScopes(
+      {
+        version: PERSISTED_MAIN_TABS_VERSION,
+        scopes: { "item:closed-task": { tabs: [{ kind: "diff" }], activeId: "diff" } },
+      },
+      (key) => key !== "item:closed-task",
+    );
+
+    expect(tabs.snapshotScopes().scopes["item:closed-task"]).toBeUndefined();
+  });
+
+  it("never overwrites a scope the reader has already opened this session", () => {
+    const { tabs } = setup();
+
+    tabs.openTab({ kind: "shell" });
+    tabs.restoreScopes({
+      version: PERSISTED_MAIN_TABS_VERSION,
+      scopes: { "item:task-a": { tabs: [{ kind: "diff" }], activeId: "diff" } },
+    });
+
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID, "shell"]);
+  });
+
+  it("drops a scope when its task leaves the desktop", () => {
+    const { tabs } = setup();
+
+    tabs.openTab({ kind: "diff" });
+    tabs.dropScope("item:task-a");
+
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID]);
+  });
+
+  it("discards a stored payload it cannot vouch for", () => {
+    expect(parsePersistedMainTabs(null)).toBeNull();
+    expect(parsePersistedMainTabs("{ not json")).toBeNull();
+    // A payload written by a later version describes a shape this one does not
+    // know, so it is dropped rather than half-read.
+    expect(parsePersistedMainTabs(JSON.stringify({ version: 99, scopes: {} }))).toBeNull();
+
+    const parsed = parsePersistedMainTabs(JSON.stringify({
+      version: PERSISTED_MAIN_TABS_VERSION,
+      scopes: {
+        "item:a": {
+          tabs: [
+            { kind: "diff" },
+            { kind: "teleporter" },
+            { kind: "image", imageUrl: "asset://x.png" },
+            { kind: "file" },
+          ],
+          activeId: "diff",
+        },
+        "item:b": { tabs: [], activeId: "" },
+      },
+    }));
+
+    expect(parsed?.scopes["item:a"].tabs).toEqual([{ kind: "diff" }]);
+    expect(parsed?.scopes["item:b"]).toBeUndefined();
   });
 });

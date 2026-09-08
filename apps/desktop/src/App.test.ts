@@ -1133,6 +1133,10 @@ describe("App", () => {
   });
 
   beforeEach(() => {
+    // Each mount is a fresh window launch. The main area restores its tabs
+    // from window storage, so leaving a previous test's tabs there would open
+    // this one on views it never asked for.
+    window.localStorage.clear();
     sidebarSearchQuery.value = "";
     store.init.mockClear();
     store.createItem.mockClear();

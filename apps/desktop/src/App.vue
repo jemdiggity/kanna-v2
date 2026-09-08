@@ -22,6 +22,7 @@ import {
   mainTabScopeKeyForTask,
   useMainTabs,
 } from "./composables/useMainTabs";
+import { useMainTabPersistence } from "./composables/useMainTabPersistence";
 import { useAppPreferences } from "./composables/useAppPreferences";
 import { useAppTaskTransfer } from "./composables/useAppTaskTransfer";
 import { useTransferFailureToasts } from "./composables/useTransferFailureToasts";
@@ -202,6 +203,39 @@ const mainTabs = useMainTabs({
     }
     mainPanelRef.value?.onTabClosed?.(tab);
   },
+});
+/**
+ * Tab sets outlive the app the way the reader expects them to: reopen the app
+ * and a task is showing the views it was showing. A scope is dropped as soon
+ * as its task or repository leaves this desktop, so a tab set can never
+ * outlive the thing it was a view of.
+ *
+ * This is window-local UI state, so it is kept in the window's own storage
+ * rather than in a desktop setting. A settings write publishes a state change
+ * to every window and every client of the server, which is the wrong weight
+ * for something that changes on each keystroke — and it was observable, not
+ * just wasteful: the reload it triggers reconciles selection, so opening a tab
+ * could pull a deselected task back onto the screen. Keying by window also
+ * keeps a tear-off, which opens on the view it was torn off with, from
+ * inheriting the main window's tabs.
+ */
+const mainTabsStorageKey = `kanna.mainTabs.${windowWorkspace.bootstrap.windowId}`;
+const mainTabPersistence = useMainTabPersistence({
+  tabs: mainTabs,
+  openTaskIds: computed(() => store.items.map((item) => item.id)),
+  openRepoIds: computed(() => store.repos.map((repo) => repo.id)),
+  readStorage: (key) => {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (error: unknown) {
+      console.warn("[main-tabs] window storage is unavailable:", error);
+      return null;
+    }
+  },
+  writeStorage: async (key, value) => {
+    window.localStorage.setItem(key, value);
+  },
+  storageKey: mainTabsStorageKey,
 });
 const appModals = useAppModals({
   isMobile,
@@ -419,6 +453,7 @@ const {
   openTaskFileView,
   preferences,
   remoteTaskDiagnostics,
+  restoreMainTabs: mainTabPersistence.hydrate,
   restoreSidebarWidth,
   restoreTransferredModal,
   shortcutsStartFull,

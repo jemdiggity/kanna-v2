@@ -417,4 +417,39 @@ describe("main content area tabs", () => {
     await waitForActiveTab(client, "agent");
     expect(await openTabIds(client)).toEqual(["agent"]);
   });
+
+  it("brings a task's tabs back after the app restarts, and forgets a closed task's", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    await pressShortcut(client, { key: "d", meta: true });
+    await waitForActiveTab(client, "diff");
+    await callVueMethod(client, "openFilePreview", "README.md");
+    await waitForActiveTab(client, "file:README.md");
+    await pressShortcut(client, { key: "d", meta: true });
+    await waitForActiveTab(client, "diff");
+
+    // The tab state is written on a debounce, so a reload that beat the write
+    // would prove nothing. Reload rather than open a second WebDriver session:
+    // a new session attaches to the app that is still running, so the tabs
+    // would never have left memory and this would pass with no storage at all.
+    await sleep(1_200);
+
+    await client.reload();
+    await selectTask(taskId);
+
+    // The agent session is rebuilt rather than stored, and the tab that was in
+    // front is the tab that comes back in front.
+    await waitForActiveTab(client, "diff");
+    expect(await openTabIds(client)).toEqual(["agent", "diff", "file:README.md"]);
+    await client.waitForText(".preview-modal .file-path", "README.md", 8_000);
+
+    // The other task never opened a view, so it comes back as it was.
+    await selectTask(secondTaskId);
+    expect(await openTabIds(client)).toEqual(["agent"]);
+
+    await selectTask(taskId);
+    await closeViewTabs(client);
+    await sleep(1_200);
+  });
 });

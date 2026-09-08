@@ -68,6 +68,7 @@ interface UseAppLifecycleOptions {
   openTaskFileView: (taskId: string, filePath: string, line?: number) => void;
   preferences: AppPreferences;
   remoteTaskDiagnostics: Ref<unknown>;
+  restoreMainTabs: () => Promise<void>;
   restoreSidebarWidth: () => Promise<void>;
   restoreTransferredModal: () => void;
   shortcutsStartFull: Ref<boolean>;
@@ -130,6 +131,7 @@ export function useAppLifecycle({
   openTaskFileView,
   preferences,
   remoteTaskDiagnostics,
+  restoreMainTabs,
   restoreSidebarWidth,
   restoreTransferredModal,
   shortcutsStartFull,
@@ -338,6 +340,10 @@ export function useAppLifecycle({
 
     await restoreSidebarWidth();
     await store.init(db);
+    // After the store holds this desktop's tasks and repositories, so a stored
+    // tab set whose subject was closed while the app was shut down is left
+    // behind rather than restored into a window with nothing to show it for.
+    await restoreMainTabs();
     restoreTransferredModal();
     preferences.appTheme = normalizeAppThemePreference(store.appTheme);
     preferences.codeTheme = normalizeCodeThemePreference(store.codeTheme);
