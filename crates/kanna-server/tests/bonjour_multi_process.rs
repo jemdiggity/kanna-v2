@@ -90,7 +90,13 @@ fn start_fake_daemon(daemon_dir: &Path) -> JoinHandle<()> {
     })
 }
 
-fn start_server(label: &str, environment: &str, desktop_id: &str, port: u16) -> RunningServer {
+fn start_server(
+    label: &str,
+    environment: &str,
+    desktop_id: &str,
+    port: u16,
+    advertised_relay_url: Option<&str>,
+) -> RunningServer {
     let root = tempfile::Builder::new()
         .prefix(&format!("kanna-bonjour-{label}-"))
         .tempdir()
@@ -104,7 +110,7 @@ fn start_server(label: &str, environment: &str, desktop_id: &str, port: u16) -> 
     std::fs::write(
         &config_path,
         format!(
-            "relay_url = \"\"\n\
+            "relay_url = \"ws://127.0.0.1:9081\"\n\
              device_token = \"\"\n\
              firebase_project_id = \"kanna-local\"\n\
              daemon_dir = \"{}\"\n\
@@ -126,13 +132,16 @@ fn start_server(label: &str, environment: &str, desktop_id: &str, port: u16) -> 
     .expect("write server configuration");
     let daemon = start_fake_daemon(&daemon_dir);
 
-    let child = Command::new(env!("CARGO_BIN_EXE_kanna-server"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-server"));
+    command
         .env("KANNA_SERVER_CONFIG", &config_path)
         .env("RUST_LOG", "kanna_server=info")
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("launch kanna-server");
+        .stderr(Stdio::piped());
+    if let Some(relay_url) = advertised_relay_url {
+        command.env("KANNA_ADVERTISED_RELAY_URL", relay_url);
+    }
+    let child = command.spawn().expect("launch kanna-server");
 
     RunningServer {
         child,
@@ -375,7 +384,13 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
     let mut servers: Vec<RunningServer> = identities
         .iter()
         .map(|(label, environment, desktop_id)| {
-            start_server(label, environment, desktop_id, reserve_port())
+            start_server(
+                label,
+                environment,
+                desktop_id,
+                reserve_port(),
+                (*label == "staging").then_some("ws://172.16.0.193:9081"),
+            )
         })
         .collect();
     for server in &mut servers {
@@ -463,7 +478,13 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
         .expect("decode pairing claim");
     assert_eq!(claimed["desktopId"], qr_desktop_id.as_str());
     assert_eq!(claimed["desktopPushIdentity"]["environment"], "staging");
-    assert_eq!(claimed["desktopPushIdentity"]["relayUrl"], "");
+    // KD puts this phone-reachable URL in KANNA_ADVERTISED_RELAY_URL for the
+    // desktop process. Prove the real server's pairing boundary prefers it to
+    // the loopback relay_url in server.toml.
+    assert_eq!(
+        claimed["desktopPushIdentity"]["relayUrl"],
+        "ws://172.16.0.193:9081"
+    );
     assert_valid_push_pairing_material(&claimed, "bonjour-e2e-phone");
 
     let unauthenticated_reissue = client
@@ -503,6 +524,10 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
         reissued["desktopPushIdentity"]["publicKey"],
         claimed["desktopPushIdentity"]["publicKey"]
     );
+    assert_eq!(
+        reissued["desktopPushIdentity"]["relayUrl"],
+        "ws://172.16.0.193:9081"
+    );
     assert_valid_push_pairing_material(&reissued, "bonjour-e2e-phone");
 
     let removed = servers.swap_remove(1);
@@ -532,6 +557,7 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
         "staging",
         &removed_id,
         replacement_port,
+        None,
     );
     wait_for_status(&mut replacement).await;
     let after_restart = dns_sd_zone_until(
