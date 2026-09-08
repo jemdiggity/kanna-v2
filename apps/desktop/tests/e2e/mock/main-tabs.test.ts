@@ -93,6 +93,38 @@ async function closeViewTabs(client: WebDriverClient): Promise<void> {
   throw new Error(`tabs would not close: ${JSON.stringify(await openTabIds(client))}`);
 }
 
+
+/**
+ * Arm a one-shot record of the sidebar task search taking focus. The global
+ * ⌘F focuses it synchronously while the view focuses its own input a tick
+ * later, so the end state hides the second binding having fired at all.
+ */
+async function watchSidebarSearchFocus(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `window.__sidebarSearchFocused = false;
+     const input = document.querySelector(".sidebar .search-input");
+     if (!input) throw new Error("sidebar search input is missing");
+     input.addEventListener("focus", function () { window.__sidebarSearchFocused = true; }, { once: true });
+     return true;`
+  );
+}
+
+async function sidebarSearchWasFocused(client: WebDriverClient): Promise<boolean> {
+  return client.executeSync<boolean>(`return window.__sidebarSearchFocused === true;`);
+}
+
+/**
+ * Where the focused element lives, which is how these tests tell the view's own
+ * find from the sidebar's task search: both render `.search-input`.
+ */
+async function focusedSearchOwner(client: WebDriverClient): Promise<string> {
+  return client.executeSync<string>(
+    `const active = document.activeElement;
+     if (!active || !active.classList.contains("search-input")) return "none";
+     return active.closest(".sidebar") ? "sidebar" : "view";`
+  );
+}
+
 describe("main content area tabs", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
@@ -479,6 +511,101 @@ describe("main content area tabs", () => {
     await sleep(400);
 
     expect(await openTabIds(client)).toEqual(["agent", "diff"]);
+
+    await closeViewTabs(client);
+  });
+
+  it("runs the IDE once, on the file, when a file tab is in front", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    // The same path createTask made the worktree at.
+    const worktreePath = `${testRepoPath}/.kanna-worktrees/task-${taskId}`;
+    const ideLog = `${worktreePath}/.ide-invocations`;
+    const ideRecorder = `${worktreePath}/.record-ide.sh`;
+    // The app runs `${ideCommand} "<path>"`, so a recorder standing in for the
+    // editor captures the exact path each binding passed.
+    await tauriInvoke(client, "run_script", {
+      script: [
+        `cat > "${ideRecorder}" <<'SH'`,
+        "#!/bin/sh",
+        `printf '%s\\n' "$1" >> "${ideLog}"`,
+        "SH",
+        `chmod +x "${ideRecorder}"`,
+        `rm -f "${ideLog}"`,
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+    await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const ide = ctx.store.ideCommand;
+       if (ide && ide.__v_isRef) ide.value = ${JSON.stringify(JSON.stringify(ideRecorder))};
+       else ctx.store.ideCommand = ${JSON.stringify(JSON.stringify(ideRecorder))};
+       return true;`
+    );
+
+    await callVueMethod(client, "openFilePreview", "README.md");
+    await waitForActiveTab(client, "file:README.md");
+
+    await pressShortcut(client, { key: "o", meta: true });
+    await sleep(1200);
+
+    const recorded = await tauriInvoke(client, "run_script", {
+      script: `cat "${ideLog}" 2>/dev/null || true`,
+      cwd: worktreePath,
+      env: {},
+    }) as string;
+    // macOS resolves the temp fixture path through /private; compare the real
+    // paths rather than the spelling each side happened to use.
+    const realPath = (path: string) => path.replace(/^\/private/, "");
+    const lines = String(recorded)
+      .split("\n")
+      .map((line) => realPath(line.trim()))
+      .filter(Boolean);
+    // Both the global shortcut and the file view bind ⌘O, and a matched global
+    // only calls preventDefault, so the keydown reached both: the editor opened
+    // twice, once on the worktree and once on the file.
+    expect(lines).toEqual([realPath(`${worktreePath}/README.md`)]);
+
+    await closeViewTabs(client);
+  });
+
+  it("gives ⌘F to a file tab's own find, leaving the sidebar search alone", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    // A plain-text file: the preview disables its own find while it is
+    // rendering markdown, so README.md would not claim the key.
+    await callVueMethod(client, "openFilePreview", "src/index.txt");
+    await waitForActiveTab(client, "file:src/index.txt");
+
+    await watchSidebarSearchFocus(client);
+    await pressShortcut(client, { key: "f", meta: true });
+    await sleep(400);
+
+    // Focus alone is not the assertion: the sidebar focuses synchronously and
+    // the view focuses on the next tick, so whoever ends up focused says
+    // nothing about whether both fired.
+    expect(await sidebarSearchWasFocused(client)).toBe(false);
+    expect(await focusedSearchOwner(client)).toBe("view");
+
+    await closeViewTabs(client);
+  });
+
+  it("gives ⌘F to a diff tab's own find, leaving the sidebar search alone", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    await pressShortcut(client, { key: "d", meta: true });
+    await waitForActiveTab(client, "diff");
+
+    await watchSidebarSearchFocus(client);
+    await pressShortcut(client, { key: "f", meta: true });
+    await sleep(400);
+
+    expect(await sidebarSearchWasFocused(client)).toBe(false);
+    expect(await focusedSearchOwner(client)).toBe("view");
 
     await closeViewTabs(client);
   });

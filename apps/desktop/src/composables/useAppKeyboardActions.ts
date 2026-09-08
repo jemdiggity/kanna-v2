@@ -129,6 +129,24 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     return mainTabs.activeTabContext.value ?? "main";
   }
 
+  /**
+   * Contexts whose view binds a key for its own use, per key.
+   *
+   * A matched global shortcut only calls `preventDefault()`, so the same
+   * keydown carries on to the view's own window listener: with a file tab in
+   * front, one ⌘O launched the editor twice — once on the worktree, once on
+   * the file — and one ⌘F opened the view's find *and* focused the sidebar
+   * search behind it. The view that re-binds a key owns it while its tab is in
+   * front; every other task shortcut deliberately stays live behind a tab,
+   * which is why this is per key rather than a blanket stand-down.
+   */
+  const SEARCH_BOUND_BY_VIEW: ShortcutContext[] = ["file", "diff", "graph"];
+  const IDE_BOUND_BY_VIEW: ShortcutContext[] = ["file"];
+
+  function tabInFrontOwns(contexts: ShortcutContext[]): boolean {
+    return contexts.includes(activeSurfaceContext());
+  }
+
   // Keyboard shortcuts
   const keyboardActions = {
     newTask: () => {
@@ -195,6 +213,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       mainTabs.openTab({ kind: "tree" });
     },
     openInIDE: async () => {
+      if (tabInFrontOwns(IDE_BOUND_BY_VIEW)) return;
       const item = store.currentItem;
       const repo = store.selectedRepo;
       if (!item?.branch || !repo) return;
@@ -327,7 +346,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     },
     prevTab: () => { cycleTabs(-1); },
     nextTab: () => { cycleTabs(1); },
-    focusSearch: () => { sidebarRef.value?.focusSearch(); },
+    focusSearch: () => {
+      if (tabInFrontOwns(SEARCH_BOUND_BY_VIEW)) return;
+      sidebarRef.value?.focusSearch();
+    },
   };
   useKeyboardShortcuts(keyboardActions, {
     context: () => currentShortcutContext.value,
