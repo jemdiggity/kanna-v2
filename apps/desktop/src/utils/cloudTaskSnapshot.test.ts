@@ -63,6 +63,64 @@ describe("cloud task snapshot mapper", () => {
     expect(snapshot.repo.remoteUrlHash).toHaveLength(64);
   });
 
+  it("publishes the singleton agent so a peer can pin the account-wide singleton", async () => {
+    const singleton = await buildCloudTaskSnapshot({
+      desktopId: "desktop-1",
+      item: {
+        id: "task-merge",
+        repo_id: "repo-1",
+        prompt: "Merge ready pull requests",
+        pipeline: "singleton-merge",
+        stage: "in progress",
+        activity: "idle",
+        activity_revision: 1,
+        transition_revision: null,
+        branch: "task-merge",
+        base_ref: "origin/main",
+        pr_number: null,
+        pr_url: null,
+        display_name: "Merge Master",
+        last_output_preview: null,
+        agent_provider: "claude",
+        agent_type: "pty",
+        created_at: "2026-05-14T00:00:00.000Z",
+        updated_at: "2026-05-14T00:01:00.000Z",
+        closed_at: null,
+      },
+      repo: { id: "repo-1", name: "kanna", path: "/repo", default_branch: "main" },
+      blockedByTaskIds: [],
+    });
+    expect(singleton.singletonAgent).toBe("merge");
+
+    const ordinary = await buildCloudTaskSnapshot({
+      desktopId: "desktop-1",
+      item: {
+        id: "task-1",
+        repo_id: "repo-1",
+        prompt: "Ordinary work",
+        pipeline: "single-reviewer",
+        stage: "in progress",
+        activity: "idle",
+        activity_revision: 1,
+        transition_revision: null,
+        branch: "task-1",
+        base_ref: "origin/main",
+        pr_number: null,
+        pr_url: null,
+        display_name: null,
+        last_output_preview: null,
+        agent_provider: "claude",
+        agent_type: "pty",
+        created_at: "2026-05-14T00:00:00.000Z",
+        updated_at: "2026-05-14T00:01:00.000Z",
+        closed_at: null,
+      },
+      repo: { id: "repo-1", name: "kanna", path: "/repo", default_branch: "main" },
+      blockedByTaskIds: [],
+    });
+    expect(ordinary.singletonAgent).toBeNull();
+  });
+
   it("publishes the parent task id so viewers can rebuild the task hierarchy", async () => {
     const child = await buildCloudTaskSnapshot({
       desktopId: "desktop-1",

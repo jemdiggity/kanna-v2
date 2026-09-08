@@ -512,12 +512,14 @@ describe("createSessionStore", () => {
     const store = createSessionStore();
     expect(store.getState().localTaskListPreferences).toEqual({
       pins: [],
+      unpinnedDefaults: [],
       dismissedActivity: [],
       pinsSeededFromServer: false
     });
 
     const preferences = {
       pins: [{ taskId: "task-1", repoId: "repo-1" }],
+      unpinnedDefaults: [],
       dismissedActivity: [
         { taskId: "task-2", repoId: "repo-1", activityRevision: 3 }
       ],

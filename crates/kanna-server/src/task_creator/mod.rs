@@ -1876,7 +1876,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
     } else {
         None
     };
-    let workflow_name = format!("singleton-{agent_name}");
+    let workflow_name = format!("{SINGLETON_WORKFLOW_PREFIX}{agent_name}");
     let workflow = definitions::WorkflowDefinition {
         name: Some(workflow_name.clone()),
         description: None,
@@ -1946,6 +1946,24 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
 
 pub(crate) fn generate_singleton_task_id() -> Result<String, String> {
     generate_task_id()
+}
+
+/// The workflow-name prefix Kanna binds when it claims an account-wide
+/// singleton through the relay singleton directory.
+pub(crate) const SINGLETON_WORKFLOW_PREFIX: &str = "singleton-";
+
+/// The agent an account-wide singleton task belongs to, read back from the
+/// synthetic workflow name bound at claim time.
+///
+/// That name is the durable marker of directory-singleton identity: it is
+/// written once when the singleton is claimed and travels with the task row,
+/// so every surface — the owning machine's own lists, another machine's
+/// cross-machine rows, and mobile — can tell a singleton apart without asking
+/// the relay directory.
+pub(crate) fn directory_singleton_agent(workflow_name: &str) -> Option<&str> {
+    workflow_name
+        .strip_prefix(SINGLETON_WORKFLOW_PREFIX)
+        .filter(|agent| !agent.is_empty())
 }
 
 pub(crate) fn prepare_integration_task_for_api(

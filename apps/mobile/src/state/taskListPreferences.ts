@@ -38,6 +38,13 @@ export interface LocalActivityDismissal {
 export interface LocalTaskListPreferences {
   /** Pinned tasks, topmost first: the array order is the pin order. */
   pins: LocalTaskPin[];
+  /**
+   * Tasks this phone has explicitly unpinned that it would otherwise pin by
+   * default. Absence of a pin is not enough to record that: a directory
+   * singleton is pinned by default, so without this the next list build would
+   * put it straight back.
+   */
+  unpinnedDefaults: LocalTaskPin[];
   dismissedActivity: LocalActivityDismissal[];
   /** Whether the one-time seed from desktop pin state has already run. */
   pinsSeededFromServer: boolean;
@@ -49,8 +56,31 @@ export type LocalTaskListTask = Pick<
   "id" | "repoId" | "activity" | "activityRevision"
 >;
 
+/** The task fields a pin decision is made from. */
+export type LocalTaskPinTask = Pick<
+  TaskSummary,
+  "id" | "repoId" | "singletonAgent"
+>;
+
+/**
+ * Whether this phone pins the task without being asked. Account-wide
+ * singletons — a repo's Merge Master and Task Manager — are one task across
+ * every machine, so every list shows them pinned by default. It is only a
+ * default: an explicit unpin is recorded and sticks.
+ */
+export function isDefaultPinnedTask(
+  task: Pick<TaskSummary, "singletonAgent">
+): boolean {
+  return (task.singletonAgent ?? "").trim().length > 0;
+}
+
 export function emptyLocalTaskListPreferences(): LocalTaskListPreferences {
-  return { pins: [], dismissedActivity: [], pinsSeededFromServer: false };
+  return {
+    pins: [],
+    unpinnedDefaults: [],
+    dismissedActivity: [],
+    pinsSeededFromServer: false
+  };
 }
 
 /**
@@ -65,12 +95,17 @@ export function normalizeLocalTaskListPreferences(
   if (typeof value !== "object" || value === null) return null;
   const candidate = value as {
     pins?: unknown;
+    unpinnedDefaults?: unknown;
     dismissedActivity?: unknown;
     pinsSeededFromServer?: unknown;
   };
   if (!Array.isArray(candidate.pins)) return null;
   if (!Array.isArray(candidate.dismissedActivity)) return null;
   if (typeof candidate.pinsSeededFromServer !== "boolean") return null;
+  // Written by a build that predates default pins: a payload without the key
+  // is a phone that has suppressed nothing, not one this cannot read.
+  const storedUnpinnedDefaults = candidate.unpinnedDefaults ?? [];
+  if (!Array.isArray(storedUnpinnedDefaults)) return null;
 
   const pins: LocalTaskPin[] = [];
   for (const entry of candidate.pins) {
@@ -78,6 +113,14 @@ export function normalizeLocalTaskListPreferences(
     if (!pin) return null;
     if (pins.some((existing) => existing.taskId === pin.taskId)) continue;
     pins.push(pin);
+  }
+
+  const unpinnedDefaults: LocalTaskPin[] = [];
+  for (const entry of storedUnpinnedDefaults) {
+    const pin = normalizePin(entry);
+    if (!pin) return null;
+    if (unpinnedDefaults.some((existing) => existing.taskId === pin.taskId)) continue;
+    unpinnedDefaults.push(pin);
   }
 
   const dismissedActivity: LocalActivityDismissal[] = [];
@@ -96,42 +139,89 @@ export function normalizeLocalTaskListPreferences(
 
   return {
     pins,
+    unpinnedDefaults,
     dismissedActivity,
     pinsSeededFromServer: candidate.pinsSeededFromServer
   };
 }
 
+/**
+ * The ids this list shows pinned, topmost first: the tasks pinned by default
+ * that have not been explicitly unpinned, then the phone's explicit pins in
+ * their own order. Defaults lead so a singleton sits at the top of the pinned
+ * group without renumbering — and so displacing — the operator's own pins.
+ *
+ * `tasks` is what the caller is about to render; a default can only be applied
+ * to a row whose singleton identity is in hand.
+ */
 export function localPinnedTaskIds(
-  preferences: LocalTaskListPreferences
+  preferences: LocalTaskListPreferences,
+  tasks: readonly LocalTaskPinTask[] = []
 ): string[] {
-  return preferences.pins.map((pin) => pin.taskId);
+  const explicit = preferences.pins.map((pin) => pin.taskId);
+  const defaults = tasks
+    .filter(
+      (task) =>
+        isDefaultPinnedTask(task) &&
+        !isDefaultPinSuppressed(preferences, task.id) &&
+        !explicit.includes(task.id)
+    )
+    .map((task) => task.id);
+  return [...defaults, ...explicit];
 }
 
-export function isLocallyPinned(
+/** Whether an explicit unpin has turned this task's default pin off. */
+export function isDefaultPinSuppressed(
   preferences: LocalTaskListPreferences,
   taskId: string
 ): boolean {
-  return preferences.pins.some((pin) => pin.taskId === taskId);
+  return preferences.unpinnedDefaults.some((pin) => pin.taskId === taskId);
+}
+
+/** Whether the list shows this task pinned, by explicit pin or by default. */
+export function isLocallyPinned(
+  preferences: LocalTaskListPreferences,
+  task: LocalTaskPinTask
+): boolean {
+  if (preferences.pins.some((pin) => pin.taskId === task.id)) return true;
+  return (
+    isDefaultPinnedTask(task) && !isDefaultPinSuppressed(preferences, task.id)
+  );
 }
 
 /**
  * Toggles a pin. A new pin goes to the front, so the row the owner just
  * swiped is the topmost one; unchanged input is returned by identity so
  * callers can skip a redundant write.
+ *
+ * A task this phone pins by default needs no explicit entry of its own — the
+ * default already puts it at the top — so pinning one only clears its
+ * suppression, and unpinning one records that suppression so it stays off.
  */
 export function setLocalTaskPinned(
   preferences: LocalTaskListPreferences,
-  task: Pick<TaskSummary, "id" | "repoId">,
+  task: LocalTaskPinTask,
   pinned: boolean
 ): LocalTaskListPreferences {
-  const alreadyPinned = isLocallyPinned(preferences, task.id);
-  if (alreadyPinned === pinned) return preferences;
+  if (isLocallyPinned(preferences, task) === pinned) return preferences;
   const pins = preferences.pins.filter((pin) => pin.taskId !== task.id);
+  const unpinnedDefaults = preferences.unpinnedDefaults.filter(
+    (pin) => pin.taskId !== task.id
+  );
+  const entry = { taskId: task.id, repoId: task.repoId };
+  if (!pinned) {
+    return {
+      ...preferences,
+      pins,
+      unpinnedDefaults: isDefaultPinnedTask(task)
+        ? [...unpinnedDefaults, entry]
+        : unpinnedDefaults
+    };
+  }
   return {
     ...preferences,
-    pins: pinned
-      ? [{ taskId: task.id, repoId: task.repoId }, ...pins]
-      : pins
+    pins: isDefaultPinnedTask(task) ? pins : [entry, ...pins],
+    unpinnedDefaults
   };
 }
 
@@ -196,9 +286,12 @@ export function pruneLocalTaskListPreferences(
   const tasksById = new Map(snapshot.map((task) => [task.id, task]));
   const coveredRepoIds = new Set(snapshot.map((task) => task.repoId));
 
-  const pins = preferences.pins.filter(
-    (pin) => !coveredRepoIds.has(pin.repoId) || tasksById.has(pin.taskId)
-  );
+  const retained = (pin: LocalTaskPin): boolean =>
+    !coveredRepoIds.has(pin.repoId) || tasksById.has(pin.taskId);
+  const pins = preferences.pins.filter(retained);
+  // A suppressed default outlives nothing: once the task is gone there is no
+  // default left to turn off.
+  const unpinnedDefaults = preferences.unpinnedDefaults.filter(retained);
   const dismissedActivity = preferences.dismissedActivity.filter((entry) => {
     if (!coveredRepoIds.has(entry.repoId)) return true;
     const task = tasksById.get(entry.taskId);
@@ -209,11 +302,12 @@ export function pruneLocalTaskListPreferences(
 
   if (
     pins.length === preferences.pins.length &&
+    unpinnedDefaults.length === preferences.unpinnedDefaults.length &&
     dismissedActivity.length === preferences.dismissedActivity.length
   ) {
     return preferences;
   }
-  return { ...preferences, pins, dismissedActivity };
+  return { ...preferences, pins, unpinnedDefaults, dismissedActivity };
 }
 
 /**
@@ -232,14 +326,17 @@ export function seedLocalTaskPinsFromServer(
   }
   const serverPins = snapshot
     .map((task, index) => ({ task, index }))
-    .filter(({ task }) => task.pinned === true)
+    // A directory singleton is pinned by default on every machine, so seeding
+    // the owner's pin for one would only turn that default into an explicit
+    // entry an unpin then has to fight.
+    .filter(({ task }) => task.pinned === true && !isDefaultPinnedTask(task))
     .sort(
       (left, right) =>
         pinOrderRank(left.task) - pinOrderRank(right.task) ||
         left.index - right.index
     )
-    .map(({ task }) => ({ taskId: task.id, repoId: task.repoId }))
-    .filter((pin) => !isLocallyPinned(preferences, pin.taskId));
+    .filter(({ task }) => !isLocallyPinned(preferences, task))
+    .map(({ task }) => ({ taskId: task.id, repoId: task.repoId }));
 
   return {
     ...preferences,

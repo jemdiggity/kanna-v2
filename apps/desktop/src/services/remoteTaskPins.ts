@@ -10,26 +10,37 @@ import {
  * Pinning is a per-operator sidebar preference, so pinning a task owned by
  * another desktop must not mutate the owner's state. Remote-only tasks have no
  * local `pipeline_item` row to carry `pinned`/`pin_order`, so their pin state
- * persists in the local settings table as a JSON object mapping the owner-side
- * durable task id to its pin order. The snapshot already delivers settings to
- * the frontend, so the overlay round-trips through the normal reload path.
+ * persists in the local settings table as a JSON object keyed by the
+ * owner-side durable task id. The snapshot already delivers settings to the
+ * frontend, so the overlay round-trips through the normal reload path.
+ *
+ * An entry is either an explicit pin order or `null`, which records an
+ * explicit unpin. The two are not the same as absence: a directory singleton
+ * is pinned by default, so "no entry" means the default applies while `null`
+ * means the operator turned it off and it must stay off across restarts and
+ * republications.
  */
 export const REMOTE_TASK_PINS_SETTING = "remoteTaskPins";
 
+/** An explicit pin order, or `null` for an explicit unpin. */
+export type RemoteTaskPin = number | null;
+
 export function parseRemoteTaskPins(
   settings: Record<string, string> | null | undefined,
-): Map<string, number> {
+): Map<string, RemoteTaskPin> {
   return parseRemoteTaskPinsValue(settings?.[REMOTE_TASK_PINS_SETTING] ?? null);
 }
 
-function parseRemoteTaskPinsValue(raw: string | null): Map<string, number> {
-  const pins = new Map<string, number>();
+function parseRemoteTaskPinsValue(raw: string | null): Map<string, RemoteTaskPin> {
+  const pins = new Map<string, RemoteTaskPin>();
   if (!raw) return pins;
   try {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
       for (const [ownerTaskId, order] of Object.entries(parsed)) {
-        if (typeof order === "number" && Number.isFinite(order)) {
+        if (order === null) {
+          pins.set(ownerTaskId, null);
+        } else if (typeof order === "number" && Number.isFinite(order)) {
           pins.set(ownerTaskId, order);
         }
       }
@@ -45,7 +56,7 @@ function parseRemoteTaskPinsValue(raw: string | null): Map<string, number> {
 // slower read could clobber the faster write.
 let pendingMutation: Promise<void> = Promise.resolve();
 
-function mutateRemoteTaskPins(mutate: (pins: Map<string, number>) => void): Promise<void> {
+function mutateRemoteTaskPins(mutate: (pins: Map<string, RemoteTaskPin>) => void): Promise<void> {
   const run = pendingMutation.then(async () => {
     const pins = parseRemoteTaskPinsValue(await getDesktopSetting(REMOTE_TASK_PINS_SETTING));
     mutate(pins);
@@ -67,7 +78,31 @@ export function pinRemoteTask(ownerTaskId: string, position: number): Promise<vo
   });
 }
 
-export function unpinRemoteTask(ownerTaskId: string): Promise<void> {
+/**
+ * Unpins a remote row. `defaultPinned` says whether this machine would pin the
+ * row on its own — a directory singleton does — in which case the unpin is
+ * recorded rather than forgotten, so the default does not put the row straight
+ * back at the next snapshot.
+ */
+export function unpinRemoteTask(
+  ownerTaskId: string,
+  options: { defaultPinned?: boolean } = {},
+): Promise<void> {
+  return mutateRemoteTaskPins((pins) => {
+    if (options.defaultPinned) {
+      pins.set(ownerTaskId, null);
+      return;
+    }
+    pins.delete(ownerTaskId);
+  });
+}
+
+/**
+ * Drops the overlay entry entirely. For a task that is gone — closed, or no
+ * longer advertised — there is no default left to suppress, so keeping a
+ * sticky unpin would only leak rows into the setting forever.
+ */
+export function forgetRemoteTaskPin(ownerTaskId: string): Promise<void> {
   return mutateRemoteTaskPins((pins) => {
     pins.delete(ownerTaskId);
   });

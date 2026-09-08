@@ -2032,6 +2032,131 @@ describe("App", () => {
     }
   });
 
+  it("pins a cross-machine directory singleton by default and keeps an explicit unpin", async () => {
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-merge",
+        repo_id: "cloud:repo-remote",
+        prompt: "Merge Master",
+        workflow: "cloud",
+        singleton_agent: "merge",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-merge",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Merge Master",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const settings = new Map<string, string>();
+    updateDesktopServerClientHandlersForTests({
+      getSetting: (key) => settings.get(key) ?? null,
+      putSetting: (key, value) => {
+        settings.set(key, value);
+      },
+      deleteSetting: (key) => {
+        settings.delete(key);
+      },
+    });
+
+    const SidebarPinStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        repos: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["pin-item", "unpin-item", "reorder-pinned"],
+      template: `
+        <div data-testid="sidebar">
+          <span data-testid="pinned-state">{{ taskSlots.some((slot) => slot.pinned) ? 'pinned' : 'unpinned' }}</span>
+          <button
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            data-testid="pin-remote-task"
+            type="button"
+            @click="$emit('pin-item', item.task_id, 0); $emit('reorder-pinned', item.repo_id, [item.task_id])"
+          >
+            {{ item.display_name }}
+          </button>
+          <button
+            v-for="item in taskSlots"
+            :key="'unpin-' + item.slot_id"
+            data-testid="unpin-remote-task"
+            type="button"
+            @click="$emit('unpin-item', item.task_id)"
+          >
+            unpin
+          </button>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarPinStub, {});
+    await flushPromises();
+    await flushPromises();
+
+    try {
+      // Nothing pinned it here: the row arrives pinned because it is the
+      // account-wide singleton, and the overlay is still empty.
+      expect(wrapper.get('[data-testid="pinned-state"]').text()).toBe("pinned");
+      expect(settings.has("remoteTaskPins")).toBe(false);
+      store.reloadSnapshot.mockClear();
+
+      await wrapper.get('[data-testid="unpin-remote-task"]').trigger("click");
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await flushPromises();
+      }
+
+      // The unpin is recorded rather than forgotten, so the default does not
+      // put the row straight back on the next snapshot.
+      expect(store.unpinItem).not.toHaveBeenCalled();
+      expect(JSON.parse(settings.get("remoteTaskPins") ?? "{}")).toEqual({ "task-merge": null });
+      expect(store.reloadSnapshot).toHaveBeenCalled();
+      expect(toastErrorMock).not.toHaveBeenCalled();
+    } finally {
+      // Restore the global test-setup defaults clobbered by this test's
+      // settings-backed handlers.
+      updateDesktopServerClientHandlersForTests({
+        getSetting: async () => null,
+        putSetting: async (key, value) => ({ key, value }),
+        deleteSetting: async () => {},
+      });
+      wrapper.unmount();
+    }
+  });
+
   it("marks a selected unread cloud task read through its owner relay after one second", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));

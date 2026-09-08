@@ -878,6 +878,7 @@ describe("RootNavigator task collection integration", () => {
     const saved: Array<{ pins: Array<{ taskId: string }> }> = [];
     let stored = {
       pins: [] as Array<{ taskId: string; repoId: string }>,
+      unpinnedDefaults: [] as Array<{ taskId: string; repoId: string }>,
       dismissedActivity: [] as Array<{
         taskId: string;
         repoId: string;

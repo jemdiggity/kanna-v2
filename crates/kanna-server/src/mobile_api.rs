@@ -149,6 +149,13 @@ pub struct TaskSummary {
     pub parent_task_id: Option<String>,
     pub pinned: bool,
     pub pin_order: Option<i64>,
+    /// The agent this task is the account-wide singleton for, or `None` for an
+    /// ordinary task. Read from the `singleton-{agent}` workflow name bound at
+    /// claim time, so a client can show a directory singleton pinned by
+    /// default without asking the relay directory. Absent on a payload from a
+    /// peer that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub singleton_agent: Option<String>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
     /// Inputs retained behind a typed terminal draft (or whose delivery is
@@ -1106,6 +1113,11 @@ fn map_task_summary(
         parent_task_id: item.parent_task_id,
         pinned: item.pinned.unwrap_or(0) != 0,
         pin_order: item.pin_order,
+        singleton_agent: item
+            .pipeline
+            .as_deref()
+            .and_then(crate::task_creator::directory_singleton_agent)
+            .map(str::to_string),
         blocked_by_task_ids,
         queued_input_count,
         queued_input_reason,
@@ -2016,6 +2028,70 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.snippet.as_deref(), Some("Legacy output preview"));
+    }
+
+    #[test]
+    fn task_summaries_name_the_agent_an_account_wide_singleton_belongs_to() {
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("task-summary-singleton"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, workflow) in [
+            ("task-merge", "singleton-merge"),
+            ("task-ordinary", "single-reviewer"),
+        ] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "work",
+                None,
+                "in progress",
+                "2026-04-17 09:00:00",
+            )
+            .unwrap();
+            db.update_test_pipeline_item_stage_context(id, id, workflow, None, "claude")
+                .unwrap();
+        }
+
+        let api = super::MobileApi::new(config, db);
+        let tasks = api.list_repo_tasks("repo-1").unwrap();
+        let singleton = tasks.iter().find(|task| task.id == "task-merge").unwrap();
+        let ordinary = tasks
+            .iter()
+            .find(|task| task.id == "task-ordinary")
+            .unwrap();
+
+        assert_eq!(singleton.singleton_agent.as_deref(), Some("merge"));
+        assert_eq!(ordinary.singleton_agent, None);
+        assert_eq!(
+            serde_json::to_value(singleton).unwrap()["singletonAgent"],
+            "merge"
+        );
+        // An ordinary task says nothing rather than saying null, so an older
+        // client reading the payload sees exactly what it saw before.
+        assert!(serde_json::to_value(ordinary)
+            .unwrap()
+            .get("singletonAgent")
+            .is_none());
     }
 
     #[test]

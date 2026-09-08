@@ -275,6 +275,7 @@ function copyPreferences(
 ): LocalTaskListPreferences {
   return {
     pins: preferences.pins.map((pin) => ({ ...pin })),
+    unpinnedDefaults: preferences.unpinnedDefaults.map((pin) => ({ ...pin })),
     dismissedActivity: preferences.dismissedActivity.map((entry) => ({
       ...entry
     })),

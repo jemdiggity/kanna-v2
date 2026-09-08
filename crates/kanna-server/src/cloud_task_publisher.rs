@@ -335,10 +335,7 @@ fn map_task(
         .created_at
         .clone()
         .unwrap_or_else(|| updated_at.clone());
-    let singleton_agent = item
-        .pipeline
-        .strip_prefix("singleton-")
-        .filter(|agent| !agent.is_empty())
+    let singleton_agent = crate::task_creator::directory_singleton_agent(&item.pipeline)
         .map(|agent| truncate(agent, 64));
 
     CloudTaskSnapshot {

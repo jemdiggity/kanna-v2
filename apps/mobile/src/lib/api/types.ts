@@ -350,6 +350,13 @@ export interface TaskSummary {
   parentTaskId?: string | null;
   /** Owner-local ids of unresolved blockers; non-empty means blocked. */
   blockedByTaskIds?: string[];
+  /**
+   * The agent this task is the account-wide singleton for — a repo's Merge
+   * Master or Task Manager — or absent for an ordinary task. Directory
+   * singletons are one task across every machine, so every list pins them by
+   * default; absent on a desktop that predates the field.
+   */
+  singletonAgent?: string | null;
   /** Canonical owner-side task pin state. */
   pinned?: boolean;
   /** Owner-side ordering position among pinned tasks in the same repo. */

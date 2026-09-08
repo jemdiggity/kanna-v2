@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineItem, Repo } from "../types/kanna";
+import { DEFAULT_SINGLETON_PIN_ORDER } from "../utils/singletonTask";
 import { buildWorkspace, workspaceTaskOwnerTaskId } from "./buildWorkspace";
 
 function repo(overrides: Partial<Repo> = {}): Repo {
@@ -1138,6 +1139,101 @@ describe("buildWorkspace", () => {
       remoteTaskPins: new Map([["task-other", 0]]),
     });
 
+    expect(result.tasks[0].item).toMatchObject({ pinned: 0, pin_order: null });
+  });
+
+  it("pins a cross-machine directory singleton by default, above explicit pins", () => {
+    const singleton = item({
+      id: "cloud:remote-repo:task-merge",
+      repo_id: "cloud:remote-repo",
+      singleton_agent: "merge",
+    });
+    const ordinary = item({ id: "cloud:remote-repo:task-2", repo_id: "cloud:remote-repo" });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: { repos: [], items: [singleton, ordinary], terminalRefs: {} },
+      lanSnapshot: emptySnapshot(),
+      remoteTaskPins: new Map([["task-2", 0]]),
+    });
+
+    const pinned = result.tasks.find((task) => task.item.id.endsWith("task-merge"));
+    expect(pinned?.item).toMatchObject({ pinned: 1, pin_order: DEFAULT_SINGLETON_PIN_ORDER });
+    // The operator's own pin keeps the order they gave it.
+    expect(result.tasks.find((task) => task.item.id.endsWith("task-2"))?.item)
+      .toMatchObject({ pinned: 1, pin_order: 0 });
+  });
+
+  it("keeps an explicit unpin of a cross-machine singleton off", () => {
+    const singleton = item({
+      id: "cloud:remote-repo:task-merge",
+      repo_id: "cloud:remote-repo",
+      singleton_agent: "merge",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: { repos: [], items: [singleton], terminalRefs: {} },
+      lanSnapshot: emptySnapshot(),
+      remoteTaskPins: new Map([["task-merge", null]]),
+    });
+
+    expect(result.tasks[0].item).toMatchObject({ pinned: 0, pin_order: null });
+  });
+
+  it("lets the operator pin a cross-machine singleton at their own position", () => {
+    const singleton = item({
+      id: "cloud:remote-repo:task-merge",
+      repo_id: "cloud:remote-repo",
+      singleton_agent: "merge",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: { repos: [], items: [singleton], terminalRefs: {} },
+      lanSnapshot: emptySnapshot(),
+      remoteTaskPins: new Map([["task-merge", 2]]),
+    });
+
+    expect(result.tasks[0].item).toMatchObject({ pinned: 1, pin_order: 2 });
+  });
+
+  it("keeps a local singleton's durable unpin authoritative over the remote default", () => {
+    const local = item({
+      id: "task-merge",
+      branch: "task-merge",
+      pipeline: "singleton-merge",
+      pinned: 0,
+      pin_order: null,
+    });
+    const cloud = item({
+      id: "cloud:repo-local:task-merge",
+      repo_id: "repo-local",
+      branch: "task-merge",
+      singleton_agent: "merge",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: "remote-hash", remoteUrl: "git@example.com:kanna.git" }],
+      localItems: [local],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloud],
+        terminalRefs: {
+          "cloud:repo-local:task-merge": {
+            ownerDesktopId: "desktop-a",
+            ownerLocalTaskId: "task-merge",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks).toHaveLength(1);
     expect(result.tasks[0].item).toMatchObject({ pinned: 0, pin_order: null });
   });
 

@@ -1,3 +1,4 @@
+import type { RemoteTaskPin } from "../services/remoteTaskPins";
 import type { PipelineItem, Repo } from "../types/kanna";
 import type {
   DesktopCloudRepo,
@@ -101,7 +102,7 @@ export interface BuildWorkspaceInput {
   cloudSnapshot: DesktopCloudSnapshot;
   lanSnapshot: DesktopCloudSnapshot;
   /** Viewer-local pin overlay for remote-only tasks, keyed by owner-side task id. */
-  remoteTaskPins?: ReadonlyMap<string, number>;
+  remoteTaskPins?: ReadonlyMap<string, RemoteTaskPin>;
   /** Viewer-local sidebar positions for repositories advertised by remote URL hash. */
   repoSidebarOrder?: ReadonlyMap<string, number>;
 }

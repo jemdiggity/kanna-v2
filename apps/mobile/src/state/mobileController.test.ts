@@ -730,6 +730,7 @@ describe("createMobileController", () => {
         { taskId: "task-closed", repoId: "repo-1" },
         { taskId: "task-other-machine", repoId: "repo-elsewhere" }
       ],
+      unpinnedDefaults: [{ taskId: "task-closed", repoId: "repo-1" }],
       dismissedActivity: [
         { taskId: "task-1", repoId: "repo-1", activityRevision: 7 }
       ],
@@ -743,13 +744,15 @@ describe("createMobileController", () => {
     await flushMicrotasks();
 
     // `task-closed` is gone from the all-open-tasks snapshot, and `task-1` is
-    // no longer unread, so both entries go. The pin for a repo this snapshot
-    // says nothing about survives.
+    // no longer unread, so both entries go — including the suppressed default
+    // pin for `task-closed`, which has no default left to turn off. The pin
+    // for a repo this snapshot says nothing about survives.
     expect(store.getState().localTaskListPreferences).toEqual({
       pins: [
         { taskId: "task-1", repoId: "repo-1" },
         { taskId: "task-other-machine", repoId: "repo-elsewhere" }
       ],
+      unpinnedDefaults: [],
       dismissedActivity: [],
       pinsSeededFromServer: true
     });

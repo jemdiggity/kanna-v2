@@ -38,7 +38,7 @@ describe("setLocalTaskPinned", () => {
     const second = setLocalTaskPinned(first, task({ id: "task-2" }), true);
 
     expect(localPinnedTaskIds(second)).toEqual(["task-2", "task-1"]);
-    expect(isLocallyPinned(second, "task-1")).toBe(true);
+    expect(isLocallyPinned(second, task({ id: "task-1" }))).toBe(true);
   });
 
   it("removes a pin and returns the same record when nothing changes", () => {
@@ -51,6 +51,77 @@ describe("setLocalTaskPinned", () => {
     expect(localPinnedTaskIds(setLocalTaskPinned(pinned, task({ id: "task-1" }), false)))
       .toEqual([]);
     expect(setLocalTaskPinned(pinned, task({ id: "task-1" }), true)).toBe(pinned);
+  });
+});
+
+describe("default pins for account-wide singletons", () => {
+  const singleton = task({ id: "task-merge", singletonAgent: "merge" });
+
+  it("shows a directory singleton pinned without the phone pinning it", () => {
+    const empty = emptyLocalTaskListPreferences();
+
+    expect(localPinnedTaskIds(empty, [task({ id: "task-1" }), singleton]))
+      .toEqual(["task-merge"]);
+    expect(isLocallyPinned(empty, singleton)).toBe(true);
+    expect(isLocallyPinned(empty, task({ id: "task-1" }))).toBe(false);
+  });
+
+  it("keeps the default above the phone's own pins without reordering them", () => {
+    const pinned = setLocalTaskPinned(
+      setLocalTaskPinned(emptyLocalTaskListPreferences(), task({ id: "task-1" }), true),
+      task({ id: "task-2" }),
+      true
+    );
+
+    expect(
+      localPinnedTaskIds(pinned, [task({ id: "task-1" }), task({ id: "task-2" }), singleton])
+    ).toEqual(["task-merge", "task-2", "task-1"]);
+  });
+
+  it("keeps an explicit unpin off across later list builds", () => {
+    const unpinned = setLocalTaskPinned(
+      emptyLocalTaskListPreferences(),
+      singleton,
+      false
+    );
+
+    expect(unpinned.unpinnedDefaults).toEqual([
+      { taskId: "task-merge", repoId: "repo-1" }
+    ]);
+    expect(localPinnedTaskIds(unpinned, [singleton])).toEqual([]);
+    expect(isLocallyPinned(unpinned, singleton)).toBe(false);
+    // A record round-tripped through storage still says the same thing.
+    expect(
+      localPinnedTaskIds(
+        normalizeLocalTaskListPreferences(JSON.parse(JSON.stringify(unpinned)))!,
+        [singleton]
+      )
+    ).toEqual([]);
+  });
+
+  it("restores the default when the phone pins it again", () => {
+    const unpinned = setLocalTaskPinned(
+      emptyLocalTaskListPreferences(),
+      singleton,
+      false
+    );
+    const repinned = setLocalTaskPinned(unpinned, singleton, true);
+
+    expect(repinned.unpinnedDefaults).toEqual([]);
+    // The default already puts it at the top; no explicit entry is needed.
+    expect(repinned.pins).toEqual([]);
+    expect(localPinnedTaskIds(repinned, [singleton])).toEqual(["task-merge"]);
+  });
+
+  it("leaves the owner's pin for a singleton to the default rather than seeding it", () => {
+    const seeded = seedLocalTaskPinsFromServer(emptyLocalTaskListPreferences(), [
+      task({ id: "task-merge", singletonAgent: "merge", pinned: true, pinOrder: 0 }),
+      task({ id: "task-1", pinned: true, pinOrder: 1 })
+    ]);
+
+    expect(seeded.pins).toEqual([{ taskId: "task-1", repoId: "repo-1" }]);
+    expect(localPinnedTaskIds(seeded, [singleton, task({ id: "task-1" })]))
+      .toEqual(["task-merge", "task-1"]);
   });
 });
 
@@ -206,11 +277,35 @@ describe("normalizeLocalTaskListPreferences", () => {
       })
     ).toEqual({
       pins: [{ taskId: "task-1", repoId: "repo-1" }],
+      // A record written before default pins existed reads back as a phone
+      // that has suppressed nothing.
+      unpinnedDefaults: [],
       dismissedActivity: [
         { taskId: "task-2", repoId: "repo-1", activityRevision: null }
       ],
       pinsSeededFromServer: true
     });
+  });
+
+  it("reads suppressed default pins back", () => {
+    expect(
+      normalizeLocalTaskListPreferences({
+        pins: [],
+        unpinnedDefaults: [{ taskId: "task-merge", repoId: "repo-1" }],
+        dismissedActivity: [],
+        pinsSeededFromServer: true
+      })
+    ).toMatchObject({
+      unpinnedDefaults: [{ taskId: "task-merge", repoId: "repo-1" }]
+    });
+    expect(
+      normalizeLocalTaskListPreferences({
+        pins: [],
+        unpinnedDefaults: ["task-merge"],
+        dismissedActivity: [],
+        pinsSeededFromServer: true
+      })
+    ).toBeNull();
   });
 
   it("refuses a payload it cannot read rather than guessing at an empty one", () => {

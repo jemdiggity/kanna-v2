@@ -33,12 +33,14 @@ import {
   type TransferMachine,
 } from "../services/desktopTransferMachines";
 import {
+  forgetRemoteTaskPin,
   parseRemoteTaskPins,
   pinRemoteTask,
   reorderRemoteTaskPins,
   unpinRemoteTask,
 } from "../services/remoteTaskPins";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
+import { isDefaultPinnedTask } from "../utils/singletonTask";
 import { buildWorkspace, workspaceTaskOwnerTaskId } from "../workspace/buildWorkspace";
 import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTasksForSidebar";
 import { projectWorkspaceBlockers } from "../workspace/projectWorkspaceBlockers";
@@ -742,7 +744,9 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
 
     const pinnedOwnerTaskId = workspaceTaskOwnerTaskId(workspaceTask);
     if (pinnedOwnerTaskId && remoteTaskPins.value.has(pinnedOwnerTaskId)) {
-      void unpinRemoteTask(pinnedOwnerTaskId).catch((error) =>
+      // A closed task has no default pin left to suppress, so the entry goes
+      // rather than being kept as a sticky unpin.
+      void forgetRemoteTaskPin(pinnedOwnerTaskId).catch((error) =>
         console.warn("[cloud] failed to drop closed remote task pin:", error),
       );
     }
@@ -925,7 +929,9 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         await store.unpinItem(itemId);
         return;
       }
-      await unpinRemoteTask(requireRemoteOwnerTaskId(remoteTask));
+      await unpinRemoteTask(requireRemoteOwnerTaskId(remoteTask), {
+        defaultPinned: isDefaultPinnedTask(remoteTask.item),
+      });
       await refreshAfterRemotePinChange("unpinRemoteTask");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));

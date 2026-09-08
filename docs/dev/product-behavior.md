@@ -130,6 +130,23 @@ searching).
 
 Tasks can be pinned to the top of their repo's task list by dragging above the pin divider. Per-repo scope. Closed tasks disappear regardless of pin state.
 
+**Account-wide singletons are pinned by default, on every machine.** A repo's
+Merge Master and Task Manager are one task across the account (see the relay
+singleton directory), so every machine's list shows them pinned without the
+operator pinning them there. The owning machine stamps the pin on its own
+`pipeline_item` row once, when it claims the singleton — top of the pinned
+group, shifting the operator's existing pins down rather than renumbering
+them. A machine that only *views* the task has no row to stamp, so it derives
+the default from the singleton identity the owner publishes (`singletonAgent`,
+read back from the `singleton-{agent}` workflow name bound at claim time).
+
+It is a default, not a rule. An explicit unpin always wins and always sticks:
+on the owner's machine as the cleared `pinned` column (a reclaim of an existing
+singleton never re-stamps it), on a viewing desktop as a `null` entry in the
+viewer-local `remoteTaskPins` overlay, and on mobile as an entry in the phone's
+own `unpinnedDefaults`. Absence of a pin is not the same as an unpin, which is
+why the last two are recorded rather than simply left out.
+
 ### Diff viewer
 
 - Modal (Cmd+D), not a tab
@@ -216,7 +233,8 @@ releasing inside the threshold cancels — there is no revealed-button state.
 Pins order to the top of the repo list; a dismissal hides the task from
 Activity until newer activity arrives. Neither is published to the desktop,
 and a mobile dismiss never marks the task read for the desktop or
-supervisors.
+supervisors. Account-wide singletons are pinned by default here too, above
+the phone's own pins — see "Pinned tasks" above.
 
 **Pairing.** A desktop is added by scanning its QR code (or typing the 6-char
 code): the phone finds the desktop via Bonjour on the LAN and claims the

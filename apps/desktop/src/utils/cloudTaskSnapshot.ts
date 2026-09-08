@@ -1,4 +1,5 @@
 import type { PipelineItem, Repo } from "../types/kanna";
+import { directorySingletonAgent } from "./singletonTask";
 
 export interface CloudTaskSnapshotInput {
   desktopId: string;
@@ -7,6 +8,8 @@ export interface CloudTaskSnapshotInput {
     | "id"
     | "repo_id"
     | "prompt"
+    | "pipeline"
+    | "singleton_agent"
     | "stage"
     | "activity"
     | "activity_revision"
@@ -41,6 +44,9 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
     localRepoId: input.repo.id,
     ownerDesktopId: input.desktopId,
     ownerLocalTaskId: input.item.id,
+    // Republished so a peer reading this snapshot can pin the account-wide
+    // singleton by default without asking the relay directory.
+    singletonAgent: directorySingletonAgent(input.item),
     title,
     promptSnippet: prompt ? prompt.slice(0, 500) : null,
     waitingPromptSnippet: input.item.last_output_preview?.trim() || null,

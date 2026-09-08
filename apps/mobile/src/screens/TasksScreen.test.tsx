@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskCollectionStatus } from "../state/sessionStore";
+import type { LocalTaskListPreferences } from "../state/taskListPreferences";
 import {
   buildCreatingTaskUiSlot,
   projectTaskUiSlots,
@@ -542,6 +543,66 @@ describe("TasksScreen", () => {
       "task-pinned-first",
       "task-pinned-second"
     ]);
+  });
+
+  it("shows an account-wide singleton pinned at the top without a phone pin", () => {
+    if (!TasksScreen || !TaskList) throw new Error("TasksScreen was not loaded");
+    const tasks: TaskSummary[] = [
+      {
+        id: "task-ordinary",
+        repoId: "repo-a",
+        title: "Ordinary work",
+        stage: "in progress",
+        createdAt: "2026-06-03T08:00:00.000Z"
+      },
+      {
+        id: "task-merge",
+        repoId: "repo-a",
+        title: "Merge Master",
+        stage: "in progress",
+        singletonAgent: "merge",
+        createdAt: "2026-06-01T08:00:00.000Z"
+      }
+    ];
+    const taskSlots = projectTaskUiSlots(tasks, []);
+
+    const render = (preferences: LocalTaskListPreferences) =>
+      findElement(
+        TasksScreen({
+          heading: "Tasks",
+          repos: [{ id: "repo-a", name: "Repo A" }],
+          selectedRepoId: "repo-a",
+          taskCollectionStatus: "ready",
+          taskListPreferences: preferences,
+          taskSlots,
+          onOpenTask: vi.fn(),
+          onSelectRepo: vi.fn()
+        }) as ElementNode,
+        TaskList
+      );
+
+    const defaulted = render({
+      pins: [],
+      unpinnedDefaults: [],
+      dismissedActivity: [],
+      pinsSeededFromServer: true
+    });
+    expect(defaulted?.props?.pinnedTaskIds).toEqual(["task-merge"]);
+    expect(
+      (defaulted?.props?.taskSlots as typeof taskSlots).map(({ taskId }) => taskId)
+    ).toEqual(["task-merge", "task-ordinary"]);
+
+    // An explicit unpin on this phone turns the default off and keeps it off.
+    const unpinned = render({
+      pins: [],
+      unpinnedDefaults: [{ taskId: "task-merge", repoId: "repo-a" }],
+      dismissedActivity: [],
+      pinsSeededFromServer: true
+    });
+    expect(unpinned?.props?.pinnedTaskIds).toEqual([]);
+    expect(
+      (unpinned?.props?.taskSlots as typeof taskSlots).map(({ taskId }) => taskId)
+    ).toEqual(["task-ordinary", "task-merge"]);
   });
 
   it("hides Activity rows this phone dismissed and brings back newer activity", () => {

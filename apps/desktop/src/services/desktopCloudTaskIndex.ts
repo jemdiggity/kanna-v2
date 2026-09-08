@@ -20,6 +20,12 @@ export interface DesktopCloudTaskSnapshot {
   localRepoId?: string;
   ownerDesktopId: string;
   ownerLocalTaskId: string;
+  /**
+   * The agent this task is the account-wide singleton for, when the owner
+   * published one. It is how a viewing machine recognises a directory
+   * singleton without querying the relay directory.
+   */
+  singletonAgent?: string | null;
   title: string;
   promptSnippet: string | null;
   waitingPromptSnippet?: string | null;
@@ -399,6 +405,9 @@ export function mapDesktopCloudTasks(
       repo_id: repoId,
       prompt: snapshot.promptSnippet ?? snapshot.title,
       pipeline: "cloud",
+      // The owner's synthetic singleton workflow name does not survive into
+      // this presentation row, so singleton identity travels as its own field.
+      singleton_agent: nonblankString(snapshot.singletonAgent ?? null),
       pipeline_def: null,
       stage: snapshot.stage,
       pr_number: snapshot.prNumber,
