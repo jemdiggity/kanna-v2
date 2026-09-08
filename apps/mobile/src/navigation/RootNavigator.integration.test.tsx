@@ -952,6 +952,7 @@ describe("RootNavigator task collection integration", () => {
     const store = createSessionStore();
     let stored: LocalTaskListPreferences = {
       pins: [],
+      unpinnedDefaults: [],
       dismissedActivity: [],
       pinsSeededFromServer: false
     };
@@ -1052,6 +1053,7 @@ describe("RootNavigator task collection integration", () => {
     const store = createSessionStore();
     let stored: LocalTaskListPreferences = {
       pins: [],
+      unpinnedDefaults: [],
       dismissedActivity: [],
       pinsSeededFromServer: false
     };

@@ -543,6 +543,7 @@ describe("createMobileController", () => {
       status: "loaded",
       preferences: {
         pins: [{ taskId: "task-elsewhere", repoId: "repo-elsewhere" }],
+        unpinnedDefaults: [],
         dismissedActivity: [],
         pinsSeededFromServer: true
       }
