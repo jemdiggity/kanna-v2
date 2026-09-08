@@ -89,7 +89,7 @@ kanna_create_task {
 
 **Naming rule.** Every child carries an explicit `display_name`. `display_name` is optional in the schema and falls back to the prompt's first line, and every child's prompt opens with the same sentence — so children dispatched without one render as a column of identical sidebar rows. Keep it under about sixty characters; the PR number leads so a narrow sidebar column still identifies it.
 
-Report each child as you create it, with its task id, and tell the operator they can select it and press ⌘D to read that PR's diff.
+Report each child as you create it, with its task id, so the operator can find it.
 
 ## 5. Track
 
