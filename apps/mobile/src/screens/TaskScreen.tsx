@@ -467,6 +467,11 @@ export function TaskScreen({
   // rebuilding a phone-width terminal and presenting that as a reconnect.
   const hasAuthoritativeTerminalSnapshot =
     terminalOutput.length > 0 && terminalCols !== null && terminalRows !== null;
+  const preservesAuthoritativeTerminalSnapshot =
+    hasAuthoritativeTerminalSnapshot &&
+    (terminalStatus === "idle" ||
+      terminalStatus === "connecting" ||
+      terminalStatus === "restarting");
   // An attachment is a file the desktop writes and names in the injected
   // message, which only the HTTP input path does. SDK-mode tasks answer over
   // the agent stream instead, so they get no attach control rather than an
@@ -1016,7 +1021,8 @@ export function TaskScreen({
             onRequestHistory={onRequestAgentHistory}
             onResolvePermission={onResolveAgentPermission}
           />
-        ) : model.isTerminalHealthy || hasAuthoritativeTerminalSnapshot ? (
+        ) : model.isTerminalHealthy ||
+          preservesAuthoritativeTerminalSnapshot ? (
           <>
             <TerminalWebView
               fullscreen

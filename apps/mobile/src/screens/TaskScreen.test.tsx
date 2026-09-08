@@ -212,6 +212,7 @@ interface RenderTaskScreenOptions {
   draftInput?: string;
   terminalOutput?: string;
   terminalStatus?: TaskTerminalStatus;
+  terminalErrorMessage?: string | null;
   taskCreationPhase?: TaskCreationPhase;
   taskCreationErrorMessage?: string | null;
   onRecoverTaskCreation?: () => void;
@@ -291,6 +292,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     draftInput = "",
     terminalOutput = "terminal",
     terminalStatus = "live",
+    terminalErrorMessage = null,
     taskCreationPhase = "idle",
     taskCreationErrorMessage = null,
     onRecoverTaskCreation = vi.fn(),
@@ -362,7 +364,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     terminalCols,
     terminalRows,
     terminalStatus,
-    terminalErrorMessage: null,
+    terminalErrorMessage,
     taskCreationPhase,
     taskCreationErrorMessage,
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
@@ -745,6 +747,57 @@ describe("TaskScreen", () => {
       expect(
         findByType(renderTaskScreen({ terminalStatus }), "LoadingText")
       ).toBeNull();
+    }
+  );
+
+  it.each(["idle", "connecting", "restarting"] as const)(
+    "retains the authoritative terminal through transient %s state",
+    (terminalStatus) => {
+      const snapshot = {
+        terminalCols: 132,
+        terminalRows: 43,
+        terminalOutput: "authoritative snapshot"
+      };
+      const liveTerminal = findByType(
+        renderTaskScreen({ ...snapshot, terminalStatus: "live" }),
+        "TerminalWebView"
+      );
+      const reconnectingTerminal = findByType(
+        renderTaskScreen({ ...snapshot, terminalStatus }),
+        "TerminalWebView"
+      );
+
+      expect(liveTerminal).not.toBeNull();
+      expect(reconnectingTerminal).not.toBeNull();
+      expect(reconnectingTerminal?.props).toMatchObject({
+        cols: liveTerminal?.props?.cols,
+        rows: liveTerminal?.props?.rows,
+        output: liveTerminal?.props?.output,
+        taskId: liveTerminal?.props?.taskId
+      });
+    }
+  );
+
+  it.each([
+    ["closed", "Offline", null],
+    ["error", "Terminal unavailable", "Terminal unavailable"]
+  ] as const)(
+    "shows the %s overlay instead of a stale authoritative terminal",
+    (terminalStatus, overlayText, terminalErrorMessage) => {
+      const tree = renderTaskScreen({
+        terminalStatus,
+        terminalErrorMessage,
+        terminalOutput: "authoritative snapshot",
+        terminalCols: 132,
+        terminalRows: 43
+      });
+
+      expect(findByType(tree, "TerminalWebView")).toBeNull();
+      expect(
+        JSON.stringify(
+          findByTestId(tree, MOBILE_E2E_IDS.terminalOverlay)?.props?.children
+        )
+      ).toContain(overlayText);
     }
   );
 
