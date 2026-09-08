@@ -206,9 +206,11 @@ const mainTabs = useMainTabs({
 });
 /**
  * Tab sets outlive the app the way the reader expects them to: reopen the app
- * and a task is showing the views it was showing. A scope is dropped as soon
- * as its task or repository leaves this desktop, so a tab set can never
- * outlive the thing it was a view of.
+ * and a task is showing the views it was showing. A scope whose task or
+ * repository is gone is left behind at startup, when the snapshot can be read
+ * as the whole picture — nothing drops a scope while the app runs, because
+ * `store.items` is replaced whole by every refresh and a task missing from one
+ * of them has not necessarily gone anywhere.
  *
  * This is window-local UI state, so it is kept in the window's own storage
  * rather than in a desktop setting. A settings write publishes a state change

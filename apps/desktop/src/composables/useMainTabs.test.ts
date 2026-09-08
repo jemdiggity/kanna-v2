@@ -305,15 +305,6 @@ describe("useMainTabs", () => {
     expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID, "shell"]);
   });
 
-  it("drops a scope when its task leaves the desktop", () => {
-    const { tabs } = setup();
-
-    tabs.openTab({ kind: "diff" });
-    tabs.dropScope("item:task-a");
-
-    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID]);
-  });
-
   it("discards a stored payload it cannot vouch for", () => {
     expect(parsePersistedMainTabs(null)).toBeNull();
     expect(parsePersistedMainTabs("{ not json")).toBeNull();

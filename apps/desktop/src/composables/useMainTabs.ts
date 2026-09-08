@@ -360,15 +360,6 @@ export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
     return true;
   }
 
-  /**
-   * Drops a scope's tabs. Called when a task the window was holding tabs for
-   * is gone — closed here, closed on another machine, or transferred away —
-   * so a tab set cannot outlive the thing it was a view of.
-   */
-  function dropScope(key: string): void {
-    delete scopes[key];
-  }
-
   /** The tab sets worth restoring, in the stored shape. */
   function snapshotScopes(): PersistedMainTabs {
     const persisted: Record<string, PersistedMainTabScope> = {};
@@ -425,7 +416,6 @@ export function useMainTabs({ scopeKey, onTabClosed }: UseMainTabsOptions) {
     closeActiveTab,
     activateTab,
     cycleTab,
-    dropScope,
     snapshotScopes,
     restoreScopes,
   };
