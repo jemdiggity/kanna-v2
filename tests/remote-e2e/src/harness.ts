@@ -65,6 +65,7 @@ export interface RemoteHarness {
     ui: number;
   };
   relayUrl: string;
+  serverLogs(): string;
   getIdToken(): Promise<string>;
   restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
   restartDaemon(): Promise<void>;
@@ -560,6 +561,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       paths: { configPath, daemonDir, dbPath, fakeAgentBinDir, root, zshStartupDir },
       ports,
       relayUrl,
+      serverLogs: () => serverProcess?.logs() ?? "",
       getIdToken: async () => {
         if (!idToken) {
           throw new Error("remote harness id token is not available");

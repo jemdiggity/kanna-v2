@@ -362,6 +362,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     }
     expect(new Set(seen).size).toBe(4_100);
 
+    const serverLogOffset = harness.serverLogs().length;
     await harness.stopRelay();
     try {
       // A local writer stays available while the relay peer is unreachable.
@@ -397,6 +398,22 @@ describe("remote task listing, creation, and actions E2E", () => {
         expect(unreachableSince ?? currentSince).toBe(currentSince);
         unreachableSince = currentSince;
       }
+
+      // Keep the socket down long enough to exercise the first reconnect and
+      // its exponential successor. The server's own delay announcements are
+      // the deployed boundary's evidence that it does not retry in a tight
+      // loop; the unit test covers the lower-level timing separately.
+      await new Promise((resolve) => setTimeout(resolve, 13_000));
+      const outageLogs = harness.serverLogs().slice(serverLogOffset);
+      const reconnectDelays = [...outageLogs.matchAll(
+        /(?:Disconnected from relay\. Reconnecting in|Relay reconnect attempt backed off for) (\d+\.\d)s/g
+      )].map((match) => Number(match[1]));
+      expect(reconnectDelays).toHaveLength(2);
+      expect(reconnectDelays[0]).toBeGreaterThanOrEqual(4);
+      expect(reconnectDelays[0]).toBeLessThanOrEqual(6);
+      expect(reconnectDelays[1]).toBeGreaterThanOrEqual(8);
+      expect(reconnectDelays[1]).toBeLessThanOrEqual(12);
+      expect(outageLogs.match(/Connecting to relay at/g) ?? []).toHaveLength(1);
     } finally {
       await harness.startRelay();
       await harness.waitForDesktop();
