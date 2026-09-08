@@ -5,7 +5,6 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { execDb, queryDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
-import { RELOAD_APP_SCRIPT } from "../helpers/appReady";
 
 interface WorkspaceSnapshot {
   windows?: Array<{
@@ -261,8 +260,11 @@ describe("sidebar resize", () => {
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
       ["sidebar-resize-task", repoId, LONG_TASK_TITLE, "in progress", "agent"],
     );
-    await client.executeSync(RELOAD_APP_SCRIPT);
-    await client.waitForAppReady();
+    // `client.reload()` clears the readiness flags before navigating; a bare
+    // location.reload() lets waitForAppReady() see the outgoing page's flag
+    // and return while the old DOM is still up, so setupState is gone by the
+    // time the test asks for it.
+    await client.reload();
     await client.waitForText(".sidebar", "Investigate sidebar resizing");
   });
 
@@ -291,8 +293,7 @@ describe("sidebar resize", () => {
     await waitForSidebarWidth(client, 420);
     await waitForPersistedSidebarWidth(client, windowId, 420);
 
-    await client.executeSync(RELOAD_APP_SCRIPT);
-    await client.waitForAppReady();
+    await client.reload();
     await waitForWorkspaceSetting(client);
     await waitForSidebarWidth(client, 420);
     await waitForPersistedSidebarWidth(client, windowId, 420);

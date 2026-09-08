@@ -38,8 +38,7 @@ describe("terminal recovery", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
+    await client.reload();
     testRepoPath = await createFixtureRepo("terminal-recovery-test");
     await configureTerminalRecoveryFixture(testRepoPath);
     repoId = await importTestRepo(client, testRepoPath, "terminal-recovery-test");

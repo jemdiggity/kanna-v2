@@ -46,8 +46,7 @@ describe("remote-only repository reorder", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
+    await client.reload();
   });
 
   afterAll(async () => {
