@@ -115,6 +115,55 @@ describe("MainPanel", () => {
     localStorage.clear();
   });
 
+
+  it("puts the tab bar above every panel, the agent session included", async () => {
+    const scopeKey = computed<string | null>(() => "item:task-a");
+    // The agent session alone is enough: it is the tab the bar rendered
+    // underneath.
+    const tabs = useMainTabs({ scopeKey });
+
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask()),
+        repoPath: "/tmp/repo",
+        hasRepos: true,
+        views: {
+          tabs,
+          modals: {
+            finishTransferredModal: vi.fn(),
+            homePath: computed(() => "/home/tester"),
+          },
+          preferences: {},
+          store: {},
+        } as unknown as MainTabViewsController,
+      },
+      attachTo: document.body,
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: true,
+          TerminalTabs: true,
+          // Stubbed for its position, not its contents: what regressed was
+          // where the template puts the bar, not what it draws.
+          MainTabBar: {
+            name: "MainTabBar",
+            template: '<div data-testid="main-tab-bar"></div>',
+          },
+        },
+      },
+    });
+    await flushPromises();
+
+    const bar = wrapper.get('[data-testid="main-tab-bar"]').element;
+    const agentPanel = wrapper.get('[data-testid="main-tab-panel-agent"]').element;
+    // Rendered after the agent panel, the bar sat underneath it at the bottom
+    // of the window whenever the agent session was the tab in front.
+    expect(bar.compareDocumentPosition(agentPanel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    wrapper.unmount();
+  });
+
   it("keeps terminal state across task-detail refresh failures", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");
     fetchTaskDetailMock

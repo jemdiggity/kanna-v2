@@ -593,6 +593,23 @@ function dismissCommandHint() {
           {{ $t('mainPanel.revise') }}
         </button>
       </section>
+    </template>
+    <!--
+      One bar for every scope, above every panel including the agent session's.
+      It belongs to the main area rather than to whichever view is in front, so
+      it sits below a task's header and above the panels — placed after the
+      agent panel it rendered underneath it, at the bottom of the window. The
+      task-slot block is split around it rather than the bar being repeated,
+      because a repository scope has no header to sit under but still has tabs.
+    -->
+    <MainTabBar
+      v-if="views && tabs.length > 0"
+      :tabs="tabs"
+      :active-tab-id="activeTabId"
+      @select="selectTab"
+      @close="closeTab"
+    />
+    <template v-if="uiSlot">
       <div v-show="agentTabActive" class="main-tab-panel" data-testid="main-tab-panel-agent">
         <CloudTerminalCache
           :active-terminal="activeCloudTerminal"
@@ -647,13 +664,6 @@ function dismissCommandHint() {
         </template>
       </div>
     </template>
-    <MainTabBar
-      v-if="views && tabs.length > 0"
-      :tabs="tabs"
-      :active-tab-id="activeTabId"
-      @select="selectTab"
-      @close="closeTab"
-    />
     <template v-if="views">
       <template v-for="tab in openViewTabs" :key="tabKey(tab)">
         <DiffModal
