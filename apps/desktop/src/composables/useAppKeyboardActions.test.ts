@@ -73,6 +73,9 @@ function createHarness(options: {
     currentItem: options.currentItem ?? null,
     advanceStage,
   };
+  const mainTabs = useMainTabs({ scopeKey: computed(() => "item:task-durable") });
+  if (options.activeTabKind === "diff") mainTabs.openTab({ kind: "diff" });
+  const requestCloseCurrentWindow = vi.fn(async () => {});
   const { keyboardActions } = useAppKeyboardActions({
     store,
     windowWorkspace: { openWindow },
@@ -81,12 +84,9 @@ function createHarness(options: {
     selectedWorkspaceTask: computed(() => options.workspaceTask ?? null),
     selectedWorkspaceTaskBlocked: computed(() => options.workspaceTaskBlocked ?? false),
     advanceSelectedRemoteWorkspaceTask,
-    mainTabs: (() => {
-      const tabs = useMainTabs({ scopeKey: computed(() => "item:task-durable") });
-      if (options.activeTabKind === "diff") tabs.openTab({ kind: "diff" });
-      return tabs;
-    })(),
+    mainTabs,
     mainPanelRef: ref(null),
+    requestCloseCurrentWindow,
     currentShortcutContext: computed(() => "main"),
     showShortcutsModal: ref(false),
     navigateBack,
@@ -94,6 +94,8 @@ function createHarness(options: {
   } as unknown as Parameters<typeof useAppKeyboardActions>[0]);
   return {
     keyboardActions,
+    mainTabs,
+    requestCloseCurrentWindow,
     openWindow,
     advanceStage,
     advanceSelectedRemoteWorkspaceTask,
@@ -145,6 +147,42 @@ describe("useAppKeyboardActions durable selection", () => {
     keyboardActions.advanceStage();
 
     expect(advanceStage).toHaveBeenCalledWith("task-durable");
+  });
+
+  it("closes the tab in front with the close-tab shortcut", async () => {
+    const { keyboardActions, mainTabs, requestCloseCurrentWindow } = createHarness({
+      currentItem: item("task-durable"),
+      activeTabKind: "diff",
+    });
+
+    await keyboardActions.closeTabOrWindow();
+
+    expect(mainTabs.isOpen("diff")).toBe(false);
+    expect(requestCloseCurrentWindow).not.toHaveBeenCalled();
+  });
+
+  it("refuses to close the window while views are still open behind the agent tab", async () => {
+    const { keyboardActions, mainTabs, requestCloseCurrentWindow } = createHarness({
+      currentItem: item("task-durable"),
+      activeTabKind: "diff",
+    });
+    // The agent session comes forward while the diff stays open behind it.
+    mainTabs.activateTab("agent");
+
+    await keyboardActions.closeTabOrWindow();
+
+    expect(mainTabs.isOpen("diff")).toBe(true);
+    expect(requestCloseCurrentWindow).not.toHaveBeenCalled();
+  });
+
+  it("closes the window once the agent tab is all that is left", async () => {
+    const { keyboardActions, requestCloseCurrentWindow } = createHarness({
+      currentItem: item("task-durable"),
+    });
+
+    await keyboardActions.closeTabOrWindow();
+
+    expect(requestCloseCurrentWindow).toHaveBeenCalledOnce();
   });
 
   it("advances a selected task while its diff tab is in front", () => {

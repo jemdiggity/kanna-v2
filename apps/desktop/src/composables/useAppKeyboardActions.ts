@@ -149,10 +149,14 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       });
     },
     closeTabOrWindow: async () => {
-      // ⌘W closes the thing in front: the tab, and the window once there is no
-      // tab left to close. The native File menu item routes here too, so both
-      // paths agree.
+      // ⌘W closes the tab in front. The native File menu item routes here too,
+      // so the menu and the keyboard agree.
       if (mainTabs.closeActiveTab()) return;
+      // Nothing closable is in front — the agent session, which is the task
+      // rather than a view of it. Only then does ⌘W mean the window, and only
+      // once no view is left open: closing a window out from under the tabs
+      // someone still has open is not what the key means anywhere else.
+      if (mainTabs.tabs.value.some((tab) => tab.kind !== "agent")) return;
       await requestCloseCurrentWindow();
     },
     closeWindow: async () => {

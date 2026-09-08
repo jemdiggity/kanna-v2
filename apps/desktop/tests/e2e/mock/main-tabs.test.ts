@@ -278,6 +278,50 @@ describe("main content area tabs", () => {
     expect(await openTabIds(client)).toEqual(["agent", "diff"]);
   });
 
+  it("closes the tab in front from the native File menu, and spares the window", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+    await pressShortcut(client, { key: "d", meta: true });
+    await waitForActiveTab(client, "diff");
+
+    // ⌘W is the menu's accelerator in the packaged app, so this is the path
+    // the key actually takes: the item emits, and the action closes the tab.
+    // A synthesized keydown proves nothing here — the web handler skips it.
+    const emitNativeClose = async () => {
+      const result = await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         import("/src/emit.ts")
+           .then((module) => module.emit("kanna://native-close-window", {}))
+           .then(() => cb("ok"))
+           .catch((error) => cb("err:" + String(error && error.message ? error.message : error)));`
+      );
+      if (typeof result === "string" && result.startsWith("err:")) {
+        throw new Error(`native close-window emit failed: ${result.slice(4)}`);
+      }
+      await sleep(500);
+    };
+
+    await emitNativeClose();
+    await waitForActiveTab(client, "agent");
+    expect(await openTabIds(client)).toEqual(["agent"]);
+    expect(await client.getWindowHandles()).toHaveLength(1);
+
+    // With a view open behind the agent session, ⌘W declines rather than
+    // closing the window out from under it.
+    await pressShortcut(client, { key: "d", meta: true });
+    await waitForActiveTab(client, "diff");
+    await client.executeSync(
+      `document.querySelector('[data-testid="main-tab-agent"]')?.click(); return true;`,
+    );
+    await waitForActiveTab(client, "agent");
+
+    await emitNativeClose();
+    expect(await openTabIds(client)).toEqual(["agent", "diff"]);
+    expect(await client.getWindowHandles()).toHaveLength(1);
+
+    await closeViewTabs(client);
+  });
+
   it("gives a repository with no task selected a tab set of its own", async () => {
     await selectTask(taskId);
     await closeViewTabs(client);
