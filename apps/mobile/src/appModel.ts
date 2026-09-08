@@ -381,6 +381,24 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     }
     replaceActiveClient();
   };
+  const retryAnonymousPushRevocations = async () => {
+    for (const desktop of sessionStore.getState().pendingAnonymousPushRevocations) {
+      if (!desktop.desktopPushIdentity || !desktop.pushPairingCert) continue;
+      try {
+        await anonymousPushBindingCoordinator.revoke({
+          desktopId: desktop.desktopId,
+          desktopPushIdentity: desktop.desktopPushIdentity,
+          pushPairingCert: desktop.pushPairingCert
+        });
+        const remaining = sessionStore.getState().pendingAnonymousPushRevocations
+          .filter((candidate) => candidate.desktopId !== desktop.desktopId);
+        sessionStore.setPendingAnonymousPushRevocations(remaining);
+        await persistContext();
+      } catch (error) {
+        console.warn("Anonymous push pairing revocation retry failed:", error);
+      }
+    }
+  };
   const pairingService = createMachinePairingService({
     bonjourBrowser,
     fetchImpl,
@@ -710,6 +728,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     async initialize() {
       bonjourBrowser.start();
       await hydratePersistedContext();
+      await retryAnonymousPushRevocations();
       const hadMobileDeviceId = Boolean(sessionStore.getState().mobileDeviceId);
       sessionStore.ensureMobileDeviceId(generateMobileDeviceId);
       if (!hadMobileDeviceId) {

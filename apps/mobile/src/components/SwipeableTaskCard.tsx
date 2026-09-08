@@ -25,6 +25,18 @@ import {
 
 const TASK_ROW_DEFAULT_EXIT_DISTANCE = 600;
 
+/**
+ * A committed pin is confirmed in the hand as well as on the screen. Haptics
+ * is already part of the app's native surface, so this is a JS-only use of a
+ * module the binary already carries; it is loaded lazily and every failure is
+ * silent, so a build or device without it simply gets the visual confirmation.
+ */
+function confirmCommitWithHaptics(): void {
+  void import("expo-haptics")
+    .then((haptics) => haptics.impactAsync(haptics.ImpactFeedbackStyle.Light))
+    .catch(() => undefined);
+}
+
 interface ActionColors {
   idle: string;
   armed: string;
@@ -93,11 +105,20 @@ export function SwipeableTaskCard({
   const armedRef = useRef(false);
   const completingRef = useRef(false);
   const exitDistanceRef = useRef(TASK_ROW_DEFAULT_EXIT_DISTANCE);
+  /**
+   * The pin state the action is drawn from while a committed row closes over
+   * it. The row's own pin state flips on the frame the swipe commits, and the
+   * action underneath must not flip with it half-way through the close.
+   */
+  const [closingFromPinned, setClosingFromPinned] = useState<boolean | null>(
+    null
+  );
   // The swipe commits when the finger lifts, so the row has one resting
   // position and every drag is measured from it. `PanResponder` builds its
-  // config once, so the release reaches the current action through a ref
+  // config once, so the release reaches the current action through refs
   // rather than the handlers it captured on the first render.
   const commitRef = useRef<() => Promise<boolean>>(async () => false);
+  const commitPinRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
     let mounted = true;
@@ -174,13 +195,14 @@ export function SwipeableTaskCard({
     );
   };
 
-  const finishCommittedAction = async () => {
+  /**
+   * A dismissed row leaves the list, so its record is written once the row has
+   * finished travelling off screen: there is nothing left to animate into, and
+   * a row that could not be dismissed springs back instead of vanishing.
+   */
+  const finishDismiss = async () => {
     if (!reduceMotionRef.current) {
-      LayoutAnimation.configureNext(
-        onDismiss
-          ? LayoutAnimation.Presets.easeInEaseOut
-          : LayoutAnimation.Presets.spring
-      );
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     }
     const succeeded = await commitRef.current();
     if (succeeded) {
@@ -190,73 +212,70 @@ export function SwipeableTaskCard({
     }
   };
 
-  const completeSwipe = () => {
-    completingRef.current = true;
-    if (taskRowCompletionMotion(reduceMotionRef.current) === "timing") {
-      const completionAnimation = onDismiss
-        ? Animated.timing(swipeOffset, {
-            duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
-            toValue: -exitDistanceRef.current,
-            useNativeDriver: true
-          })
-        : Animated.sequence([
-            Animated.timing(swipeOffset, {
-              duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
-              toValue: -TASK_ROW_ACTION_WIDTH,
-              useNativeDriver: true
-            }),
-            Animated.timing(swipeOffset, {
-              duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
-              toValue: 0,
-              useNativeDriver: true
-            })
-          ]);
+  /**
+   * Takes the committed row back to rest. The pin it just wrote is already on
+   * the screen, so this is the receipt for a state change that has happened —
+   * short, and never the thing the state is waiting on.
+   */
+  const closeAfterPinCommit = () => {
+    const settle = () => {
+      resetAnimatedRow();
+      setClosingFromPinned(null);
+    };
+    if (reduceMotionRef.current) {
       startAnimation(
-        completionAnimation,
-        () => {
-          void finishCommittedAction();
-        }
+        Animated.timing(swipeOffset, {
+          duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
+          toValue: 0,
+          useNativeDriver: true
+        }),
+        settle
       );
       return;
     }
+    startAnimation(
+      Animated.spring(swipeOffset, {
+        damping: 22,
+        mass: 0.6,
+        stiffness: 420,
+        toValue: 0,
+        useNativeDriver: true
+      }),
+      settle
+    );
+  };
+
+  const completeSwipe = () => {
+    completingRef.current = true;
 
     if (onDismiss) {
       startAnimation(
-        Animated.spring(swipeOffset, {
-          damping: 18,
-          mass: 0.8,
-          stiffness: 210,
-          toValue: -exitDistanceRef.current,
-          useNativeDriver: true
-        }),
+        taskRowCompletionMotion(reduceMotionRef.current) === "timing"
+          ? Animated.timing(swipeOffset, {
+              duration: TASK_ROW_REDUCED_MOTION_TIMING_MS,
+              toValue: -exitDistanceRef.current,
+              useNativeDriver: true
+            })
+          : Animated.spring(swipeOffset, {
+              damping: 18,
+              mass: 0.8,
+              stiffness: 210,
+              toValue: -exitDistanceRef.current,
+              useNativeDriver: true
+            }),
         () => {
-          void finishCommittedAction();
+          void finishDismiss();
         }
       );
       return;
     }
 
-    startAnimation(
-      Animated.sequence([
-        Animated.spring(swipeOffset, {
-          damping: 12,
-          mass: 0.65,
-          stiffness: 300,
-          toValue: -TASK_ROW_ACTION_WIDTH,
-          useNativeDriver: true
-        }),
-        Animated.spring(swipeOffset, {
-          damping: 15,
-          mass: 0.7,
-          stiffness: 240,
-          toValue: 0,
-          useNativeDriver: true
-        })
-      ]),
-      () => {
-        void finishCommittedAction();
-      }
-    );
+    // Pinning is a record this phone already holds, so the finger lifting is
+    // the whole event: the row's pin state and its place in the list change
+    // now, and the row closes over an action that no longer has anything to
+    // wait for.
+    commitPinRef.current();
+    closeAfterPinCommit();
   };
   // The row lives inside the vertical task ScrollView and wraps a pressable
   // card, so the gesture has to win a real responder negotiation against both.
@@ -279,6 +298,8 @@ export function SwipeableTaskCard({
           animateArmedState(shouldCommitTaskRowAction(offset));
         },
         onPanResponderRelease: (_event, gestureState) => {
+          // A row already performing its action does not perform it twice.
+          if (completingRef.current) return;
           const released = clampTaskRowSwipe(gestureState.dx);
           if (shouldCommitTaskRowAction(released)) {
             completeSwipe();
@@ -297,9 +318,11 @@ export function SwipeableTaskCard({
   );
 
   // Pin and dismiss are phone-local writes, so the row has no in-flight state
-  // to report: the label is whatever this phone's own record says right now.
-  const pinLabel = pinned ? "Unpin" : "Pin";
-  const swipeLabel = onDismiss ? "Dismiss" : pinLabel;
+  // to report: the label is whatever this phone's own record says right now —
+  // except under a row that is still closing over its own committed swipe,
+  // which keeps describing the state that swipe acted on.
+  const actionPinned = closingFromPinned ?? pinned;
+  const swipeLabel = onDismiss ? "Dismiss" : actionPinned ? "Unpin" : "Pin";
   const measureRow = (event: LayoutChangeEvent) => {
     exitDistanceRef.current =
       Math.max(event.nativeEvent.layout.width, TASK_ROW_ACTION_WIDTH * 2) +
@@ -349,13 +372,32 @@ export function SwipeableTaskCard({
     return togglePin();
   };
 
+  /**
+   * Performs the pin now. The record is local, so nothing here waits: the list
+   * is told to animate the reorder this write is about to cause, the write
+   * happens, and persistence is left to settle behind the interaction — a
+   * failure comes back to the row as an inline error, not as a frozen gesture.
+   */
+  const commitPin = (holdActionThroughClose = false) => {
+    if (!onTogglePin) return;
+    if (holdActionThroughClose) setClosingFromPinned(pinned);
+    confirmCommitWithHaptics();
+    // Deliberately no `LayoutAnimation` here. The row's new place in the list
+    // is a fact the moment the finger lifts, and animating the reorder means
+    // the row is still travelling for as long as the animation runs — which
+    // is the delay this row is supposed to have stopped having. The swipe
+    // closing over the action is the motion; the position is not animated.
+    void togglePin();
+  };
+  commitPinRef.current = () => commitPin(true);
+
   const actionScale = actionArmed.interpolate({
     inputRange: [0, 1],
     outputRange: [0.88, 1.04]
   });
   const actionColors = onDismiss
     ? DISMISS_ACTION_COLORS
-    : pinned
+    : actionPinned
       ? UNPIN_ACTION_COLORS
       : PIN_ACTION_COLORS;
   return (
@@ -422,7 +464,7 @@ export function SwipeableTaskCard({
               ? {
                   error: pinError,
                   onToggle: () => {
-                    void togglePin();
+                    commitPin();
                   }
                 }
               : undefined

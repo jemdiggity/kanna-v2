@@ -513,6 +513,129 @@ describe("createMobileController", () => {
     expect(preferences.saved().pins).toEqual([]);
   });
 
+  it("pins on the frame the gesture commits, with storage still catching up", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const load = createDeferred<{
+      status: "loaded";
+      preferences: LocalTaskListPreferences;
+    }>();
+    const save = createDeferred<LocalTaskListPreferences>();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: {
+        load: vi.fn(() => load.promise),
+        save: vi.fn(() => save.promise)
+      }
+    });
+    await controller.bootstrap();
+
+    // Neither the read nor the write has settled, and the row is pinned
+    // anyway: this is the whole point of a phone-local preference.
+    const pinning = controller.setTaskPinned("task-1", true);
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
+    ]);
+
+    // A record that arrives afterwards is composed with the pin, never
+    // allowed to snap the row back to what the disk said before it.
+    load.resolve({
+      status: "loaded",
+      preferences: {
+        pins: [{ taskId: "task-elsewhere", repoId: "repo-elsewhere" }],
+        dismissedActivity: [],
+        pinsSeededFromServer: true
+      }
+    });
+    await flushMicrotasks();
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" },
+      { taskId: "task-elsewhere", repoId: "repo-elsewhere" }
+    ]);
+
+    save.resolve(store.getState().localTaskListPreferences);
+    await pinning;
+  });
+
+  it("writes the state a burst of toggles actually left the row in", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const preferences = createTaskListPreferencesStoreMock();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
+    await controller.bootstrap();
+
+    // Four toggles inside one frame, none of them awaited: every one moves the
+    // list immediately, and the record that survives is the last intent.
+    const flights = [
+      controller.setTaskPinned("task-1", true),
+      controller.setTaskPinned("task-1", false),
+      controller.setTaskPinned("task-1", true),
+      controller.setTaskPinned("task-1", false)
+    ];
+    expect(store.getState().localTaskListPreferences.pins).toEqual([]);
+
+    await Promise.all(flights);
+    expect(store.getState().localTaskListPreferences.pins).toEqual([]);
+    expect(preferences.saved().pins).toEqual([]);
+
+    await controller.setTaskPinned("task-1", true);
+    expect(preferences.saved().pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
+    ]);
+  });
+
+  it("restores the last preference the phone left, restart after restart", async () => {
+    const client = createClientMock();
+    const preferences = createTaskListPreferencesStoreMock();
+
+    const firstStore = createSessionStore();
+    const firstRun = createMobileController(client, firstStore, undefined, {
+      taskListPreferencesStore: preferences
+    });
+    await firstRun.bootstrap();
+    await firstRun.setTaskPinned("task-1", true);
+    await firstRun.setTaskPinned("task-1", false);
+    await firstRun.setTaskPinned("task-1", true);
+
+    const secondStore = createSessionStore();
+    const secondRun = createMobileController(client, secondStore, undefined, {
+      taskListPreferencesStore: preferences
+    });
+    await secondRun.bootstrap();
+    await flushMicrotasks();
+
+    expect(secondStore.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
+    ]);
+  });
+
+  it("leaves the interaction free after a failed write and takes the next toggle", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const preferences = createTaskListPreferencesStoreMock();
+    const controller = createMobileController(client, store, undefined, {
+      taskListPreferencesStore: preferences
+    });
+    await controller.bootstrap();
+    preferences.save.mockRejectedValueOnce(new Error("storage full"));
+
+    await expect(controller.setTaskPinned("task-1", true)).rejects.toThrow(
+      "Could not pin task: storage full"
+    );
+    expect(store.getState().localTaskListPreferences.pins).toEqual([]);
+
+    // The failure reported itself and got out of the way: the very next pin
+    // is taken, applied and written.
+    await controller.setTaskPinned("task-1", true);
+    expect(store.getState().localTaskListPreferences.pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
+    ]);
+    expect(preferences.saved().pins).toEqual([
+      { taskId: "task-1", repoId: "repo-1" }
+    ]);
+  });
+
   it("keeps a local pin across refreshes that never mention it", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -966,24 +1089,21 @@ describe("createMobileController", () => {
 
     expect(revokeAnonymousPushPairing).toHaveBeenCalledOnce();
     expect(revokeAnonymousPushPairing).toHaveBeenCalledWith(pairedDesktop);
-    expect(store.getState().trustedDesktops).toEqual([pairedDesktop, retainedDesktop]);
-    let settled = false;
-    void removal.then(() => { settled = true; });
-    await flushMicrotasks();
-    expect(settled).toBe(false);
+    expect(store.getState().trustedDesktops).toEqual([retainedDesktop]);
+    expect(store.getState().pendingAnonymousPushRevocations).toEqual([pairedDesktop]);
     revocation.resolve();
     await removal;
     expect(store.getState().trustedDesktops).toEqual([retainedDesktop]);
     expect(store.getState().desktops).toEqual([accountDesktop]);
   });
 
-  it("retains manual trust when anonymous push revocation fails", async () => {
+  it("removes manual trust and durably queues revocation when the relay is unavailable", async () => {
     const store = createSessionStore();
     const pairedDesktop = {
       ...trustedDesktop,
       desktopPushIdentity: {
         publicKey: "desktop-public-key",
-        relayUrl: "wss://relay-staging.kanna.build",
+        relayUrl: "ws://127.0.0.1:9086",
         environment: "staging"
       },
       pushPairingCert: {
@@ -1007,11 +1127,14 @@ describe("createMobileController", () => {
       }
     );
 
-    await expect(controller.removeManualMachine("desktop-1"))
-      .rejects.toThrow("relay unavailable");
+    await expect(controller.removeManualMachine("desktop-1")).resolves.toBeUndefined();
 
-    expect(store.getState().trustedDesktops).toEqual([pairedDesktop]);
-    expect(persistSessionContext).not.toHaveBeenCalled();
+    expect(store.getState().trustedDesktops).toEqual([]);
+    expect(store.getState().pendingAnonymousPushRevocations).toEqual([pairedDesktop]);
+    expect(persistSessionContext).toHaveBeenCalledWith(expect.objectContaining({
+      trustedDesktops: [],
+      pendingAnonymousPushRevocations: [pairedDesktop]
+    }));
   });
 
   it("keeps manual trust published until durable removal succeeds", async () => {

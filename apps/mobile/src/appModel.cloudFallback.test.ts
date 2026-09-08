@@ -19,6 +19,10 @@ import {
   buildMachineInventory,
   summarizeMachines
 } from "./state/machineInventory";
+import {
+  createSessionPersistence,
+  type StorageAdapter
+} from "./state/sessionPersistence";
 import { buildCreatingTaskUiSlot } from "./state/taskUiSlots";
 
 afterEach(() => {
@@ -338,6 +342,19 @@ async function flushAsyncWork(iterations = 3): Promise<void> {
   }
 }
 
+function createMemoryStorage(): StorageAdapter & { values: Map<string, string> } {
+  const values = new Map<string, string>();
+  return {
+    values,
+    async getItem(key) {
+      return values.get(key) ?? null;
+    },
+    async setItem(key, value) {
+      values.set(key, value);
+    }
+  };
+}
+
 async function createCloudRecoveryHarness(
   options: { failListenersSynchronously?: boolean } = {}
 ) {
@@ -406,6 +423,73 @@ async function rejectCloudRecovery(
 }
 
 describe("createAppModel cloud routing", () => {
+  it.each([
+    ["clears it durably after success", true],
+    ["keeps it durably queued after failure", false]
+  ])("retries a persisted anonymous push revocation during initialization and %s", async (
+    _outcome,
+    succeeds
+  ) => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+    const pendingRevocation = {
+      desktopId: "desktop-loopback",
+      displayName: "Old Dev Mac",
+      lanEndpoints: [],
+      lastSeenAt: "2026-09-08T00:00:00.000Z",
+      desktopPushIdentity: {
+        publicKey: "desktop-public-key",
+        relayUrl: "ws://127.0.0.1:9086",
+        environment: "development"
+      },
+      pushPairingCert: {
+        deviceId: "phone-1",
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        signature: "pairing-certificate"
+      }
+    };
+    await persistence.save({
+      mobileDeviceId: "phone-1",
+      selectedDesktopId: null,
+      selectedRepoId: null,
+      selectedTaskId: null,
+      activeView: "tasks",
+      trustedDesktops: [],
+      pendingAnonymousPushRevocations: [pendingRevocation]
+    });
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: succeeds,
+      status: succeeds ? 204 : 503
+    } as Response);
+    const { authSession } = createMutableAuthSession({ status: "signedOut" });
+    const app = createAppModel({
+      authSession,
+      fetchImpl,
+      persistence,
+      options: {
+        forceCloud: false,
+        relayUrl: null,
+        bonjourBrowser: createStaticBonjourBrowser([])
+      }
+    });
+
+    await expect(app.initialize()).resolves.toBeUndefined();
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:9086/push/pairings",
+      expect.objectContaining({ method: "DELETE" })
+    );
+    const expectedQueue = succeeds ? [] : [pendingRevocation];
+    expect(app.sessionStore.getState().pendingAnonymousPushRevocations).toEqual(
+      expectedQueue
+    );
+    await expect(persistence.load()).resolves.toMatchObject({
+      pendingAnonymousPushRevocations: expectedQueue
+    });
+    app.controller.dispose();
+  });
+
   it("reissues and persists pairing certificates when a trusted LAN route appears", async () => {
     const fixture = createLanFixture(async () => []);
     const material = {

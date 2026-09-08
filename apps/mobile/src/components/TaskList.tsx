@@ -1,4 +1,3 @@
-import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
@@ -103,20 +102,34 @@ export function TaskList({
         ) : (
           <TaskCard key={slot.slotId} {...commonProps} />
         );
-        if (depth === 0) {
-          return <React.Fragment key={slot.slotId}>{card}</React.Fragment>;
-        }
+        // Every depth renders the same element type on purpose. Pinning a
+        // subtask un-nests it on the very tick the pin is written — a pinned
+        // row is never nested (`buildTaskTreeRows`) — so its depth drops to 0
+        // under a stable key. Swapping the wrapper's element type there would
+        // make React unmount and remount the row mid-gesture, recreating the
+        // `Animated.Value` its closing swipe is running and hard-cutting the
+        // row to rest. Indent and the subtask testID stay depth-only.
+        const nested = depth > 0;
         return (
           <View
             key={slot.slotId}
-            style={[
-              styles.subtaskRow,
-              {
-                marginLeft:
-                  Math.min(depth, MAX_SUBTASK_INDENT_DEPTH) * SUBTASK_INDENT
-              }
-            ]}
-            testID={MOBILE_E2E_IDS.taskListSubtaskRow(slot.slotId)}
+            style={
+              nested
+                ? [
+                    styles.subtaskRow,
+                    {
+                      marginLeft:
+                        Math.min(depth, MAX_SUBTASK_INDENT_DEPTH) *
+                        SUBTASK_INDENT
+                    }
+                  ]
+                : undefined
+            }
+            testID={
+              nested
+                ? MOBILE_E2E_IDS.taskListSubtaskRow(slot.slotId)
+                : undefined
+            }
           >
             {card}
           </View>

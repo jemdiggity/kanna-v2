@@ -418,30 +418,86 @@ describe("SwipeableTaskCard", () => {
     });
 
     expect(onTogglePin).toHaveBeenCalledWith(true);
-    expect(nativeHarness.animationKinds).toContain("sequence");
-    expect(nativeHarness.layoutPresets).toContain("spring");
+    expect(nativeHarness.animationKinds).toContain("spring");
+    // The row's new place in the list is not animated: an animated reorder is
+    // time the row spends still travelling after the pin is already a fact.
+    expect(nativeHarness.layoutPresets).toEqual([]);
     // Nothing rests open: the row is back where it started, with no revealed
     // button waiting for a second tap.
     expect(rowTranslation(renderer)).toBe(0);
   });
 
-  it("waits for the completion spring before invoking the pin callback", async () => {
+  it("pins the instant the finger lifts, before the row has closed", async () => {
     const onTogglePin = vi.fn().mockResolvedValue(undefined);
-    await renderCard(onTogglePin);
+    const renderer = await renderCard(onTogglePin);
 
     drag(-70);
     nativeHarness.pendingAnimations.length = 0;
     nativeHarness.autoFinishAnimations = false;
     release(-70);
 
-    expect(onTogglePin).not.toHaveBeenCalled();
+    // The record is this phone's own, so the release is the whole event: the
+    // row is still travelling back to rest when the pin is already written.
+    expect(onTogglePin).toHaveBeenCalledWith(true);
     expect(nativeHarness.pendingAnimations).toHaveLength(1);
+    expect(rowTranslation(renderer)).toBe(-70);
 
     await act(async () => {
       nativeHarness.pendingAnimations.shift()?.();
       await Promise.resolve();
     });
-    expect(onTogglePin).toHaveBeenCalledWith(true);
+    expect(onTogglePin).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds the action's own label and colour while the committed row closes", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    const renderer = await renderCard(onTogglePin, false);
+    const pinAction = MOBILE_E2E_IDS.taskPinAction("task-1");
+
+    drag(-70);
+    nativeHarness.autoFinishAnimations = false;
+    nativeHarness.pendingAnimations.length = 0;
+    await act(async () => {
+      release(-70);
+      await Promise.resolve();
+    });
+
+    // The row's own pin state has already flipped; the action underneath keeps
+    // describing the swipe that is still closing over it.
+    expect(
+      renderer.root.findByProps({ testID: pinAction }).findByType("Text").props
+        .children
+    ).toBe("Pin");
+    act(() => {
+      renderer.update(cardElement(true, onTogglePin));
+    });
+    expect(
+      renderer.root.findByProps({ testID: pinAction }).findByType("Text").props
+        .children
+    ).toBe("Pin");
+
+    await act(async () => {
+      nativeHarness.pendingAnimations.shift()?.();
+      await Promise.resolve();
+    });
+    drag(-70);
+    expect(
+      renderer.root.findByProps({ testID: pinAction }).findByType("Text").props
+        .children
+    ).toBe("Unpin");
+  });
+
+  it("ignores a second release while the row is still performing its action", async () => {
+    const onTogglePin = vi.fn().mockResolvedValue(undefined);
+    await renderCard(onTogglePin);
+
+    drag(-70);
+    nativeHarness.autoFinishAnimations = false;
+    nativeHarness.pendingAnimations.length = 0;
+    release(-70);
+    release(-70);
+
+    expect(onTogglePin).toHaveBeenCalledTimes(1);
   });
 
   it("keeps card and action disjoint with timing under reduced motion", async () => {
@@ -474,7 +530,9 @@ describe("SwipeableTaskCard", () => {
       await Promise.resolve();
     });
 
-    expect(nativeHarness.animationKinds).toEqual(["sequence"]);
+    // Reduced motion keeps the same immediate write, timed rather than sprung,
+    // and asks the list for no reorder animation at all.
+    expect(nativeHarness.animationKinds).toEqual(["timing"]);
     expect(nativeHarness.layoutPresets).toEqual([]);
     expect(onTogglePin).toHaveBeenCalledWith(true);
   });
