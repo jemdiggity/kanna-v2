@@ -7,8 +7,6 @@ import { shouldDelayConnectUntilAfterInitialLayout } from "../composables/termin
 import { nextFrameOrTimeout } from "../utils/animationFrame"
 import { shouldStartTerminalSession } from "../composables/terminalVisibility"
 import { markTaskSwitchMounted, markTaskSwitchReady } from "../perf/taskSwitchPerf"
-import type { TerminalFileMention } from "../composables/terminalFileLinks"
-import MentionedFilesOverlay from "./MentionedFilesOverlay.vue"
 import "@xterm/xterm/css/xterm.css"
 
 const props = defineProps<{
@@ -31,8 +29,6 @@ const {
   fitDeferred,
   redraw,
   ensureConnected,
-  listMentionedFiles,
-  activateMentionedFile,
   pause,
   dispose,
 } = useTerminal(props.sessionId, props.spawnOptions, {
@@ -62,47 +58,6 @@ const {
 const historyOverlayOpen = ref(false)
 const historyText = ref("")
 const historyBodyRef = ref<HTMLElement | null>(null)
-const mentionedFilesOpen = ref(false)
-const mentionedFilesLoading = ref(false)
-const mentionedFilesError = ref<string | null>(null)
-const mentionedFiles = ref<TerminalFileMention[]>([])
-const mentionedFilesOverflow = ref(false)
-
-async function openMentionedFiles() {
-  mentionedFilesOpen.value = true
-  mentionedFilesLoading.value = true
-  mentionedFilesError.value = null
-  try {
-    const result = await listMentionedFiles()
-    if (!mentionedFilesOpen.value) return
-    mentionedFiles.value = result.mentions
-    mentionedFilesOverflow.value = result.overflow
-  } catch (error: unknown) {
-    console.error("[terminal] failed to list mentioned files:", error)
-    if (mentionedFilesOpen.value) {
-      mentionedFilesError.value = error instanceof Error
-        ? error.message
-        : "Mentioned files are unavailable."
-    }
-  } finally {
-    mentionedFilesLoading.value = false
-  }
-}
-
-function closeMentionedFiles() {
-  mentionedFilesOpen.value = false
-}
-
-function openMentionedFile(mention: TerminalFileMention) {
-  if (!mention.available) return
-  closeMentionedFiles()
-  activateMentionedFile(mention)
-}
-
-function openMentionedFileAt(index: number) {
-  const mention = mentionedFiles.value[index]
-  if (mention) openMentionedFile(mention)
-}
 
 async function openHistoryOverlay() {
   historyText.value = readHistoryLines().join("\n")
@@ -202,7 +157,6 @@ onDeactivated(() => {
   cancelPendingFocus()
   pause()
   started = false
-  closeMentionedFiles()
 })
 
 watch(
@@ -230,16 +184,7 @@ onUnmounted(() => {
 <template>
   <div class="terminal-wrapper">
     <div ref="containerRef" class="terminal-container"></div>
-    <div v-if="!historyOverlayOpen && !mentionedFilesOpen" class="terminal-tools">
-      <button
-        v-if="agentTerminal"
-        class="terminal-tool-chip"
-        data-testid="mentioned-files-open"
-        title="Show files mentioned by the agent"
-        @click="openMentionedFiles"
-      >
-        Mentioned files
-      </button>
+    <div v-if="!historyOverlayOpen" class="terminal-tools">
       <button
         v-if="hasHiddenHistory"
         class="terminal-tool-chip"
@@ -261,16 +206,6 @@ onUnmounted(() => {
         @keydown.esc.stop.prevent="closeHistoryOverlay"
       >{{ historyText }}</pre>
     </div>
-    <MentionedFilesOverlay
-      v-if="mentionedFilesOpen"
-      :rows="mentionedFiles"
-      :loading="mentionedFilesLoading"
-      :error="mentionedFilesError"
-      :overflow="mentionedFilesOverflow"
-      test-id="mentioned-files-overlay"
-      @close="closeMentionedFiles"
-      @open="openMentionedFileAt"
-    />
   </div>
 </template>
 
