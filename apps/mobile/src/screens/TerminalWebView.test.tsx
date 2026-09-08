@@ -1212,6 +1212,14 @@ describe("TerminalWebView", () => {
     expect((webView.props.source as { html: string }).html).toContain("terminal-inspection");
   });
 
+  it("only relaxes the iOS keyboard gesture gate while direct input is active", async () => {
+    const inactive = await renderTerminalWebView({ directInputEnabled: false });
+    expect(inactive.props.keyboardDisplayRequiresUserAction).toBe(true);
+
+    const active = await renderTerminalWebView({ directInputEnabled: true });
+    expect(active.props.keyboardDisplayRequiresUserAction).toBe(false);
+  });
+
   it("ignores terminal inspection messages and instrumentation outside E2E builds", async () => {
     vi.stubEnv("EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED", "0");
     const webView = await renderTerminalWebView({});

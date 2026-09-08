@@ -328,6 +328,11 @@ async function verifyRelayTerminalKeys(
 
   await enter.click();
   await observation.waitForCount("ENTER", enterCount + 1);
+
+  await directInputToggle.click();
+  await (await driver.$(selectors.taskInput)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS,
+  });
 }
 
 function createRelayQuickReplyPersistenceJourney(

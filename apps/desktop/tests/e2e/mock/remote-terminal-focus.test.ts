@@ -200,13 +200,16 @@ describe("remote terminal focus", () => {
     await client.waitForElement(`${remoteRowSelector}.selected`, 5_000);
     await waitForFocusedTerminal(client, remoteTextareaSelector);
 
-    // The mentioned-files control sat beside the companion control at
-    // right: 138px; only the companion control is left on this shell.
+    // The mentioned-files control is gone; the companion and terminal
+    // ownership controls are the two actions left on this shell.
     const controls = await client.executeSync<string[]>(
       `return Array.from(document.querySelectorAll(".cloud-terminal-shell > button"))
          .map(function(button) { return button.className; });`,
     );
-    expect(controls).toEqual(["open-companion-control"]);
+    expect(controls).toEqual([
+      "open-companion-control",
+      "terminal-control-control",
+    ]);
 
     const evidenceDir = process.env.KANNA_VISUAL_EVIDENCE_DIR;
     if (evidenceDir) {

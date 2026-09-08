@@ -750,7 +750,7 @@ export function TerminalWebViewComponent({
           });
         }}
         onMessage={handleMessage}
-        keyboardDisplayRequiresUserAction={false}
+        keyboardDisplayRequiresUserAction={!directInputEnabled}
         scrollEnabled
         source={source}
         style={fullscreen ? styles.webviewFullscreen : styles.webview}
