@@ -452,4 +452,34 @@ describe("main content area tabs", () => {
     await closeViewTabs(client);
     await sleep(1_200);
   });
+
+  it("gives the less keys to the tab in front, not to the ones behind it", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    await pressShortcut(client, { key: "d", meta: true });
+    await waitForActiveTab(client, "diff");
+    await pressShortcut(client, { key: "g", meta: true });
+    await waitForActiveTab(client, "graph");
+
+    // `q` is a window-level binding, and a tab behind another one is still
+    // mounted: without a foreground gate the hidden diff answered this too and
+    // closed itself along with the graph.
+    await pressShortcut(client, { key: "q" });
+    await sleep(400);
+
+    expect(await openTabIds(client)).toEqual(["agent", "diff"]);
+    await waitForActiveTab(client, "diff");
+
+    // Same again with a file in front, which has always gated its own keys —
+    // what has to survive here is the diff behind it.
+    await callVueMethod(client, "openFilePreview", "README.md");
+    await waitForActiveTab(client, "file:README.md");
+    await pressShortcut(client, { key: "q" });
+    await sleep(400);
+
+    expect(await openTabIds(client)).toEqual(["agent", "diff"]);
+
+    await closeViewTabs(client);
+  });
 });

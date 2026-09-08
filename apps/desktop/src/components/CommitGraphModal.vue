@@ -11,7 +11,7 @@ const props = defineProps<EmbeddableViewProps & {
   worktreePath?: string;
 }>();
 
-const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick } =
+const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick, isForeground } =
   useEmbeddableView(props, { context: "graph" });
 const graphViewRef = ref<InstanceType<typeof CommitGraphView> | null>(null);
 
@@ -43,6 +43,7 @@ onMounted(() => {
         ref="graphViewRef"
         :repo-path="repoPath"
         :worktree-path="worktreePath"
+        :is-foreground="isForeground"
         @close="emit('close')"
       />
     </div>

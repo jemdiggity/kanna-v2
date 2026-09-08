@@ -72,6 +72,13 @@ const props = defineProps<{
   baseRef?: string;
   viewKey?: string;
   remoteDiffLoader?: (request: RemoteTaskDiffRequest) => Promise<RemoteTaskDiffContent>;
+  /**
+   * Whether this view is the one in front. `useLessScroll` binds window-level
+   * keys, and a tab stays mounted behind another one, so without this a
+   * background diff answered `q` and closed itself. Absent means in front,
+   * which is what a modal always is while it is open.
+   */
+  isForeground?: () => boolean;
 }>();
 const baseRef = computed(() => props.baseRef);
 
@@ -616,6 +623,7 @@ function handleScroll() {
 }
 
 useLessScroll(containerRef, {
+  isActive: () => props.isForeground?.() ?? true,
   extraHandler(e) {
     const noMods = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
     const meta = e.metaKey || e.ctrlKey;

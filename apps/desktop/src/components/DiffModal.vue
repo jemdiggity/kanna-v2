@@ -37,6 +37,7 @@ const {
   overlayStyle,
   dismissOnScrimClick,
   focusWhenBrought,
+  isForeground,
 } = useEmbeddableView(props, { context: "diff" });
 focusWhenBrought(modalRef);
 
@@ -100,6 +101,7 @@ onMounted(() => {
         :base-ref="baseRef"
         :view-key="viewKey"
         :remote-diff-loader="remoteDiffLoader"
+        :is-foreground="isForeground"
         @scope-change="emit('scope-change', $event)"
         @scroll-state-change="emit('scroll-state-change', $event)"
         @branch-include-change="emit('branch-include-change', $event)"
