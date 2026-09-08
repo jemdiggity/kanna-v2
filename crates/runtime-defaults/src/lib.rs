@@ -624,7 +624,11 @@ fn app_support_dir_for_home(home: &Path) -> PathBuf {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        xdg_dir_for_home(std::env::var_os("XDG_DATA_HOME").as_deref(), home, ".local/share")
+        xdg_dir_for_home(
+            std::env::var_os("XDG_DATA_HOME").as_deref(),
+            home,
+            ".local/share",
+        )
     }
 }
 

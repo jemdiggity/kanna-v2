@@ -41,6 +41,8 @@ enum Family {
     /// `zsh` and `bash`: both take `--login`.
     LongLogin,
     /// POSIX `sh` (`dash` on Debian derivatives): `-l`, no `--login`.
+    /// Unreachable on macOS, where the shell is always `/bin/zsh`.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     ShortLogin,
 }
 
@@ -105,50 +107,55 @@ fn is_executable_file(path: &Path) -> bool {
 
 /// Resolve the policy above. `preferred` is `$SHELL`; `executable` answers
 /// whether a candidate exists and can be run, so this stays pure and testable.
-fn resolve_login_shell(preferred: Option<&OsStr>, executable: impl Fn(&Path) -> bool) -> LoginShell {
-    #[cfg(target_os = "macos")]
+///
+/// Unconditional on macOS: `/bin/zsh` is the system shell, and every existing
+/// argv expectation is written against it.
+#[cfg(target_os = "macos")]
+fn resolve_login_shell(
+    _preferred: Option<&OsStr>,
+    _executable: impl Fn(&Path) -> bool,
+) -> LoginShell {
+    LoginShell {
+        path: PathBuf::from("/bin/zsh"),
+        family: Family::LongLogin,
+    }
+}
+
+/// As above, applying the three-step policy in the module documentation.
+#[cfg(not(target_os = "macos"))]
+fn resolve_login_shell(
+    preferred: Option<&OsStr>,
+    executable: impl Fn(&Path) -> bool,
+) -> LoginShell {
+    if let Some(path) = preferred
+        .and_then(OsStr::to_str)
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .filter(|path| {
+            matches!(
+                path.file_name().and_then(OsStr::to_str),
+                Some("bash") | Some("zsh")
+            )
+        })
+        .filter(|path| executable(path))
     {
-        // Unconditional on macOS: /bin/zsh is the system shell, and every
-        // existing argv expectation is written against it.
-        let _ = (preferred, executable);
         return LoginShell {
-            path: PathBuf::from("/bin/zsh"),
+            path: path.to_path_buf(),
             family: Family::LongLogin,
         };
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Some(path) = preferred
-            .and_then(OsStr::to_str)
-            .map(Path::new)
-            .filter(|path| path.is_absolute())
-            .filter(|path| {
-                matches!(
-                    path.file_name().and_then(OsStr::to_str),
-                    Some("bash") | Some("zsh")
-                )
-            })
-            .filter(|path| executable(path))
-        {
-            return LoginShell {
-                path: path.to_path_buf(),
-                family: Family::LongLogin,
-            };
-        }
+    let bash = Path::new("/bin/bash");
+    if executable(bash) {
+        return LoginShell {
+            path: bash.to_path_buf(),
+            family: Family::LongLogin,
+        };
+    }
 
-        let bash = Path::new("/bin/bash");
-        if executable(bash) {
-            return LoginShell {
-                path: bash.to_path_buf(),
-                family: Family::LongLogin,
-            };
-        }
-
-        LoginShell {
-            path: PathBuf::from("/bin/sh"),
-            family: Family::ShortLogin,
-        }
+    LoginShell {
+        path: PathBuf::from("/bin/sh"),
+        family: Family::ShortLogin,
     }
 }
 
@@ -156,6 +163,7 @@ fn resolve_login_shell(preferred: Option<&OsStr>, executable: impl Fn(&Path) -> 
 mod tests {
     use super::*;
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn nothing_executable(_: &Path) -> bool {
         false
     }
@@ -222,7 +230,10 @@ mod tests {
             let shell = resolve_login_shell(None, nothing_executable);
             assert_eq!(shell.path(), "/bin/sh");
             assert_eq!(shell.login_args("run"), ["-l", "-c", "run"]);
-            assert_eq!(shell.login_interactive_args("run"), ["-l", "-i", "-c", "run"]);
+            assert_eq!(
+                shell.login_interactive_args("run"),
+                ["-l", "-i", "-c", "run"]
+            );
         }
 
         /// The resolved shell must actually be runnable on this machine --

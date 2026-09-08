@@ -1068,7 +1068,10 @@ mod tests {
             if read < 0 {
                 let error = std::io::Error::last_os_error();
                 if error.kind() == std::io::ErrorKind::WouldBlock {
-                    assert!(std::time::Instant::now() < deadline, "master should hang up");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "master should hang up"
+                    );
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 }
@@ -1078,7 +1081,10 @@ mod tests {
                 );
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "master should hang up");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "master should hang up"
+            );
         }
     }
 }

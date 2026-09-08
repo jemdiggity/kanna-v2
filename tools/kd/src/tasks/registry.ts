@@ -109,6 +109,10 @@ import {
   getRustCacheStatus,
   installRustCache
 } from "../runtime/rust-cache";
+import {
+  buildHeadlessWorkerBinariesCommand,
+  buildHeadlessWorkerGateCommand,
+} from "../runtime/headless-worker";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -2845,6 +2849,20 @@ export const taskDefinitions = [
         env: context.env,
         runner: nodeCommandRunner
       });
+    },
+  },
+  {
+    id: "test.headless-worker",
+    description:
+      "Run the headless worker's exit gate: create, execute, durable input, completion, stage fork, close, plus server restart and daemon replacement.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const [buildCommand, buildArgs] = buildHeadlessWorkerBinariesCommand();
+      const built = await runBuiltCommand(buildCommand, buildArgs, context.repoRoot, context.env);
+      if (!built.ok) return built;
+      const [command, args] = buildHeadlessWorkerGateCommand();
+      return runBuiltCommand(command, args, context.repoRoot, context.env);
     },
   },
   {

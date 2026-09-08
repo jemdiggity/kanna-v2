@@ -9,6 +9,9 @@ independently:
 - a **PTY daemon** that outlives the app, so agent sessions survive restarts
   and upgrades
 - **`kanna-server`**, which owns SQLite and serves the local and LAN APIs
+- **`kanna-worker`**, the per-user supervisor that runs the daemon and the
+  server with no GUI — the Linux launcher, because the daemon's trust root is
+  its live direct parent and `systemd --user` cannot be one
 - **agent CLIs** (`claude`, `codex`, `copilot`, `opencode`, `agy`) spawned per
   task, each in its own worktree
 - a **mobile app** plus the **cloud services** (relay + Firebase) that let it
@@ -40,6 +43,7 @@ a reference below.
 | Versioning, staging/production ships, promotion, mobile OTA | `docs/dev/release.md` |
 | UI flows, close semantics, shortcuts, preferences | `docs/dev/product-behavior.md` |
 | PTY daemon contract — invariants, handoff, lifecycle | `crates/daemon/SPEC.md` |
+| Linux: what runs, what differs, how to drive it | `docs/2026-09-08-linux-phase1-headless-worker.md`, `docs/specs/linux-desktop-support.md` |
 | Server boundary and v1 LAN API surface | `docs/kanna-server-boundary.md` |
 | Mobile app, OTA operations | `apps/mobile/`, `docs/specs/mobile-ota-updates.md` |
 | Feature specs (merge master, task graph, QA dispatch, RCs) | `docs/specs/` |
@@ -310,7 +314,13 @@ database name and provides the disabled/DEV-E2E `DbHandle` facade.
 `kd` resolves the DB name from context: main instances use `kanna-v2.db`;
 worktrees auto-name theirs `kanna-wt-{worktree-dir}.db`. The dev build's Tauri
 identifier is `build.kanna`, so the default directory is
-`~/Library/Application Support/build.kanna/`.
+`~/Library/Application Support/build.kanna/` on macOS and
+`$XDG_DATA_HOME/build.kanna/` (else `~/.local/share/build.kanna/`) on Linux.
+That split lives in one place — `app_support_dir_for_home` in
+`crates/runtime-defaults`, mirrored by `kd` and matching `dirs::data_dir()`,
+which is how `kanna-server` reaches the same directory. Resolve paths through
+it rather than writing either literal: a disagreement here is a split brain,
+not a cosmetic difference.
 
 ## Working on the codebase
 

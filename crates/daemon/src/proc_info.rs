@@ -490,7 +490,7 @@ mod imp {
         if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
             return None;
         }
-        let inode = stat.st_ino as u64;
+        let inode = stat.st_ino;
         if inode == 0 {
             None
         } else {
@@ -675,9 +675,8 @@ mod imp {
         #[test]
         fn zombie_and_both_stopped_states_are_recognised() {
             let with_state = |state: &str| {
-                let stat = format!(
-                    "5 (x) {state} 1 5 5 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 42 0 0"
-                );
+                let stat =
+                    format!("5 (x) {state} 1 5 5 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 42 0 0");
                 parse_stat(5, &stat).expect("stat should parse")
             };
             assert!(with_state("Z").is_zombie);
@@ -699,7 +698,11 @@ mod imp {
             let me = std::process::id() as libc::pid_t;
 
             // We hold both ends, so we are our own peer in both directions.
-            assert!(pipe_end_belongs_to(read_end, me, super::super::PipeEnd::Read));
+            assert!(pipe_end_belongs_to(
+                read_end,
+                me,
+                super::super::PipeEnd::Read
+            ));
             assert!(pipe_end_belongs_to(
                 write_end,
                 me,
@@ -765,9 +768,7 @@ mod imp {
         fn socket_peer_pid_reports_this_process_over_a_socketpair() {
             let mut fds = [0 as libc::c_int; 2];
             assert_eq!(
-                unsafe {
-                    libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr())
-                },
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
                 0
             );
             assert_eq!(
@@ -1308,10 +1309,19 @@ mod tests {
             start: stable_live.start,
         };
         assert!(stop_verified(stable_target), "stable target must stop");
-        assert!(
-            process_info(stable_pid).is_some_and(|info| info.is_stopped),
-            "stable target should be stopped"
-        );
+        // `kill` returning is delivery, not observation: the reported state
+        // catches up a moment later, so poll rather than read once. The
+        // protocol's own guarantee is that a stopped process cannot exit,
+        // which this only has to confirm eventually.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !process_info(stable_pid).is_some_and(|info| info.is_stopped) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stable target should be stopped: {:?}",
+                process_info(stable_pid)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(signal_verified(stable_target, libc::SIGKILL));
         stable.wait().expect("stable reaped");
     }

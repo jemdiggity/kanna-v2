@@ -104,6 +104,12 @@ impl Options {
         self.data_dir.join("daemon.pid")
     }
 
+    /// The supervisor's own pid file. `stop-daemon` reads it to stop
+    /// supervision before stopping the daemon.
+    pub fn worker_pid_path(&self) -> PathBuf {
+        self.data_dir.join("worker.pid")
+    }
+
     pub fn lan_port(&self) -> u16 {
         self.lan_port
             .or_else(|| env_port("KANNA_MOBILE_SERVER_PORT"))
@@ -244,6 +250,9 @@ fn hostname() -> String {
     if !ok {
         return "Kanna Worker".to_string();
     }
+    // `c_char` is signed on x86-64 and unsigned on aarch64, so this cast is
+    // meaningful on one architecture and a no-op on the other.
+    #[allow(clippy::unnecessary_cast)]
     let bytes: Vec<u8> = buffer
         .iter()
         .take_while(|byte| **byte != 0)
@@ -433,7 +442,8 @@ mod tests {
     fn identity_is_generated_once_and_kept_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("kanna-worker-identity-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("kanna-worker-identity-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("worker-identity.json");

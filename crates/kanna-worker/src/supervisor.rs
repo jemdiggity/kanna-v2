@@ -52,11 +52,28 @@ pub async fn run(options: Options) -> Result<(), String> {
         options.lan_port()
     );
 
+    // The supervisor's own pid file, so `stop-daemon` can stop supervision
+    // before stopping the daemon. Without it, tearing the daemon down races
+    // this process's own "the daemon died, replace it" branch and loses.
+    let worker_pid_path = options.worker_pid_path();
+    std::fs::write(&worker_pid_path, format!("{}\n", std::process::id()))
+        .map_err(|error| format!("failed to write {}: {error}", worker_pid_path.display()))?;
+
     let mut daemon = spawn_daemon(&options, &daemon_bin, &server_bin).await?;
     let mut server = spawn_server(&options, &identity, &server_bin).await?;
     authorize_server(&options, server.pid).await?;
 
-    supervise(options, identity, daemon_bin, server_bin, &mut daemon, &mut server).await
+    let result = supervise(
+        &options,
+        identity,
+        daemon_bin,
+        server_bin,
+        &mut daemon,
+        &mut server,
+    )
+    .await;
+    let _ = std::fs::remove_file(&worker_pid_path);
+    result
 }
 
 /// A supervised child: the handle plus the pid we authorized it under.
@@ -77,7 +94,7 @@ struct Supervised {
 ///   surviving their operator's UI is the daemon's whole reason to exist.
 ///   `kanna-worker stop-daemon` is the explicit full teardown.
 async fn supervise(
-    options: Options,
+    options: &Options,
     identity: Identity,
     daemon_bin: PathBuf,
     server_bin: PathBuf,
@@ -93,13 +110,13 @@ async fn supervise(
         tokio::select! {
             _ = hangup.recv() => {
                 eprintln!("[worker] reload: spawning a replacement daemon");
-                match spawn_daemon(&options, &daemon_bin, &server_bin).await {
+                match spawn_daemon(options, &daemon_bin, &server_bin).await {
                     Ok(replacement) => {
                         // The old daemon exits once it has handed its sessions
                         // over; reap it so it does not linger as a zombie.
                         let _ = daemon.child.wait().await;
                         *daemon = replacement;
-                        if let Err(error) = authorize_server(&options, server.pid).await {
+                        if let Err(error) = authorize_server(options, server.pid).await {
                             eprintln!("[worker] could not authorize the server on the new daemon generation: {error}");
                         }
                     }
@@ -121,8 +138,8 @@ async fn supervise(
                 let delay = server_backoff.next();
                 eprintln!("[worker] kanna-server exited ({status}); restarting in {delay:?}");
                 tokio::time::sleep(delay).await;
-                *server = spawn_server(&options, &identity, &server_bin).await?;
-                authorize_server(&options, server.pid).await?;
+                *server = spawn_server(options, &identity, &server_bin).await?;
+                authorize_server(options, server.pid).await?;
                 server_backoff.reset();
             }
             status = daemon.child.wait() => {
@@ -134,14 +151,17 @@ async fn supervise(
                 if DaemonClient::connect(&options.daemon_socket_path()).await.is_ok() {
                     eprintln!("[worker] a successor daemon is already serving; adopting it");
                     daemon.child = spawn_placeholder().await?;
-                    if let Err(error) = authorize_server(&options, server.pid).await {
+                    if let Err(error) = authorize_server(options, server.pid).await {
                         eprintln!("[worker] could not authorize the server on the successor: {error}");
                     }
                     continue;
                 }
                 eprintln!("[worker] kanna-daemon exited ({status}) with nothing serving; respawning");
-                *daemon = spawn_daemon(&options, &daemon_bin, &server_bin).await?;
-                authorize_server(&options, server.pid).await?;
+                // A respawn that cannot succeed is fatal: looping here would
+                // hold the select and make this process deaf to the signal
+                // that would otherwise stop it.
+                *daemon = spawn_daemon(options, &daemon_bin, &server_bin).await?;
+                authorize_server(options, server.pid).await?;
             }
         }
     }
@@ -282,7 +302,10 @@ async fn spawn_server(
 
     wait_for_server(options).await?;
     adopt_desktop(options).await?;
-    eprintln!("[worker] kanna-server {pid} is serving on {}", options.api_base_url());
+    eprintln!(
+        "[worker] kanna-server {pid} is serving on {}",
+        options.api_base_url()
+    );
     Ok(Supervised { child, pid })
 }
 
@@ -315,9 +338,9 @@ async fn wait_for_server(options: &Options) -> Result<(), String> {
 async fn http_get_ok(url: &str) -> bool {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let Some((authority, path)) = url.strip_prefix("http://").and_then(|rest| {
+    let Some((authority, path)) = url.strip_prefix("http://").map(|rest| {
         let split = rest.find('/').unwrap_or(rest.len());
-        Some((&rest[..split], &rest[split..]))
+        (&rest[..split], &rest[split..])
     }) else {
         return false;
     };
@@ -379,14 +402,18 @@ async fn adopt_desktop(options: &Options) -> Result<(), String> {
 async fn authorize_server(options: &Options, server_pid: u32) -> Result<(), String> {
     let mut client = DaemonClient::connect(&options.daemon_socket_path()).await?;
     client
-        .send_command(&serde_json::json!({ "type": "AuthorizeServer", "pid": server_pid }).to_string())
+        .send_command(
+            &serde_json::json!({ "type": "AuthorizeServer", "pid": server_pid }).to_string(),
+        )
         .await?;
     let response = client.read_event().await?;
     let parsed: serde_json::Value = serde_json::from_str(&response)
         .map_err(|error| format!("failed to decode the daemon's reply: {error}"))?;
     match parsed.get("type").and_then(serde_json::Value::as_str) {
         Some("Ok") => Ok(()),
-        _ => Err(format!("daemon refused to authorize the server: {response}")),
+        _ => Err(format!(
+            "daemon refused to authorize the server: {response}"
+        )),
     }
 }
 
@@ -394,18 +421,21 @@ async fn authorize_server(options: &Options, server_pid: u32) -> Result<(), Stri
 /// nothing else in the worker does it, because a stopped supervisor is not a
 /// reason to kill an operator's agents.
 ///
-/// The daemon has no shutdown *command* -- terminating it is an act on a
-/// process, not a request on its protocol -- so the pid is taken from whoever
-/// is actually serving the socket rather than from the pid file, which a
-/// crashed generation can leave behind pointing at a recycled pid.
+/// Supervision is stopped **first**. A running supervisor treats a daemon
+/// that exits as one to replace, so stopping the daemon underneath it just
+/// produces another one; SIGTERM to the supervisor stops the server and
+/// leaves the daemon, which is exactly the state to tear down from.
+///
+/// The daemon itself has no shutdown *command* -- terminating it is an act on
+/// a process, not a request on its protocol -- so its pid comes from whoever
+/// is actually serving the socket rather than from a pid file, which a crashed
+/// generation can leave behind pointing at a recycled pid.
 pub async fn stop_daemon(options: &Options) -> Result<(), String> {
+    stop_supervisor(options).await;
     let socket_path = options.daemon_socket_path();
-    let client = DaemonClient::connect(&socket_path).await.map_err(|error| {
-        format!(
-            "no daemon is serving {}: {error}",
-            socket_path.display()
-        )
-    })?;
+    let client = DaemonClient::connect(&socket_path)
+        .await
+        .map_err(|error| format!("no daemon is serving {}: {error}", socket_path.display()))?;
     let pid = client.connected_pid();
     drop(client);
     if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
@@ -416,6 +446,31 @@ pub async fn stop_daemon(options: &Options) -> Result<(), String> {
     }
     eprintln!("[worker] asked daemon {pid} to stop");
     Ok(())
+}
+
+/// Ask a running supervisor for this data directory to stop supervising.
+///
+/// Best effort: there may not be one, and its SIGTERM path deliberately leaves
+/// the daemon running, so this only has to stop the respawns.
+async fn stop_supervisor(options: &Options) {
+    let path = options.worker_pid_path();
+    let Some(pid) = read_pid(&path) else {
+        return;
+    };
+    if pid == std::process::id() {
+        return;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
+        return;
+    }
+    eprintln!("[worker] asked supervisor {pid} to stop before tearing the daemon down");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 async fn stop_child(child: &mut Child) {

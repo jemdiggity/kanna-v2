@@ -1432,15 +1432,8 @@ mod tests {
         env.insert("TERM".to_string(), "dumb".to_string());
         let (shell, shell_args) = INTERACTIVE_SHELL;
         let shell_args: Vec<String> = shell_args.iter().map(|arg| arg.to_string()).collect();
-        let mut session = PtySession::spawn(
-            shell,
-            &shell_args,
-            "/tmp",
-            &env,
-            120,
-            32,
-        )
-        .expect("interactive shell spawn should succeed");
+        let mut session = PtySession::spawn(shell, &shell_args, "/tmp", &env, 120, 32)
+            .expect("interactive shell spawn should succeed");
         write_to_master(&session, b"sleep 300 & echo JOB_START $!\r");
         let output = read_pty_output_until(
             &session,

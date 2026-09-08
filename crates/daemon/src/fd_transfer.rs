@@ -188,10 +188,12 @@ fn collect_scm_rights_fds(msg: &libc::msghdr, expected: usize) -> io::Result<Vec
     let truncated = msg.msg_flags & libc::MSG_CTRUNC != 0;
     let control_start = msg.msg_control as usize;
     // `msg_controllen` is `socklen_t` on macOS and `size_t` on Linux, so this
-    // conversion is a cast on one platform and a no-op on the other. Either
+    // conversion widens on one platform and is a no-op on the other. Either
     // way a value that does not fit is treated as an empty control buffer,
     // which makes every control message below fail the bounds check.
-    let control_end = control_start + usize::try_from(msg.msg_controllen).unwrap_or(0);
+    #[allow(clippy::useless_conversion)]
+    let control_len = usize::try_from(msg.msg_controllen).unwrap_or(0);
+    let control_end = control_start + control_len;
     let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
     let fd_size = std::mem::size_of::<RawFd>();
 

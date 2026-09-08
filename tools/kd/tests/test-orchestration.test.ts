@@ -303,6 +303,7 @@ describe("shared vitest timeouts", () => {
     "services/firebase-functions",
     "services/relay",
     "tests/cli-contract",
+    "tests/headless-worker",
     "tests/remote-e2e",
     "tools/kd",
   ];

@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -1232,6 +1233,50 @@ impl DaemonHandle {
         }
     }
 
+    /// Best-effort teardown of every session this daemon still owns. Failure
+    /// is silent on purpose: the daemon may already be gone, which is exactly
+    /// what several of these fixtures arrange.
+    fn kill_live_sessions(&self) {
+        let Ok(stream) = UnixStream::connect(&self.socket_path) else {
+            return;
+        };
+        // Only if this handle's own daemon is still the one serving: a
+        // superseded handle is dropped while its successor holds the socket,
+        // and killing that successor's sessions would destroy the thing under
+        // test.
+        if kanna_daemon::proc_info::socket_peer_pid(stream.as_raw_fd())
+            != Some(self.child.id() as libc::pid_t)
+        {
+            return;
+        }
+        if stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+        {
+            return;
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        let mut conn = ClientConn {
+            reader: BufReader::new(clone),
+            writer: stream,
+        };
+        conn.send(&Cmd::List);
+        let Ok(Evt::SessionList { sessions }) = conn.recv_with_timeout(Duration::from_secs(5))
+        else {
+            return;
+        };
+        for session_id in sessions
+            .iter()
+            .filter_map(|session| session["session_id"].as_str())
+            .map(str::to_string)
+        {
+            conn.send(&Cmd::Kill { session_id });
+            let _ = conn.recv_with_timeout(Duration::from_secs(5));
+        }
+    }
+
     fn connect(&self) -> ClientConn {
         let stream = UnixStream::connect(&self.socket_path).expect("failed to connect to daemon");
         stream
@@ -1269,9 +1314,9 @@ fn daemon_fd_count(pid: u32) -> usize {
 
     #[cfg(target_os = "linux")]
     {
-        return std::fs::read_dir(format!("/proc/{pid}/fd"))
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
             .expect("should read daemon fd directory")
-            .count();
+            .count()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1368,6 +1413,18 @@ fn recovery_output_contains(command: &Value, marker: &[u8]) -> bool {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
+        // Ask the daemon to tear its sessions down before killing it.
+        //
+        // SIGKILL is what these fixtures want for the *daemon* -- several of
+        // them are about a daemon that died -- but a SIGKILLed daemon never
+        // runs its teardown sweep, so every session process it owned is
+        // orphaned to init. Some of this file's fixtures deliberately produce
+        // output as fast as a shell can, so an orphan is a spinning process
+        // holding a whole core; enough of them accumulate to starve the
+        // machine and make unrelated suites fail on timeouts. Going through
+        // `Kill` uses the daemon's own sweep, which is the only thing that
+        // reaches a descendant that left the process group.
+        self.kill_live_sessions();
         let _ = self.child.kill();
         let _ = self.child.wait();
         // Clean up temp dir
@@ -3573,10 +3630,8 @@ fn natural_exit_finalization_precedes_same_id_replacement_creation() {
     let observed = if snapshot.vt.contains("NEW_NATURAL_INCARNATION") {
         snapshot.vt
     } else {
-        String::from_utf8_lossy(
-            &attached.collect_output_until_contains("NEW_NATURAL_INCARNATION"),
-        )
-        .into_owned()
+        String::from_utf8_lossy(&attached.collect_output_until_contains("NEW_NATURAL_INCARNATION"))
+            .into_owned()
     };
     assert!(
         observed.contains("NEW_NATURAL_INCARNATION"),
@@ -4124,8 +4179,8 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
         session_id: session_id.to_string(),
         data: b"HEALTHY_MARKER\n".to_vec(),
     });
-    let output = healthy
-        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", flood_ceiling);
+    let output =
+        healthy.collect_output_until_contains_with_timeout("HEALTHY_MARKER", flood_ceiling);
     let output = String::from_utf8_lossy(&output);
     let marker = output
         .find("HEALTHY_MARKER")
@@ -4277,12 +4332,18 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
 
     // The healthy subscriber observes the end of the flood promptly while the
     // stalled subscriber's backlog overflows its byte budget.
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", flood_delivery_ceiling(Duration::from_secs(5)));
+    healthy.wait_for_content_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_secs(5)),
+    );
 
     // The lagging subscriber is not disconnected: once it resumes reading and
     // drains its bounded backlog, the daemon resynchronizes it in place with
     // a fresh authoritative snapshot that contains the content it missed.
-    stalled.wait_for_content_with_timeout("FLOOD_DONE", flood_delivery_ceiling(Duration::from_secs(15)));
+    stalled.wait_for_content_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_secs(15)),
+    );
 
     // After the resync the recovered subscriber streams live output again,
     // and the session stayed healthy for everyone.
@@ -4347,7 +4408,10 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
 
     std::fs::write(dir.join("go"), b"go").unwrap();
 
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", flood_delivery_ceiling(Duration::from_secs(5)));
+    healthy.wait_for_content_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_secs(5)),
+    );
     wait_for_daemon_log(
         &daemon,
         "stage=observer_write event=lag",

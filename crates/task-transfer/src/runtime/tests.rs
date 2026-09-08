@@ -414,22 +414,18 @@ fn from_env_uses_runtime_default_daemon_dir_inside_worktree() {
         config.daemon_dir,
         Some(kanna_runtime_defaults::daemon_dir_for_current_runtime())
     );
+    // Resolved, not spelled out: the application-data root is
+    // `~/Library/Application Support` on macOS and the XDG data directory on
+    // Linux, and this asserts the layout below it rather than one platform's.
     assert_eq!(
         config.db_path,
-        Some(
-            home.join("Library")
-                .join("Application Support")
-                .join("build.kanna")
-                .join("kanna-v2.db")
-        )
+        Some(kanna_runtime_defaults::canonical_desktop_db_path_for_home(
+            &home
+        ))
     );
     assert_eq!(
         config.registry_dir,
-        home.join("Library")
-            .join("Application Support")
-            .join("build.kanna")
-            .join("transfer")
-            .join("registry")
+        kanna_runtime_defaults::default_transfer_registry_dir_for_home(&home)
     );
 
     let _ = std::fs::remove_dir_all(home);
@@ -458,22 +454,18 @@ fn from_env_uses_runtime_default_daemon_dir_outside_worktree() {
         config.daemon_dir,
         Some(kanna_runtime_defaults::daemon_dir_for_current_runtime())
     );
+    // Resolved, not spelled out: the application-data root is
+    // `~/Library/Application Support` on macOS and the XDG data directory on
+    // Linux, and this asserts the layout below it rather than one platform's.
     assert_eq!(
         config.db_path,
-        Some(
-            home.join("Library")
-                .join("Application Support")
-                .join("build.kanna")
-                .join("kanna-v2.db")
-        )
+        Some(kanna_runtime_defaults::canonical_desktop_db_path_for_home(
+            &home
+        ))
     );
     assert_eq!(
         config.registry_dir,
-        home.join("Library")
-            .join("Application Support")
-            .join("build.kanna")
-            .join("transfer")
-            .join("registry")
+        kanna_runtime_defaults::default_transfer_registry_dir_for_home(&home)
     );
 
     let _ = std::fs::remove_dir_all(home);

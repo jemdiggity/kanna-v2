@@ -1519,7 +1519,12 @@ fn fingerprint_entry(
     }
 }
 
+/// The widths of these fields are the platform's, not ours: `st_dev` and
+/// `st_mode` are 32-bit on macOS and 64-bit and 32-bit respectively on Linux,
+/// so a cast that is widening on one is a no-op on the other. The fingerprint
+/// wants a fixed width regardless.
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn fingerprint_stat(hasher: &mut Sha256, metadata: &libc::stat) {
     hasher.update((metadata.st_dev as u64).to_le_bytes());
     hasher.update(metadata.st_ino.to_le_bytes());

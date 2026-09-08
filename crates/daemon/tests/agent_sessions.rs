@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand};
@@ -107,8 +108,70 @@ impl DaemonHandle {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
+        // Kill the sessions through the daemon before killing the daemon. A
+        // SIGKILLed daemon never runs its teardown sweep, so every agent it
+        // owned is orphaned to init and outlives the run -- and these fixtures
+        // include shells that loop, which then compete with the rest of the
+        // suite for the machine.
+        self.kill_live_sessions();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl DaemonHandle {
+    /// Best-effort teardown. Silent on failure: several fixtures leave the
+    /// daemon already gone, which is the point of them.
+    fn kill_live_sessions(&self) {
+        let Ok(stream) = UnixStream::connect(&self.socket_path) else {
+            return;
+        };
+        // Only tear down sessions if this handle's own daemon is the one
+        // serving. A superseded handle is dropped while its *successor* holds
+        // the socket -- which is exactly what the handoff fixtures do -- and
+        // killing that successor's sessions would destroy the thing under
+        // test.
+        if kanna_daemon::proc_info::socket_peer_pid(stream.as_raw_fd())
+            != Some(self.child.id() as libc::pid_t)
+        {
+            return;
+        }
+        if stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+        {
+            return;
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        let mut conn = ClientConn {
+            reader: BufReader::new(clone),
+            writer: stream,
+        };
+        conn.send(&Command::List);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sessions = loop {
+            if Instant::now() >= deadline {
+                return;
+            }
+            let mut line = String::new();
+            if conn.reader.read_line(&mut line).is_err() {
+                return;
+            }
+            match serde_json::from_str::<Event>(line.trim()) {
+                Ok(Event::SessionList { sessions }) => break sessions,
+                Ok(_) => continue,
+                Err(_) => return,
+            }
+        };
+        for session_id in sessions.iter().map(|session| session.session_id.clone()) {
+            conn.send(&Command::Kill { session_id });
+        }
+        // One drain pass so the kills are actually written and answered
+        // before the daemon is torn down under them.
+        let mut line = String::new();
+        let _ = conn.reader.read_line(&mut line);
     }
 }
 
@@ -317,19 +380,24 @@ done
 /// stdin protocol, so the daemon interrupts it with SIGINT (the path that used
 /// to be misreported as a crash).
 ///
-/// The blocker deliberately calls out to `sleep` rather than spinning on
-/// shell builtins. Both shells defer a pending trap until the foreground
-/// command finishes, which a short sleep bounds to a fraction of a second --
-/// but `dash`, which is `/bin/sh` on Debian derivatives, does not check
-/// pending traps *at all* between pure builtins, so `while :; do :; done`
-/// there is an uninterruptible loop that ignores the SIGINT, burns a whole
-/// core, and outlives the run when the harness kills its daemon.
-const CODEX_SLEEPER_AGENT: &str = r#"#!/bin/sh
-trap 'exit 130' INT TERM
-echo '{"type":"thread.started","thread_id":"fake-thread"}'
-echo '{"type":"turn.started"}'
-echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"interim answer"}}'
-while :; do sleep 0.2; done
+/// Not a shell script, deliberately. The daemon ignores SIGINT (and SIGHUP and
+/// SIGQUIT) so that a Ctrl-C aimed at whoever launched it cannot take the
+/// sessions down, and an *ignored* disposition survives `exec` into the child.
+/// POSIX then forbids a shell from trapping a signal that was ignored when it
+/// started, so `trap 'exit 130' INT` in `/bin/sh` is silently a no-op here and
+/// the fixture never responds to the interrupt -- measured on Linux as
+/// `SigIgn: …7` on the child, with only the TERM trap installed. A real agent
+/// CLI is not a shell: it calls `sigaction` itself, which overrides an
+/// inherited ignore. This fixture does the same, through perl, so it exercises
+/// the interrupt path a real provider actually takes.
+const CODEX_SLEEPER_AGENT: &str = r#"#!/usr/bin/perl
+$| = 1;
+$SIG{INT} = sub { exit 130 };
+$SIG{TERM} = sub { exit 130 };
+print qq({"type":"thread.started","thread_id":"fake-thread"}\n);
+print qq({"type":"turn.started"}\n);
+print qq({"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"interim answer"}}\n);
+sleep 1 while 1;
 "#;
 
 /// Fake persistent agent that emits an interim answer, then crashes before a

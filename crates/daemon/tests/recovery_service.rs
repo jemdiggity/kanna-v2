@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kanna_daemon::protocol::ErrorCode;
 use kanna_daemon::recovery::{RecoveryManager, SeededRecoverySnapshot};
@@ -210,6 +211,9 @@ enum Cmd {
         snapshot: SeedSnapshotPayload,
     },
     List,
+    Kill {
+        session_id: String,
+    },
 }
 
 #[allow(dead_code)]
@@ -359,6 +363,60 @@ impl DaemonHandle {
         }
     }
 
+    /// Best-effort teardown of every session this daemon still owns, before
+    /// the daemon is killed under them. Silent on failure: some fixtures
+    /// arrange for the daemon to be gone already.
+    fn kill_live_sessions(&self) {
+        let Ok(stream) = UnixStream::connect(&self.socket_path) else {
+            return;
+        };
+        // Only if this handle's own daemon is still the one serving: a
+        // superseded handle is dropped while its successor holds the socket,
+        // and killing that successor's sessions would destroy the thing under
+        // test.
+        if kanna_daemon::proc_info::socket_peer_pid(stream.as_raw_fd())
+            != Some(self.child.id() as libc::pid_t)
+        {
+            return;
+        }
+        if stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+        {
+            return;
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        let mut conn = ClientConn {
+            reader: BufReader::new(clone),
+            writer: stream,
+        };
+        conn.send(&Cmd::List);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sessions = loop {
+            if Instant::now() >= deadline {
+                return;
+            }
+            let mut line = String::new();
+            if conn.reader.read_line(&mut line).is_err() {
+                return;
+            }
+            match serde_json::from_str::<Evt>(line.trim()) {
+                Ok(Evt::SessionList { sessions }) => break sessions,
+                Ok(_) => continue,
+                Err(_) => return,
+            }
+        };
+        for entry in sessions {
+            conn.send(&Cmd::Kill {
+                session_id: entry.session_id,
+            });
+        }
+        let mut line = String::new();
+        let _ = conn.reader.read_line(&mut line);
+    }
+
     fn journal_path(&self, session_id: &str) -> PathBuf {
         self._dir
             .join("agent-journals")
@@ -380,6 +438,9 @@ impl DaemonHandle {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
+        // See `reconnect.rs`: a SIGKILLed daemon runs no teardown sweep, so
+        // its session processes are orphaned to init and outlive the run.
+        self.kill_live_sessions();
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self._dir);

@@ -56,7 +56,9 @@ fn default_unit_path() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| "HOME is not set, so the user unit directory cannot be resolved".to_string())?;
+        .ok_or_else(|| {
+            "HOME is not set, so the user unit directory cannot be resolved".to_string()
+        })?;
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())

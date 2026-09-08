@@ -307,6 +307,12 @@ async fn start_server(
         .env("HOME", &home)
         .env("ZDOTDIR", &home)
         .env("XDG_DATA_HOME", data_root)
+        // `XDG_RUNTIME_DIR` must survive `env_clear()`: this harness computes
+        // the daemon socket path in-process, and on Linux that path lives in
+        // the per-user runtime directory. A server that cannot see the
+        // variable looks for the socket in `/tmp` instead, never reaches the
+        // fake daemon, and so never opens its HTTP listeners.
+        .envs(std::env::var_os("XDG_RUNTIME_DIR").map(|dir| ("XDG_RUNTIME_DIR", dir)))
         .env("PATH", runtime_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
