@@ -1462,6 +1462,28 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
 
+    // The announced budget is the one the revision leaves behind. Reporting
+    // the pre-reset count made a human revision claim a spent budget
+    // (`rounds == limit`) beside `exhausted: false`.
+    let head = db.latest_task_event_seq().unwrap();
+    let revision_events = db
+        .list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec!["budget-1".to_string()]),
+            0,
+            head,
+            100,
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_type == "task.revision_requested")
+        .map(|event| event.payload)
+        .collect::<Vec<_>>();
+    assert_eq!(revision_events.len(), 1, "{revision_events:?}");
+    assert_eq!(revision_events[0]["origin"], "human");
+    assert_eq!(revision_events[0]["rounds"], 0);
+    assert_eq!(revision_events[0]["limit"], 1);
+    assert_eq!(revision_events[0]["exhausted"], false);
+
     daemon_server.await.unwrap();
     drop(db);
     cleanup_revision_budget_fixture(&fixture);

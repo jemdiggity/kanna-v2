@@ -60,18 +60,32 @@ describe("keyboard shortcuts", () => {
     timeoutMs = 3000,
   ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    let lastSelection: { repoId: string | null; itemId: string | null } | null = null;
+    let lastSelection: { repoId: string | null; itemId: string | null; taskId: string | null } | null = null;
     while (Date.now() < deadline) {
-      lastSelection = await client.executeSync<{ repoId: string | null; itemId: string | null }>(
+      // `selectedItemId` is a sidebar SLOT id and callers here name both slots
+      // and tasks, so report each and accept either. Slots are resolved through
+      // the rendered sidebar items, which include remote/cloud rows the
+      // local-only `taskUiSlots` does not.
+      lastSelection = await client.executeSync<{
+        repoId: string | null;
+        itemId: string | null;
+        taskId: string | null;
+      }>(
         `const ctx = ${CTX_SCRIPT};
          const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+         const selectedSlotId = unwrap(ctx.store?.selectedItemId ?? ctx.selectedItemId) ?? null;
+         const items = Array.from(unwrap(ctx.sidebarItems) ?? []);
+         const selectedItem = items.find((item) => item.slot_id === selectedSlotId);
          return {
            repoId: unwrap(ctx.store?.selectedRepoId ?? ctx.selectedRepoId) ?? null,
-           itemId: unwrap(ctx.store?.selectedItemId ?? ctx.selectedItemId) ?? null,
+           itemId: selectedSlotId,
+           taskId: selectedItem?.task_id ?? null,
          };`,
       );
       const repoMatches = expected.repoId === undefined || lastSelection.repoId === expected.repoId;
-      const itemMatches = expected.itemId === undefined || lastSelection.itemId === expected.itemId;
+      const itemMatches = expected.itemId === undefined
+        || lastSelection.itemId === expected.itemId
+        || lastSelection.taskId === expected.itemId;
       if (repoMatches && itemMatches) return;
       await sleep(100);
     }
@@ -735,10 +749,12 @@ describe("keyboard shortcuts", () => {
 
     try {
       await injectCloudSnapshot(remoteSnapshot);
+      // Sidebar rows are slots, not task rows: `SidebarTaskItem` is
+      // `Omit<PipelineItem, "id">` plus `slot_id`/`task_id`.
       const projectedItemIds = await client.executeSync<string[]>(
         `const ctx = ${CTX_SCRIPT};
          const unwrap = (value) => value?.__v_isRef ? value.value : value;
-         return Array.from(unwrap(ctx.sidebarItems) ?? []).map((item) => item.id);`,
+         return Array.from(unwrap(ctx.sidebarItems) ?? []).map((item) => item.task_id ?? item.slot_id);`,
       );
       expect(projectedItemIds).toContain(remoteTaskId);
       const selectResult = await client.executeAsync<string>(
@@ -776,11 +792,16 @@ describe("keyboard shortcuts", () => {
         `const ctx = ${CTX_SCRIPT};
          const unwrap = (value) => value?.__v_isRef ? value.value : value;
          const remembered = unwrap(ctx.store?.lastSelectedItemByRepo) ?? {};
+         const items = Array.from(unwrap(ctx.sidebarItems) ?? []);
+         // Selection and per-repo memory are recorded by SLOT id; this test
+         // names tasks, so resolve each slot back to the task it holds.
+         const taskIdForSlot = (slotId) =>
+           items.find((item) => item.slot_id === slotId)?.task_id ?? slotId ?? null;
          const mainPanelItem = unwrap(ctx.mainPanelItem);
          return {
            repoId: unwrap(ctx.store?.selectedRepoId) ?? null,
-           itemId: unwrap(ctx.store?.selectedItemId) ?? null,
-           rememberedItemId: remembered[${JSON.stringify(remoteRepoId)}] ?? null,
+           itemId: taskIdForSlot(unwrap(ctx.store?.selectedItemId) ?? null),
+           rememberedItemId: taskIdForSlot(remembered[${JSON.stringify(remoteRepoId)}] ?? null),
            mainPanelItemId: mainPanelItem?.id ?? null,
            mainPanelIsCloudTask: Boolean(unwrap(ctx.mainPanelIsCloudTask)),
            cloudTerminalVisible: Boolean(document.querySelector(".cloud-terminal-shell")),

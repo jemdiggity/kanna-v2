@@ -28,7 +28,7 @@ describe("action bar", () => {
        db.execute("INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
          [id, "${repoId}", "Say OK", "in progress", "agent"])
          .then(function() { return ctx.loadItems("${repoId}"); })
-         .then(function() { ctx.handleSelectItem(id); return ctx.refreshAllItems(); })
+         .then(function() { ctx.selectSidebarItemById(id); return ctx.refreshAllItems(); })
          .then(function() { cb("ok"); })
          .catch(function(e) { cb("err:" + e); });`
     );

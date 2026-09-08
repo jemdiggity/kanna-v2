@@ -121,9 +121,10 @@ describe("terminal recovery", () => {
     await selectTask(client, taskId);
     await waitForTerminalEndMarker(client, taskId, "RESPAWN_READY", "^RESPAWN_READY$", 30_000);
 
-    expect(await findRespawnToasts(client)).toContain(
-      "The previous terminal session could not be reattached. A new session was started.",
-    );
+    // This is a clean reattach, not the missing-session respawn fallback:
+    // `reconcileStaleExitLatch` clears the latch and attaches to the live
+    // respawned PTY, so no session was started and the warning would be false.
+    expect(await findRespawnToasts(client)).toEqual([]);
   });
 
   // Skipped during the KSP migration: this fixture asserts the retired Tauri
@@ -400,8 +401,11 @@ async function waitForSelectedItem(
   const deadline = Date.now() + timeoutMs;
   let latest: unknown = null;
   while (Date.now() < deadline) {
+    // `selectedItemId` is a sidebar SLOT id — for a task created through the
+    // app it stays `create:<uuid>` after the row lands. `selectedTaskId` is
+    // the durable task the selected slot resolves to.
     latest = await client.executeSync(
-      "return window.__KANNA_E2E__.setupState.store.selectedItemId ?? null;",
+      "return window.__KANNA_E2E__.setupState.store.selectedTaskId ?? null;",
     );
     if (latest === taskId) return;
     await sleep(100);

@@ -11,9 +11,18 @@ Every change should pass this before it is considered done:
 It composes the individual lanes, which you can still run one at a time:
 
 ```sh
-pnpm test        # turbo-run JS/TS suites across the workspace
-./kd test rust   # strict Rust clippy, then workspace tests
+pnpm test                  # turbo-run JS/TS suites across the workspace
+./kd test rust             # strict Rust clippy, then workspace tests
+./kd test desktop-mock-e2e # the desktop mock E2E suite
 ```
+
+The mock E2E lane drives the real app through WebDriver, so a bare `vitest run`
+cannot collect it — `apps/desktop/vitest.config.ts` excludes
+`tests/e2e/mock/**`, which means it never ran inside `pnpm test`. Left out of
+every gate it rotted silently, so it is now the last lane of `./kd test all`.
+It builds the debug app and takes tens of minutes; run it alone with the
+command above while iterating, or name individual files:
+`pnpm --dir apps/desktop test:e2e mock/task-lifecycle.test.ts mock/stage-advance.test.ts`.
 
 The Rust lane runs `cargo clippy --workspace --all-targets -- -D warnings`
 after building its prerequisites and before executing test binaries. Warnings
@@ -33,7 +42,7 @@ Plus the static checks: `pnpm exec tsc --noEmit`,
 | CLI contract (live) | `tests/cli-contract/tests/live/` | `pnpm test:agent-cli-compat` | installed + authenticated agent CLIs; consumes quota. The TUI-driven pins also need `/usr/bin/python3` (it hosts the PTY — see `helpers/pty.ts`). Everything skips, rather than fails, when a CLI or the PTY is unavailable |
 | TUI fidelity | `tests/tui-fidelity/` | `pnpm test:tui-fidelity` | live/process-heavy |
 | Remote E2E | `tests/remote-e2e/` | `pnpm test:remote-e2e` | see `docs/2026-07-09-remote-e2e-layer-c-d-runbook.md` |
-| Desktop E2E (mock) | `apps/desktop/tests/e2e/mock/` | `cd apps/desktop && pnpm test:e2e` | macOS debug build |
+| Desktop E2E (mock) | `apps/desktop/tests/e2e/mock/` | `./kd test desktop-mock-e2e` | macOS debug build |
 | Desktop real E2E (unattended) | `apps/desktop/tests/e2e/real/` | `./kd test desktop-e2e` | macOS; OpenCode free model configured by the runner |
 | Desktop real E2E (operator) | files listed in `apps/desktop/tests/e2e/realTiers.ts` | `./kd test desktop-e2e-operator` | credentials and/or an explicit human operator; see below |
 | Claude-CLI Rust integration | `apps/desktop/src-tauri/tests/` | `cargo test --test agent_cli_integration -- --ignored --nocapture` | `claude` in PATH |

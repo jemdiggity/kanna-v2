@@ -1,4 +1,4 @@
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
@@ -321,6 +321,61 @@ describe("createSelectionApi", () => {
     });
   });
 
+  it("re-persists the selection when the selected creating slot names its task", async () => {
+    // Selecting a task the moment it is created persists nothing durable, so
+    // without this the choice is gone on the next reload.
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.selectedRepoId.value = "repo-1";
+    state.taskUiSlots.value = [
+      buildCreatingTaskUiSlot({
+        slotId: "create:slot-1",
+        repoId: "repo-1",
+        prompt: "Ship it",
+        agentType: "pty",
+        requestedAgentProviders: "claude",
+      }),
+    ];
+
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {
+        windowWorkspace: {
+          persistSelection,
+        },
+      } as never,
+    );
+    const selection = createSelectionApi(context);
+
+    await selection.selectItem("create:slot-1");
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
+    });
+
+    state.taskUiSlots.value = acknowledgeTaskUiSlot(
+      state.taskUiSlots.value,
+      "create:slot-1",
+      "durable-1",
+    );
+    await nextTick();
+    await Promise.resolve();
+
+    expect(persistSelection).toHaveBeenLastCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: "durable-1",
+    });
+  });
+
   it("serializes captured selection payloads so acknowledgement persists after the creating selection", async () => {
     const state = createStoreState();
     state.db.value = createDb();
@@ -378,7 +433,11 @@ describe("createSelectionApi", () => {
       selectedRepoId: "repo-1",
       selectedItemId: "durable-1",
     });
-    expect(persistSelection).toHaveBeenCalledTimes(2);
+    // The slot naming its task also re-persists on its own, so every write
+    // after the creating one carries the same durable payload.
+    for (const [payload] of persistSelection.mock.calls.slice(1)) {
+      expect(payload).toEqual({ selectedRepoId: "repo-1", selectedItemId: "durable-1" });
+    }
   });
 
   it("normalizes a durable task selection to its pre-existing stable slot ID", async () => {
@@ -813,6 +872,90 @@ describe("createSelectionApi", () => {
     expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
     expect(reloadSnapshot).toHaveBeenCalled();
     expect(invalidateSharedData).toHaveBeenCalledWith("taskActivity");
+  });
+
+  it("marks an unread task read when its timestamp is SQLite's zone-less UTC", async () => {
+    // The server writes `datetime('now')` — `YYYY-MM-DD HH:MM:SS`, UTC with no
+    // zone designator. Read as local time it lands hours in the future west of
+    // UTC, which made the "don't mark a just-unread task read" guard match
+    // forever and selecting an unread task never marked it read.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-29T12:00:00.000Z"));
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [
+      createItem({
+        activity: "unread",
+        activity_changed_at: "2026-04-29 11:50:00",
+      }),
+    ];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {
+        reloadSnapshot: vi.fn(async () => {}),
+        windowWorkspace: {
+          persistSelection: vi.fn(async () => {}),
+          invalidateSharedData: vi.fn(async () => {}),
+        },
+      } as never,
+    );
+
+    const api = createSelectionApi(context);
+    await api.selectItem("task-1");
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(mockState.markDesktopTaskReadMock).toHaveBeenCalledWith("task-1");
+  });
+
+  it("leaves a task that became unread after the selection alone", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-29T12:00:00.000Z"));
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [
+      createItem({
+        activity: "unread",
+        activity_changed_at: "2026-04-29 12:00:00.500",
+      }),
+    ];
+    state.taskUiSlots.value = reconcileTaskUiSlots([], state.items.value);
+    state.selectedRepoId.value = "repo-1";
+
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {
+        reloadSnapshot: vi.fn(async () => {}),
+        windowWorkspace: {
+          persistSelection: vi.fn(async () => {}),
+          invalidateSharedData: vi.fn(async () => {}),
+        },
+      } as never,
+    );
+
+    const api = createSelectionApi(context);
+    await api.selectItem("task-1");
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(mockState.markDesktopTaskReadMock).not.toHaveBeenCalled();
   });
 
   it("moves the selected repo to the selected item's repo", async () => {

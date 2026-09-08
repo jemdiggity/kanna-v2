@@ -38,7 +38,7 @@
  *   injects snapshots through the App.vue setupState refs.
  */
 import { join } from "node:path";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -46,7 +46,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
-import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { cleanupFixtureRepos, createFixtureRepo, publishFixtureChanges } from "../helpers/fixture-repo";
 import { advanceStageWithShortcut, pressAdvanceStageShortcut } from "../helpers/stageAdvance";
 import { resolveAppKannaServer, type AppKannaServer } from "../helpers/kannaServer";
 import { localProcessFetch } from "@kanna/local-process-fetch";
@@ -151,32 +151,47 @@ async function countRepoTasks(client: WebDriverClient, repoId: string): Promise<
   return rows[0]?.task_count ?? 0;
 }
 
+/**
+ * Make a directly-seeded task row visible to the app.
+ *
+ * `store.items` is a computed projection of the server snapshot, and the
+ * sidebar slots that selection resolves against are derived from that same
+ * snapshot — so splicing the seeded row into the array the computed returned
+ * changed nothing, and `store.selectItem` found no slot and returned without
+ * moving the selection. Re-read the snapshot through the path the app uses.
+ */
 async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promise<void> {
   const rows = (await queryDb(
     client,
-    "SELECT * FROM pipeline_item WHERE id = ?",
+    "SELECT id FROM pipeline_item WHERE id = ?",
     [taskId],
-  )) as Array<Record<string, unknown>>;
-  const item = rows[0];
-  if (!item) {
+  )) as Array<{ id: string }>;
+  if (!rows[0]) {
     throw new Error(`seeded task ${taskId} was not found`);
   }
 
-  const result = await client.executeSync<string>(
-    `const item = ${JSON.stringify(item)};
-     const ctx = window.__KANNA_E2E__.setupState;
-     const items = ctx.store?.items?.value ?? ctx.store?.items;
-     if (!Array.isArray(items)) return "items-unavailable";
-     const index = items.findIndex((candidate) => candidate.id === item.id);
-     if (index >= 0) items.splice(index, 1, item);
-     else items.push(item);
-     return "ok";`,
-  );
-  if (result !== "ok") {
-    throw new Error(`failed to hydrate store item: ${result}`);
+  const refreshResult = await callVueMethod(client, "refreshAllItems");
+  if (isVueCallError(refreshResult)) {
+    throw new Error(`failed to refresh items for ${taskId}: ${refreshResult.__error}`);
   }
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const known = await client.executeSync<boolean>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+       const slots = Array.from(unwrap(ctx.store?.taskUiSlots) ?? []);
+       return slots.some((slot) => slot.task_id === ${JSON.stringify(taskId)});`,
+    );
+    if (known) return;
+    await sleep(100);
+  }
+  throw new Error(`seeded task ${taskId} never reached the app's sidebar slots`);
 }
 
+// `selectedItemId` is a sidebar SLOT id, which for an app-created task stays
+// `create:<uuid>` after the row lands; `selectedTaskId` is the durable task the
+// selected slot resolves to, which is what these assertions mean.
 async function waitForSelectedTaskId(
   client: WebDriverClient,
   expectedTaskId: string | null,
@@ -185,7 +200,7 @@ async function waitForSelectedTaskId(
   const deadline = Date.now() + timeoutMs;
   let lastSelectedTaskId: unknown = undefined;
   while (Date.now() < deadline) {
-    const selectedTaskId = await getVueState(client, "selectedItemId");
+    const selectedTaskId = await getVueState(client, "selectedTaskId");
     lastSelectedTaskId = selectedTaskId;
     if (selectedTaskId === expectedTaskId) return;
     await sleep(100);
@@ -201,7 +216,7 @@ async function waitForSelectedTaskNotId(
   const deadline = Date.now() + timeoutMs;
   let lastSelectedTaskId: unknown = undefined;
   while (Date.now() < deadline) {
-    const selectedTaskId = await getVueState(client, "selectedItemId");
+    const selectedTaskId = await getVueState(client, "selectedTaskId");
     lastSelectedTaskId = selectedTaskId;
     if (selectedTaskId !== taskId) return;
     await sleep(100);
@@ -344,6 +359,17 @@ describe("stage advance", () => {
     await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "revision-e2e"), { recursive: true });
     await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
+    // The server resolves the provider executable itself and hands the daemon
+    // an absolute path, so a `PATH` export inside a stage environment's setup
+    // cannot redirect the spawn — the repo's workspace search path is what
+    // puts this fixture's fake `codex` in front of the real CLI.
+    await writeFile(
+      join(kannaDir, "config.json"),
+      JSON.stringify({
+        setup: [],
+        workspace: { path: { prepend: [".kanna/fake-bin"] } },
+      }),
+    );
     await writeFile(
       join(kannaDir, "workflows", `${TWO_STAGE_WORKFLOW}.json`),
       JSON.stringify({
@@ -401,14 +427,18 @@ describe("stage advance", () => {
       join(kannaDir, "fake-bin", "codex"),
       [
         "#!/bin/sh",
+        // Answer the version probe the way the real CLI does; recording it
+        // would overwrite the launch argv this test reads back.
+        "case \"$1\" in --version) printf 'codex-cli 0.0.0-e2e\\n'; exit 0;; esac",
         "mkdir -p .kanna",
         "printf '%s\\n' \"$@\" > .kanna/revision-codex-args.txt",
         "",
       ].join("\n"),
     );
     await chmod(join(kannaDir, "fake-bin", "codex"), 0o755);
-    await git(testRepoPath, ["add", ".kanna"]);
-    await git(testRepoPath, ["commit", "-m", "test: add kanna stage fixtures"]);
+    // Definitions resolve from the origin snapshot, not the working tree, so
+    // committed-but-unpushed workflow files are invisible to the server.
+    await publishFixtureChanges(testRepoPath, "test: add kanna stage fixtures");
 
     repoId = await importTestRepo(client, testRepoPath, "stage-advance-test");
   });
@@ -501,7 +531,7 @@ describe("stage advance", () => {
 
     // Durable advance keeps the user's selection on the same (still-open) task.
     await sleep(500);
-    expect(await getVueState(client, "selectedItemId")).toBe(taskId);
+    expect(await getVueState(client, "selectedTaskId")).toBe(taskId);
     const sidebarText = await client.executeSync<string>(
       `return document.querySelector(".sidebar")?.textContent || "";`,
     );
@@ -628,7 +658,7 @@ describe("stage advance", () => {
     // nothing closed, so the user's chosen task stays selected.
     await emitExternalSharedInvalidation(client, "completeStage");
     await sleep(500);
-    expect(await getVueState(client, "selectedItemId")).toBe(selectedTaskId);
+    expect(await getVueState(client, "selectedTaskId")).toBe(selectedTaskId);
   });
 
   it("reruns the current stage on the same task", async () => {
@@ -746,7 +776,29 @@ describe("stage advance", () => {
       ".kanna",
       "revision-codex-args.txt",
     );
-    await waitForFile(capturedArgsPath, 20_000);
+    await waitForFile(capturedArgsPath, 60_000).catch(async (error: unknown) => {
+      // The fake `codex` writes this file from its own cwd, so a miss means
+      // either the fork did not carry `.kanna/fake-bin` or the run started
+      // somewhere else. Name both before failing.
+      const forkRoot = join(testRepoPath, ".kanna-worktrees", row.branch as string);
+      const [forkFakeBin, runs] = await Promise.all([
+        readdir(join(forkRoot, ".kanna", "fake-bin")).catch((listError: unknown) =>
+          [`<${listError instanceof Error ? listError.message : String(listError)}>`]),
+        queryDb(
+          client,
+          "SELECT id, stage, status, cwd FROM stage_run WHERE task_id = ? ORDER BY started_at, id",
+          [taskId],
+        ),
+      ]);
+      const sessions = await tauriInvoke(client, "list_sessions").catch(
+        (listError: unknown) => ({ __error: String(listError) }),
+      );
+      const forkRootEntries = await readdir(forkRoot).catch((listError: unknown) =>
+        [`<${listError instanceof Error ? listError.message : String(listError)}>`]);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; fork fake-bin: ${JSON.stringify(forkFakeBin)}; fork root: ${JSON.stringify(forkRootEntries)}; stage runs: ${JSON.stringify(runs)}; sessions: ${JSON.stringify(sessions)}`,
+      );
+    });
     const capturedArgs = await readFile(capturedArgsPath, "utf8");
     expect(capturedArgs).toContain("--yolo\n");
     expect(capturedArgs).toContain("Implement revision:");

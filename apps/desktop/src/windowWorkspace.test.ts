@@ -336,6 +336,66 @@ describe("windowWorkspace", () => {
     ]);
   });
 
+  it("prefers the saved window selection over the launch parameters in the URL", async () => {
+    // Those parameters never leave the address bar, so on a later reload they
+    // would pin the window to whatever it was opened on however long ago.
+    const bootstrap = await resolveWindowBootstrap(
+      {} as never,
+      {
+        windowId: "main",
+        selectedRepoId: "repo-opened-with",
+        selectedItemId: "task-opened-with",
+      },
+      {
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: "repo-1",
+            selectedItemId: "task-2",
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+        ],
+      },
+    );
+
+    expect(bootstrap).toMatchObject({
+      windowId: "main",
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-2",
+    });
+  });
+
+  it("keeps the launch parameters until the window has persisted a selection", async () => {
+    const bootstrap = await resolveWindowBootstrap(
+      {} as never,
+      {
+        windowId: "window-new",
+        selectedRepoId: "repo-opened-with",
+        selectedItemId: "task-opened-with",
+      },
+      {
+        windows: [
+          {
+            windowId: "window-new",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+        ],
+      },
+    );
+
+    expect(bootstrap).toMatchObject({
+      windowId: "window-new",
+      selectedRepoId: "repo-opened-with",
+      selectedItemId: "task-opened-with",
+    });
+  });
+
   it("hydrates the main window selection from the saved workspace snapshot", async () => {
     const db = {
       execute: async () => ({ rowsAffected: 1 }),

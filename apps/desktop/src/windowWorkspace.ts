@@ -488,13 +488,31 @@ export async function resolveWindowBootstrap(
   bootstrap: WindowBootstrap,
   snapshotOverride?: WorkspaceSnapshot,
 ): Promise<WindowBootstrap> {
-  if (bootstrap.selectedRepoId || bootstrap.selectedItemId) {
-    return bootstrap;
-  }
   if (bootstrap.tearOffContext) return bootstrap;
 
   const snapshot = snapshotOverride ?? await readWorkspaceSnapshot(db);
   const savedWindow = snapshot.windows.find((entry) => entry.windowId === bootstrap.windowId);
+
+  // The URL's selection parameters are a LAUNCH hint — what the window was
+  // opened on — and they never leave the address bar. Preferring them meant
+  // that on every later reload a window was pinned to the repo and task it was
+  // opened with, however long ago: when those ids were gone the restore fell
+  // through to the first repo and dropped the selection entirely, discarding
+  // what the window had actually persisted. A saved entry that names a
+  // selection is the durable record and wins; the hint only covers the first
+  // load, before this window has persisted anything of its own.
+  if (savedWindow && (savedWindow.selectedRepoId || savedWindow.selectedItemId)) {
+    return {
+      windowId: bootstrap.windowId,
+      selectedRepoId: savedWindow.selectedRepoId,
+      selectedItemId: savedWindow.selectedItemId,
+      ...(savedWindow.tearOffContext ? { tearOffContext: savedWindow.tearOffContext } : {}),
+    };
+  }
+
+  if (bootstrap.selectedRepoId || bootstrap.selectedItemId) {
+    return bootstrap;
+  }
   if (!savedWindow) {
     return bootstrap;
   }

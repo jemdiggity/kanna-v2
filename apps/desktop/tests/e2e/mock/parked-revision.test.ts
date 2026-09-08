@@ -228,9 +228,9 @@ describe("parked task human revision recovery", () => {
       exhausted: false,
     });
     await client.waitForNoElement('[data-testid="revision-recovery"]', 10_000);
-    expect(await client.executeSync<string>(
-      `return document.querySelector(".task-header")?.textContent || "";`,
-    )).toContain("in progress");
+    // The header follows the snapshot the revision reloads, which lands after
+    // the durable stage change this test already observed.
+    await client.waitForText(".task-header", "in progress", 10_000);
 
     const runs = await queryDb(
       client,

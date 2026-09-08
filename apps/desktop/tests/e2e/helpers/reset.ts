@@ -47,6 +47,7 @@ const TRANSIENT_MODAL_REFS = [
   "showAddRepoModal",
   "showBlockerSelect",
   "showPreferencesPanel",
+  "showImageUrlPreviewModal",
 ] as const;
 
 function isVueCallError(result: unknown): result is { __error: string } {
@@ -130,15 +131,20 @@ async function importRepoThroughUi(
 ): Promise<void> {
   await client.executeSync(
     `const ctx = window.__KANNA_E2E__?.setupState;
+     // Not every modal flag is destructured into App.vue's own scope; the
+     // rest are reachable through the modals composable it exposes.
+     const holder = (key) => (ctx && key in ctx) ? ctx : ctx?.appModals;
      const close = (key) => {
-       const value = ctx?.[key];
+       const owner = holder(key);
+       const value = owner?.[key];
        if (value?.__v_isRef) value.value = false;
-       else if (ctx && key in ctx) ctx[key] = false;
+       else if (owner && key in owner) owner[key] = false;
      };
      for (const key of ${JSON.stringify(TRANSIENT_MODAL_REFS)}) close(key);
-     const maximized = ctx?.maximizedModal;
+     const maximizedOwner = holder("maximizedModal");
+     const maximized = maximizedOwner?.maximizedModal;
      if (maximized?.__v_isRef) maximized.value = null;
-     else if (ctx && "maximizedModal" in ctx) ctx.maximizedModal = null;`
+     else if (maximizedOwner && "maximizedModal" in maximizedOwner) maximizedOwner.maximizedModal = null;`
   );
   await sleep(100);
 
@@ -316,6 +322,23 @@ export async function resetDatabase(client: WebDriverClient): Promise<void> {
   const membershipResult = await callVueMethod(client, "windowWorkspace.initialize");
   if (isVueCallError(membershipResult)) {
     throw new Error(membershipResult.__error);
+  }
+
+  // Several files freeze LAN refreshes while they drive an injected remote
+  // snapshot, and the freeze is per app instance — it outlives the file that
+  // set it and silently stops the next one from publishing anything.
+  try {
+    await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       ctx.__e2eInjectRemoteSnapshot?.(
+         "lan",
+         { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} },
+         { freezeLanRefresh: false },
+       );
+       return true;`,
+    );
+  } catch (error) {
+    console.debug("[reset] could not clear the LAN refresh freeze:", error);
   }
 
   // Refresh the Vue state so the UI reflects the empty DB

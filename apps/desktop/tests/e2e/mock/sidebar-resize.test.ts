@@ -5,6 +5,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { execDb, queryDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
+import { RELOAD_APP_SCRIPT } from "../helpers/appReady";
 
 interface WorkspaceSnapshot {
   windows?: Array<{
@@ -92,7 +93,9 @@ async function readWorkspaceSnapshotFromDb(client: WebDriverClient): Promise<Wor
   }
 }
 
-async function waitForWorkspaceSetting(client: WebDriverClient, timeoutMs = 5_000): Promise<void> {
+// Callers use this after a page reload, which has to re-run app startup before
+// the E2E DB handle exists again — until then every probe throws.
+async function waitForWorkspaceSetting(client: WebDriverClient, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown = null;
   while (Date.now() < deadline) {
@@ -258,7 +261,7 @@ describe("sidebar resize", () => {
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
       ["sidebar-resize-task", repoId, LONG_TASK_TITLE, "in progress", "agent"],
     );
-    await client.executeSync("location.reload()");
+    await client.executeSync(RELOAD_APP_SCRIPT);
     await client.waitForAppReady();
     await client.waitForText(".sidebar", "Investigate sidebar resizing");
   });
@@ -288,7 +291,7 @@ describe("sidebar resize", () => {
     await waitForSidebarWidth(client, 420);
     await waitForPersistedSidebarWidth(client, windowId, 420);
 
-    await client.executeSync("location.reload()");
+    await client.executeSync(RELOAD_APP_SCRIPT);
     await client.waitForAppReady();
     await waitForWorkspaceSetting(client);
     await waitForSidebarWidth(client, 420);

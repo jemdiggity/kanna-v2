@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
-import { callVueMethod, execDb } from "../helpers/vue";
+import { callVueMethod, execDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 
 const taskId = "themed-agent-task";
@@ -21,6 +21,7 @@ function installMockKspScript(options: { failFirstAgentAttach?: boolean; recover
   const recoveredText = options.recoveredText ?? "Hello **themed** view";
   const activeTurn = options.activeTurn === true;
   return `
+    window.__KSP_REAL_WEBSOCKET__ = window.__KSP_REAL_WEBSOCKET__ || window.WebSocket;
     window.__KSP_SENT__ = [];
     window.__KSP_AGENT_ATTACH_COUNT__ = 0;
     window.__KSP_MOCK_OPTIONS__ = {
@@ -104,28 +105,6 @@ async function waitForComposerFocus(client: WebDriverClient, timeoutMs = 5_000):
   throw new Error(`Timed out waiting for agent composer focus; active element was ${lastActive}`);
 }
 
-async function waitForInvoke<T>(
-  client: WebDriverClient,
-  predicateSource: string,
-  timeoutMs = 5_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let calls: unknown[] = [];
-
-  while (Date.now() < deadline) {
-    const result = await client.executeSync<{ match: T | null; calls: unknown[] }>(
-      `const calls = window.__KANNA_E2E__.invokes.getAll();
-       const match = calls.find(${predicateSource});
-       return { match: match ? JSON.parse(JSON.stringify(match.args)) : null, calls };`,
-    );
-    calls = result.calls;
-    if (result.match) return result.match;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-
-  throw new Error(`Timed out waiting for E2E invoke; calls were ${JSON.stringify(calls)}`);
-}
-
 describe("themed agent view", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
@@ -143,6 +122,16 @@ describe("themed agent view", () => {
   });
 
   afterAll(async () => {
+    // The mock KSP replaces `window.WebSocket` for the whole app instance, so
+    // leaving it installed silently starves every later file's terminals.
+    await client.executeSync(
+      `if (window.__KSP_REAL_WEBSOCKET__) {
+         window.WebSocket = window.__KSP_REAL_WEBSOCKET__;
+         delete window.__KSP_REAL_WEBSOCKET__;
+       }
+       window.__KANNA_E2E__.resetStreamClient?.();
+       return true;`,
+    ).catch(() => undefined);
     if (testRepoPath) await cleanupWorktrees(client, testRepoPath);
     await cleanupFixtureRepos(fixtureRepoRoot ? [fixtureRepoRoot] : []);
     await client.deleteSession();
@@ -176,7 +165,7 @@ describe("themed agent view", () => {
     );
     const loadResult = await callVueMethod(client, "loadItems");
     if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
-    const selectResult = await callVueMethod(client, "handleSelectItem", taskId);
+    const selectResult = await callVueMethod(client, "selectSidebarItemById", taskId);
     if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
     const refreshResult = await callVueMethod(client, "refreshAllItems");
     if (isVueCallError(refreshResult)) throw new Error(refreshResult.__error);
@@ -293,7 +282,7 @@ describe("themed agent view", () => {
     await mkdir(join(testRepoPath, ".kanna-worktrees", "task-themed-agent-running-task"), { recursive: true });
     const loadRunningResult = await callVueMethod(client, "loadItems");
     if (isVueCallError(loadRunningResult)) throw new Error(loadRunningResult.__error);
-    const selectRunningResult = await callVueMethod(client, "handleSelectItem", runningTaskId);
+    const selectRunningResult = await callVueMethod(client, "selectSidebarItemById", runningTaskId);
     if (isVueCallError(selectRunningResult)) throw new Error(selectRunningResult.__error);
     const runningSelectedState = await client.executeSync<{
       selectedItemId: string | null;
@@ -378,36 +367,84 @@ describe("themed agent view", () => {
     await client.executeSync("window.__KANNA_E2E__.resetStreamClient?.();");
     await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
 
-    const loadResult = await callVueMethod(client, "loadItems");
-    if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
-    const selectResult = await callVueMethod(client, "handleSelectItem", recoveryTaskId);
-    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
-
-    const spawnArgs = await waitForInvoke<{
-      sessionId: string;
-      model: string | null;
-      permissionMode: string | null;
-      allowedTools: string[] | null;
-      disallowedTools: string[] | null;
-      maxTurns: number | null;
-      maxBudgetUsd: number | null;
-    }>(
-      client,
-      `(call) => call.cmd === "spawn_agent_session" && call.args?.sessionId === ${JSON.stringify(recoveryTaskId)}`,
+    // Recovery is a server action now (`POST /v1/tasks/{id}/actions/resume`),
+    // not the desktop-only `spawn_agent_session` invoke this used to assert —
+    // the agent spawn options it carried are resolved server-side and covered
+    // by the server's own tests. What stays browser-visible, and is what this
+    // E2E is for, is: a missing agent session asks the server to resume THIS
+    // task, and the view reattaches to the recovered snapshot rather than
+    // stranding the run off-screen. The response is served locally because a
+    // seeded fixture task has no real agent session for the server to resume.
+    await client.executeSync(
+      `const originalFetch = globalThis.fetch;
+       const callOriginalFetch = originalFetch.bind(globalThis);
+       const resumePath = ${JSON.stringify(`/v1/tasks/${recoveryTaskId}/actions/resume`)};
+       const spy = { originalFetch, calls: [] };
+       window.__KANNA_RESUME_SPY__ = spy;
+       globalThis.fetch = async (input, init) => {
+         const url = typeof input === "string"
+           ? input
+           : input instanceof URL
+             ? input.href
+             : input.url;
+         const method = String(
+           init?.method ?? (input instanceof Request ? input.method : "GET")
+         ).toUpperCase();
+         const path = new URL(url, window.location.href).pathname;
+         if (method === "POST" && path === resumePath) {
+           spy.calls.push(path);
+           return new Response(JSON.stringify({ taskId: ${JSON.stringify(recoveryTaskId)} }), {
+             status: 200,
+             headers: { "content-type": "application/json" },
+           });
+         }
+         return callOriginalFetch(input, init);
+       };
+       return true;`,
     );
-    expect(spawnArgs).toEqual(expect.objectContaining({
-      sessionId: recoveryTaskId,
-      model: "claude-sonnet-test",
-      permissionMode: "dontAsk",
-      allowedTools: ["Read", "Bash"],
-      disallowedTools: ["WebFetch"],
-      maxTurns: 5,
-      maxBudgetUsd: 2.25,
-    }));
 
-    await client.waitForText('[data-testid="agent-message-view"]', "Recovered agent snapshot", 5_000);
-    const attachCount = await client.executeSync<number>("return window.__KSP_AGENT_ATTACH_COUNT__;");
-    expect(attachCount).toBeGreaterThanOrEqual(2);
+    try {
+      const loadResult = await callVueMethod(client, "loadItems");
+      if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
+      const selectResult = await callVueMethod(client, "selectSidebarItemById", recoveryTaskId);
+      if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+
+      const resumeDeadline = Date.now() + 10_000;
+      let resumeCalls = 0;
+      while (Date.now() < resumeDeadline) {
+        resumeCalls = await client.executeSync<number>(
+          "return window.__KANNA_RESUME_SPY__?.calls.length ?? 0;",
+        );
+        if (resumeCalls > 0) break;
+        await sleep(100);
+      }
+      expect(resumeCalls).toBeGreaterThanOrEqual(1);
+
+      // The desktop holds the recovery pending until the daemon names the new
+      // incarnation, so stand one up under the task's session id the way a
+      // real respawn would.
+      await tauriInvoke(client, "spawn_session", {
+        sessionId: recoveryTaskId,
+        cwd: testRepoPath,
+        executable: "/bin/zsh",
+        args: ["-c", "while true; do sleep 60; done"],
+        env: {},
+        cols: 80,
+        rows: 24,
+      });
+
+      await client.waitForText('[data-testid="agent-message-view"]', "Recovered agent snapshot", 15_000);
+      const attachCount = await client.executeSync<number>("return window.__KSP_AGENT_ATTACH_COUNT__;");
+      expect(attachCount).toBeGreaterThanOrEqual(2);
+    } finally {
+      await client.executeSync(
+        `const spy = window.__KANNA_RESUME_SPY__;
+         if (spy) globalThis.fetch = spy.originalFetch;
+         delete window.__KANNA_RESUME_SPY__;
+         return true;`,
+      ).catch(() => undefined);
+      await tauriInvoke(client, "kill_session", { sessionId: recoveryTaskId }).catch(() => undefined);
+    }
   });
 
   it("renders assistant image links inline and opens them in the app image preview", async () => {
@@ -440,7 +477,7 @@ describe("themed agent view", () => {
 
     const loadResult = await callVueMethod(client, "loadItems");
     if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
-    const selectResult = await callVueMethod(client, "handleSelectItem", imageTaskId);
+    const selectResult = await callVueMethod(client, "selectSidebarItemById", imageTaskId);
     if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
 
     await client.waitForElement(".agent-image-link-preview img", 5_000);

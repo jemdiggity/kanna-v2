@@ -394,14 +394,19 @@ function buildInstanceConfig(input: {
 }
 
 async function main(): Promise<void> {
-  const suite = process.argv[2];
+  // Several suites/files may be named in one run so a fix can be re-verified
+  // against exactly the files it touched without paying app startup per file.
+  const suites = process.argv.slice(2);
   const currentDir = dirname(fileURLToPath(import.meta.url));
   const desktopRoot = resolve(currentDir, "../..");
   const e2eRoot = join(desktopRoot, "tests", "e2e");
   const repoRoot = resolve(desktopRoot, "../..");
-  const testTargets = await resolveTestTargets(e2eRoot, suite);
+  const resolvedTargets = suites.length > 0
+    ? (await Promise.all(suites.map((suite) => resolveTestTargets(e2eRoot, suite)))).flat()
+    : await resolveTestTargets(e2eRoot, undefined);
+  const testTargets = [...new Set(resolvedTargets)];
   if (testTargets.length === 0) {
-    throw new Error(`no E2E tests matched ${suite ?? "default suites"}`);
+    throw new Error(`no E2E tests matched ${suites.length > 0 ? suites.join(", ") : "default suites"}`);
   }
   if (testTargets.some(targetNeedsPlaywrightChromium)) {
     await assertPlaywrightChromiumAvailable();
@@ -995,6 +1000,26 @@ async function main(): Promise<void> {
   let runningMockAgentProviderIsolation: boolean | null = null;
   let lastTargetWasReal = false;
   const cleanupAppDataHooks: Array<() => Promise<void>> = [];
+  // One failing file must not hide the rest of the lane. Each target runs in
+  // its own vitest process, so a failure is recorded and the run continues;
+  // the aggregate is thrown after the loop so the lane still exits non-zero.
+  const failedTargets: Array<{ target: string; message: string }> = [];
+
+  async function printDevLogs(): Promise<void> {
+    console.error("\n[e2e] recent dev log:\n");
+    await runCommand(["./kd", "dev", "log"], { cwd: repoRoot, env: primary.env }).catch(() => undefined);
+    if (secondary) {
+      await runCommand(["./kd", "dev", "log"], { cwd: repoRoot, env: secondary.env }).catch(() => undefined);
+    }
+    if (firebaseEmulatorOutput.trim()) {
+      console.error("\n[e2e] recent Firebase emulator log:\n");
+      console.error(firebaseEmulatorOutput.trimEnd());
+    }
+    if (relayOutput.trim()) {
+      console.error("\n[e2e] recent relay log:\n");
+      console.error(relayOutput.trimEnd());
+    }
+  }
 
   try {
     if (shouldStartInitialInstances(testTargets[0])) {
@@ -1059,6 +1084,11 @@ async function main(): Promise<void> {
             ),
           },
         );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failedTargets.push({ target: testTarget, message });
+        console.error(`\n[e2e] FAILED ${testTarget}\n`);
+        await printDevLogs();
       } finally {
         const perfSummary = await readFile(perfOutputPath, "utf8").catch(() => "");
         if (perfSummary.trim()) {
@@ -1076,19 +1106,7 @@ async function main(): Promise<void> {
       lastTargetWasReal = targetIsReal;
     }
   } catch (error) {
-    console.error("\n[e2e] recent dev log:\n");
-    await runCommand(["./kd", "dev", "log"], { cwd: repoRoot, env: primary.env }).catch(() => undefined);
-    if (secondary) {
-      await runCommand(["./kd", "dev", "log"], { cwd: repoRoot, env: secondary.env }).catch(() => undefined);
-    }
-    if (firebaseEmulatorOutput.trim()) {
-      console.error("\n[e2e] recent Firebase emulator log:\n");
-      console.error(firebaseEmulatorOutput.trimEnd());
-    }
-    if (relayOutput.trim()) {
-      console.error("\n[e2e] recent relay log:\n");
-      console.error(relayOutput.trimEnd());
-    }
+    await printDevLogs();
     throw error;
   } finally {
     await stopInstances(runningInstances);
@@ -1109,6 +1127,13 @@ async function main(): Promise<void> {
     await rm(primary.daemonDir, { recursive: true, force: true }).catch(() => undefined);
     await rm(transferRegistryDir, { recursive: true, force: true }).catch(() => undefined);
     await ports.releaseAll();
+  }
+
+  if (failedTargets.length > 0) {
+    throw new Error(
+      `${failedTargets.length} of ${testTargets.length} E2E target(s) failed:\n` +
+        failedTargets.map(({ target, message }) => `  - ${target}: ${message}`).join("\n"),
+    );
   }
 }
 

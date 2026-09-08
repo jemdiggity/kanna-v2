@@ -4,7 +4,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase } from "../helpers/reset";
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
-import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { cleanupFixtureRepos, createFixtureRepo, publishFixtureChanges } from "../helpers/fixture-repo";
 import { advanceStageWithShortcut } from "../helpers/stageAdvance";
 
 function isVueCallError(value: unknown): value is { __error: string } {
@@ -43,7 +43,10 @@ describe("workflow title preservation", () => {
     testRepoPath = join(fixtureRepoRoot, "apps");
 
     const workflowName = "title-e2e";
-    const kannaDir = join(testRepoPath, ".kanna");
+    // Definitions live in the `.kanna` subtree of the repository's origin
+    // snapshot, which is rooted at the Git repository — never at an imported
+    // subdirectory and never at the working tree.
+    const kannaDir = join(fixtureRepoRoot, ".kanna");
     await mkdir(join(kannaDir, "workflows"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "qa-title-e2e"), { recursive: true });
     await writeFile(
@@ -73,6 +76,8 @@ describe("workflow title preservation", () => {
         "",
       ].join("\n"),
     );
+
+    await publishFixtureChanges(fixtureRepoRoot, "test: add workflow title fixtures");
 
     const importResult = await callVueMethod(client, "store.importRepo", testRepoPath, "workflow-title-test", "main");
     if (isVueCallError(importResult)) throw new Error(importResult.__error);
