@@ -4,8 +4,10 @@ export interface ScriptedAgentOptions {
   continuousOutput?: boolean;
   inputTraceFile?: string;
   redactInput?: boolean;
+  terminalKeyTraceFile?: string;
   terminalPasteSemantics?: boolean;
   tracePartialInput?: boolean;
+  traceTerminalKeys?: boolean;
   snapshotHistory?: {
     sentinel: string;
   };
@@ -122,6 +124,21 @@ case "$*" in
 esac`;
   const partialInputTrace = options.tracePartialInput
     ? "printf 'SCRIPT_PARTIAL:%s\\n' \"$line\""
+    : ":";
+  const terminalKeyHandling = options.traceTerminalKeys
+    ? `if [ "$char" = "$escape" ]; then
+    printf 'SCRIPT_KEY:ESC\\n'
+    ${options.terminalKeyTraceFile
+      ? `printf 'ESC\\n' >> ${shellSingleQuote(options.terminalKeyTraceFile)}`
+      : ":"}
+    continue
+  fi`
+    : "";
+  const enterTrace = options.traceTerminalKeys
+    ? `printf 'SCRIPT_KEY:ENTER\\n'
+    ${options.terminalKeyTraceFile
+      ? `printf 'ENTER\\n' >> ${shellSingleQuote(options.terminalKeyTraceFile)}`
+      : ":"}`
     : ":";
   const bracketedPasteHandling = options.tracePartialInput || options.terminalPasteSemantics
     ? `if [ "$char" = "$escape" ]; then
@@ -246,9 +263,11 @@ read_char() {
 
 while :; do
   read_char
+  ${terminalKeyHandling}
   ${bracketedPasteHandling}
 
   ${submissionCondition}
+    ${enterTrace}
     if [ "$menu_choice" = "1" ]; then
       printf 'SCRIPT_MENU_SELECTED:1\\n'
       menu_choice=""

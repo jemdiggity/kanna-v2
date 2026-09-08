@@ -218,7 +218,16 @@ interface RenderTaskScreenOptions {
   onRecoverTaskCreation?: () => void;
   onBack?: () => boolean;
   agentStatus?: TaskTerminalStatus;
-  onSendTerminalInput?: (dataB64: string) => void;
+  onSendTerminalInput?: (
+    dataB64: string,
+    kind: "draft" | "submission" | "control"
+  ) => void;
+  terminalInputUnavailableReason?:
+    | "connecting"
+    | "authentication_required"
+    | "capability_required"
+    | "terminal_detached"
+    | null;
   onResizeTerminal?: (cols: number, rows: number) => void;
   onResolveTaskFileMentions?: (
     mentions: readonly { path: string; line?: number }[]
@@ -299,6 +308,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     onBack = componentMocks.onBack,
     agentStatus = "live",
     onSendTerminalInput,
+    terminalInputUnavailableReason = "terminal_detached",
     onResizeTerminal,
     onResolveTaskFileMentions = vi.fn().mockResolvedValue({
       mentions: []
@@ -365,6 +375,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     terminalRows,
     terminalStatus,
     terminalErrorMessage,
+    terminalInputUnavailableReason,
     taskCreationPhase,
     taskCreationErrorMessage,
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
@@ -1285,10 +1296,85 @@ describe("TaskScreen", () => {
     const tree = renderTaskScreen({ agentType: "pty", onSendTerminalInput });
     const terminal = findByType(tree, "TerminalWebView");
 
-    expect(terminal?.props?.onTerminalInput).toBe(onSendTerminalInput);
+    expect(terminal?.props?.onTerminalInput).toBeTypeOf("function");
 
-    (terminal?.props?.onTerminalInput as (dataB64: string) => void)("G1s8NjU7MTsxTQ==");
-    expect(onSendTerminalInput).toHaveBeenCalledWith("G1s8NjU7MTsxTQ==");
+    (
+      terminal?.props?.onTerminalInput as (
+        dataB64: string,
+        kind: "control"
+      ) => void
+    )("G1s8NjU7MTsxTQ==", "control");
+    expect(onSendTerminalInput).toHaveBeenCalledWith(
+      "G1s8NjU7MTsxTQ==",
+      "control"
+    );
+  });
+
+  it("sends terminal-strip keys with their exact kind when available", () => {
+    const onSendTerminalInput = vi.fn();
+    let tree = renderTaskScreen({
+      agentType: "pty",
+      onSendTerminalInput,
+      terminalInputUnavailableReason: null
+    });
+
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskTerminalKeyStrip)).toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)).not.toBeNull();
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalDirectInputToggle);
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onSendTerminalInput,
+      terminalInputUnavailableReason: null
+    });
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskTerminalDirectInputStatus)
+    ).not.toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)).toBeNull();
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalKey("escape"));
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalKey("enter"));
+    expect(onSendTerminalInput).toHaveBeenNthCalledWith(1, "Gw==", "draft");
+    expect(onSendTerminalInput).toHaveBeenNthCalledWith(
+      2,
+      "DQ==",
+      "submission"
+    );
+
+    pressByTestId(tree, MOBILE_E2E_IDS.taskTerminalDirectInputToggle);
+    tree = renderTaskScreen({
+      agentType: "pty",
+      onSendTerminalInput,
+      terminalInputUnavailableReason: null
+    });
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskTerminalKeyStrip)).toBeNull();
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskInput)).not.toBeNull();
+  });
+
+  it("explains disabled PTY keys and omits the strip for SDK tasks", () => {
+    let pty = renderTaskScreen({
+      agentType: "pty",
+      terminalInputUnavailableReason: "authentication_required"
+    });
+    pressByTestId(pty, MOBILE_E2E_IDS.taskTerminalDirectInputToggle);
+    pty = renderTaskScreen({
+      agentType: "pty",
+      terminalInputUnavailableReason: "authentication_required"
+    });
+    expect(
+      findByTestId(pty, MOBILE_E2E_IDS.taskTerminalKey("escape"))?.props
+        ?.disabled
+    ).toBe(true);
+    expect(
+      JSON.stringify(
+        findByTestId(pty, MOBILE_E2E_IDS.taskTerminalKeyDisabledReason)?.props
+          ?.children
+      )
+    ).toMatch(/pair/i);
+
+    const sdk = renderTaskScreen({ agentType: "agent" });
+    expect(
+      findByTestId(sdk, MOBILE_E2E_IDS.taskTerminalDirectInputToggle)
+    ).toBeNull();
+    expect(findByTestId(sdk, MOBILE_E2E_IDS.taskTerminalKeyStrip)).toBeNull();
   });
 
   it("renders the authoritative grid while proposing the mobile viewport", () => {

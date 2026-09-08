@@ -27,6 +27,11 @@ export const selectors = {
   taskInput: `~${MOBILE_E2E_IDS.taskInput}`,
   taskInputStatus: `~${MOBILE_E2E_IDS.taskInputStatus}`,
   taskSendButton: `~${MOBILE_E2E_IDS.taskSendButton}`,
+  taskTerminalDirectInputToggle:
+    `~${MOBILE_E2E_IDS.taskTerminalDirectInputToggle}`,
+  taskTerminalKey(key: string): string {
+    return `~${MOBILE_E2E_IDS.taskTerminalKey(key)}`;
+  },
   agentMessageView: `~${MOBILE_E2E_IDS.agentMessageView}`,
   agentMessageReady: `~${MOBILE_E2E_IDS.agentMessageReady}`,
   terminalOverlay: `~${MOBILE_E2E_IDS.terminalOverlay}`,

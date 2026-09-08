@@ -19,6 +19,7 @@ import type {
   KannaClient,
   TaskAgentSubscription,
   TaskCompanionSubscription,
+  TaskTerminalInputKind,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../lib/api/client";
@@ -131,7 +132,11 @@ export interface MobileController {
     input: string,
     attachment?: TaskInputAttachment
   ): Promise<TaskInputSendOutcome>;
-  sendTaskTerminalInput(taskId: string, dataB64: string): void;
+  sendTaskTerminalInput(
+    taskId: string,
+    dataB64: string,
+    kind: TaskTerminalInputKind
+  ): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
   takeTaskTerminalControl(taskId: string): void;
   releaseTaskTerminalControl(taskId: string): void;
@@ -1475,6 +1480,12 @@ export function createMobileController(
             break;
           case "exit":
             store.setTaskTerminalStatus(streamTaskId, "closed");
+            break;
+          case "input_availability":
+            store.setTaskTerminalInputUnavailableReason(
+              streamTaskId,
+              event.unavailableReason
+            );
             break;
           case "error":
             if (event.code === "no_scrollback") {
@@ -3571,14 +3582,15 @@ export function createMobileController(
       }
     },
 
-    sendTaskTerminalInput(taskId, dataB64) {
+    sendTaskTerminalInput(taskId, dataB64, kind) {
       if (!dataB64 || activeTaskTerminal?.taskId !== taskId) {
         return;
       }
-      // The production mobile terminal currently emits only alt-screen
-      // mouse/scroll reports. Declare them as controls so they cannot create
-      // a phantom composer draft and strand a queued logical message.
-      activeTaskTerminal.subscription.sendInput?.(dataB64, false, true);
+      activeTaskTerminal.subscription.sendInput?.(
+        dataB64,
+        kind === "submission",
+        kind === "control"
+      );
     },
 
     requestTaskTerminalScrollback(taskId) {

@@ -953,7 +953,17 @@ describe("createLanTransport", () => {
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
     expect(events).toEqual([
+      {
+        type: "input_availability",
+        taskId: "task-1",
+        unavailableReason: "connecting"
+      },
       { type: "connection", taskId: "task-1", connected: true },
+      {
+        type: "input_availability",
+        taskId: "task-1",
+        unavailableReason: "capability_required"
+      },
       {
         type: "snapshot",
         taskId: "task-1",

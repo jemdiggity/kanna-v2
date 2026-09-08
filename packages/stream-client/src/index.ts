@@ -135,6 +135,11 @@ export interface TerminalStreamHandlers {
   onScrollbackChunk?(chunk: TerminalScrollbackChunk): void;
   onStatus?(status: string): void;
   onSessionExit?(code: number): void;
+  /** Whether this authenticated attachment can safely send classified raw
+   * terminal input through the negotiated peer. */
+  onInputAvailabilityChange?(
+    availability: "available" | "unsupported" | "disconnected"
+  ): void;
   onError?(code: string, message: string): void;
 }
 
@@ -454,6 +459,13 @@ export class StreamClient {
       handlers,
       resume: null,
     });
+    if (this.authed) {
+      handlers.onInputAvailabilityChange?.(
+        this.supportsCapability("term_input_boundary")
+          ? "available"
+          : "unsupported"
+      );
+    }
     const registration = this.terminalViewerRegistrations.get(taskId);
     if (
       registration &&
@@ -863,7 +875,9 @@ export class StreamClient {
     this.pendingCompanionEvents.clear();
     this.companionChunkAssemblies.clear();
     for (const attachment of this.attachments.values()) {
-      if (attachment.kind === "companion" || attachment.kind === "task_summary") {
+      if (attachment.kind === "terminal") {
+        attachment.handlers.onInputAvailabilityChange?.("disconnected");
+      } else if (attachment.kind === "companion" || attachment.kind === "task_summary") {
         attachment.handlers.onConnectionChange?.(false);
       }
     }
@@ -966,7 +980,13 @@ export class StreamClient {
         this.authRetryConsumed = false;
         this.options.onConnectionChange?.(true);
         for (const attachment of this.attachments.values()) {
-          if (attachment.kind === "companion" || attachment.kind === "task_summary") {
+          if (attachment.kind === "terminal") {
+            attachment.handlers.onInputAvailabilityChange?.(
+              this.supportsCapability("term_input_boundary")
+                ? "available"
+                : "unsupported"
+            );
+          } else if (attachment.kind === "companion" || attachment.kind === "task_summary") {
             attachment.handlers.onConnectionChange?.(true);
           }
         }

@@ -349,18 +349,30 @@ export function createLanTransport(
       );
     },
     observeTaskTerminal(taskId, listener) {
+      listener({
+        type: "input_availability",
+        taskId,
+        unavailableReason: "connecting"
+      });
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
         credential: streamCredential,
         webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000],
+        onConnectionChange(connected) {
+          if (!connected) {
+            listener({
+              type: "input_availability",
+              taskId,
+              unavailableReason: "connecting"
+            });
+          }
+          listener({ type: "connection", taskId, connected });
+        },
         // A phone on LAN is still a phone: same xterm buffer, same cold-open
         // latency. The window is negotiated on both mobile transports.
         terminalScrollbackWindow: true,
-        terminalViewerRole: "remote",
-        onConnectionChange(connected) {
-          listener({ type: "connection", taskId, connected });
-        }
+        terminalViewerRole: "remote"
       });
 
       client.attachTerminal(taskId, {
@@ -389,6 +401,20 @@ export function createLanTransport(
         },
         onSessionExit(code) {
           listener({ type: "exit", taskId, code });
+        },
+        onInputAvailabilityChange(availability) {
+          listener({
+            type: "input_availability",
+            taskId,
+            unavailableReason:
+              availability === "disconnected"
+                ? "connecting"
+                : !deviceCredentials
+                  ? "authentication_required"
+                  : availability === "unsupported"
+                    ? "capability_required"
+                    : null
+          });
         },
         onError(code, message) {
           listener({ type: "error", taskId, code, message });
