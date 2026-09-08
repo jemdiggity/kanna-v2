@@ -1,14 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from "vue"
+import { ref, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue"
 import { useTerminal, type SpawnOptions } from "../composables/useTerminal"
 import { useTerminalFocusWhenActive } from "../composables/useTerminalFocusWhenActive"
-import { useAltScreenHistory } from "../composables/terminalAltScreenHistory"
 import { shouldDelayConnectUntilAfterInitialLayout } from "../composables/terminalSessionRecovery"
 import { nextFrameOrTimeout } from "../utils/animationFrame"
 import { shouldStartTerminalSession } from "../composables/terminalVisibility"
 import { markTaskSwitchMounted, markTaskSwitchReady } from "../perf/taskSwitchPerf"
-import type { TerminalFileMention } from "../composables/terminalFileLinks"
-import MentionedFilesOverlay from "./MentionedFilesOverlay.vue"
 import "@xterm/xterm/css/xterm.css"
 
 const props = defineProps<{
@@ -31,8 +28,6 @@ const {
   fitDeferred,
   redraw,
   ensureConnected,
-  listMentionedFiles,
-  activateMentionedFile,
   pause,
   dispose,
 } = useTerminal(props.sessionId, props.spawnOptions, {
@@ -48,89 +43,6 @@ defineExpose({
   fit,
   redraw,
   ensureConnected,
-})
-
-// A full-screen TUI on the alternate screen hides the normal buffer — setup
-// output and prior-stage history — and xterm cannot scroll past it. Offer that
-// hidden text read-only while the TUI holds the screen.
-const {
-  altScreenActive,
-  hasHiddenHistory,
-  readHistoryLines,
-  dispose: disposeAltScreenHistory,
-} = useAltScreenHistory(terminal)
-const historyOverlayOpen = ref(false)
-const historyText = ref("")
-const historyBodyRef = ref<HTMLElement | null>(null)
-const mentionedFilesOpen = ref(false)
-const mentionedFilesLoading = ref(false)
-const mentionedFilesError = ref<string | null>(null)
-const mentionedFiles = ref<TerminalFileMention[]>([])
-const mentionedFilesOverflow = ref(false)
-
-async function openMentionedFiles() {
-  mentionedFilesOpen.value = true
-  mentionedFilesLoading.value = true
-  mentionedFilesError.value = null
-  try {
-    const result = await listMentionedFiles()
-    if (!mentionedFilesOpen.value) return
-    mentionedFiles.value = result.mentions
-    mentionedFilesOverflow.value = result.overflow
-  } catch (error: unknown) {
-    console.error("[terminal] failed to list mentioned files:", error)
-    if (mentionedFilesOpen.value) {
-      mentionedFilesError.value = error instanceof Error
-        ? error.message
-        : "Mentioned files are unavailable."
-    }
-  } finally {
-    mentionedFilesLoading.value = false
-  }
-}
-
-function closeMentionedFiles() {
-  mentionedFilesOpen.value = false
-}
-
-function openMentionedFile(mention: TerminalFileMention) {
-  if (!mention.available) return
-  closeMentionedFiles()
-  activateMentionedFile(mention)
-}
-
-function openMentionedFileAt(index: number) {
-  const mention = mentionedFiles.value[index]
-  if (mention) openMentionedFile(mention)
-}
-
-async function openHistoryOverlay() {
-  historyText.value = readHistoryLines().join("\n")
-  historyOverlayOpen.value = true
-  await nextTick()
-  const body = historyBodyRef.value
-  if (body) {
-    body.scrollTop = body.scrollHeight
-    body.focus()
-  }
-}
-
-function closeHistoryOverlay() {
-  if (!historyOverlayOpen.value) return
-  historyOverlayOpen.value = false
-  if (props.active !== false) {
-    // Refocus after the overlay leaves the DOM: WebKit's post-click focus
-    // handling for the removed Close button otherwise lands focus on <body>,
-    // undoing a synchronous terminal.focus().
-    void nextTick().then(() => {
-      if (!historyOverlayOpen.value) terminal.value?.focus()
-    })
-  }
-}
-
-// When the TUI leaves the alternate screen the buffer is scrollable again.
-watch(altScreenActive, (active) => {
-  if (!active) closeHistoryOverlay()
 })
 
 let resizeObserver: ResizeObserver | null = null
@@ -202,7 +114,6 @@ onDeactivated(() => {
   cancelPendingFocus()
   pause()
   started = false
-  closeMentionedFiles()
 })
 
 watch(
@@ -222,7 +133,6 @@ watch(
 onUnmounted(() => {
   cancelPendingFocus()
   resizeObserver?.disconnect()
-  disposeAltScreenHistory()
   dispose()
 })
 </script>
@@ -230,47 +140,6 @@ onUnmounted(() => {
 <template>
   <div class="terminal-wrapper">
     <div ref="containerRef" class="terminal-container"></div>
-    <div v-if="!historyOverlayOpen && !mentionedFilesOpen" class="terminal-tools">
-      <button
-        v-if="agentTerminal"
-        class="terminal-tool-chip"
-        data-testid="mentioned-files-open"
-        title="Show files mentioned by the agent"
-        @click="openMentionedFiles"
-      >
-        Mentioned files
-      </button>
-      <button
-        v-if="hasHiddenHistory"
-        class="terminal-tool-chip"
-        title="The full-screen agent is hiding earlier terminal output (setup scripts, previous stages). Click to view it."
-        @click="openHistoryOverlay"
-      >
-        Earlier output
-      </button>
-    </div>
-    <div v-if="historyOverlayOpen" class="terminal-history-overlay">
-      <div class="terminal-history-header">
-        <span>Earlier output — setup &amp; previous stages</span>
-        <button class="terminal-history-close" @click="closeHistoryOverlay">Close</button>
-      </div>
-      <pre
-        ref="historyBodyRef"
-        class="terminal-history-body"
-        tabindex="-1"
-        @keydown.esc.stop.prevent="closeHistoryOverlay"
-      >{{ historyText }}</pre>
-    </div>
-    <MentionedFilesOverlay
-      v-if="mentionedFilesOpen"
-      :rows="mentionedFiles"
-      :loading="mentionedFilesLoading"
-      :error="mentionedFilesError"
-      :overflow="mentionedFilesOverflow"
-      test-id="mentioned-files-overlay"
-      @close="closeMentionedFiles"
-      @open="openMentionedFileAt"
-    />
   </div>
 </template>
 
@@ -286,72 +155,5 @@ onUnmounted(() => {
 .terminal-container {
   width: 100%;
   height: 100%;
-}
-.terminal-tools {
-  position: absolute;
-  top: 6px;
-  right: 18px;
-  z-index: 5;
-  display: flex;
-  gap: 6px;
-}
-.terminal-tool-chip {
-  padding: 2px 8px;
-  font-size: 11px;
-  color: var(--kn-text-muted);
-  background: var(--kn-bg-panel-raised);
-  border: 1px solid var(--kn-border-default);
-  border-radius: 10px;
-  opacity: 0.75;
-  cursor: pointer;
-}
-.terminal-tool-chip:hover {
-  opacity: 1;
-  color: var(--kn-text-primary);
-  border-color: var(--kn-border-strong);
-}
-.terminal-history-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-  display: flex;
-  flex-direction: column;
-  background: var(--kn-terminal-bg);
-}
-.terminal-history-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  font-size: 11px;
-  color: var(--kn-text-muted);
-  border-bottom: 1px solid var(--kn-border-default);
-}
-.terminal-history-close {
-  padding: 2px 8px;
-  font-size: 11px;
-  color: var(--kn-text-muted);
-  background: var(--kn-bg-panel-raised);
-  border: 1px solid var(--kn-border-default);
-  border-radius: 10px;
-  cursor: pointer;
-}
-.terminal-history-close:hover {
-  color: var(--kn-text-primary);
-  border-color: var(--kn-border-strong);
-}
-.terminal-history-body {
-  flex: 1;
-  min-height: 0;
-  margin: 0;
-  padding: 8px 12px;
-  overflow: auto;
-  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--kn-text-muted);
-  white-space: pre-wrap;
-  word-break: break-all;
-  outline: none;
 }
 </style>

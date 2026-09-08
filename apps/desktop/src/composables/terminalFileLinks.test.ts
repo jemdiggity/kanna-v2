@@ -252,36 +252,6 @@ describe("terminalFileLinks", () => {
     ])
   })
 
-  it("lists mixed workspace and local absolute mentions as clickable on the task owner", async () => {
-    invokeMock.mockImplementation(async (command: string, args: { path: string }) =>
-      command === "file_exists" && [
-        "/worktree/src/app.ts",
-        "/tmp/kanna-verification.txt",
-      ].includes(args.path),
-    )
-    const { container, provider } = createProviderForLines([
-      "Verified src/app.ts and /tmp/kanna-verification.txt; missing /tmp/gone.txt",
-    ])
-
-    const result = await provider.listMentions()
-
-    expect(result.mentions).toMatchObject([
-      {
-        path: "/tmp/gone.txt",
-        available: false,
-        unavailableReason: "File not found on this machine",
-      },
-      { path: "/tmp/kanna-verification.txt", available: true },
-      { path: "src/app.ts", available: true },
-    ])
-    const activation = waitForFileLinkActivation(container)
-    provider.activateMention(result.mentions[1]!)
-    await expect(activation).resolves.toEqual({
-      path: "/tmp/kanna-verification.txt",
-      localAbsolutePath: "/tmp/kanna-verification.txt",
-    })
-  })
-
   it("opens local image file links in the image preview instead of the text file preview", async () => {
     invokeMock.mockImplementation(async (command: string, args: { path: string }) => {
       return command === "file_exists" && args.path === "/worktree/simple-paper-boat.png"

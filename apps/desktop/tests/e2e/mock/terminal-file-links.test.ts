@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFile } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -210,70 +210,6 @@ describe("terminal file links", () => {
     );
     expect(existenceChecks.some((path) => path.endsWith("/apps/desktop/src/DoesNotExist.vue"))).toBe(true);
     expect(existenceChecks.some((path) => path.endsWith("/apps/desktop/src/Newest.vue"))).toBe(true);
-  });
-
-  it("shows mixed local mentioned files and opens an absolute local path", async () => {
-    const taskId = "e2e-mentioned-files-locality";
-    const branch = "task-e2e-mentioned-files-locality";
-    const worktreePath = join(fixtureRepoPath, ".kanna-worktrees", branch);
-    const localAbsolutePath = `/tmp/kanna-mentioned-files-local-${process.pid}.txt`;
-    const missingAbsolutePath = `/tmp/kanna-mentioned-files-missing-${process.pid}.txt`;
-    await mkdir(join(worktreePath, "src"), { recursive: true });
-    await writeFile(join(worktreePath, "src", "available.ts"), "workspace file\n", "utf8");
-    await writeFile(localAbsolutePath, "local absolute verification\n", "utf8");
-
-    try {
-      await createAndSelectAgentTerminal(taskId, branch);
-      const output = [
-        "Changed src/available.ts",
-        `Verification artifact ${localAbsolutePath}`,
-        `Old artifact ${missingAbsolutePath}`,
-      ].join("\r\n");
-      await client.executeAsync<string>(
-        `const cb = arguments[arguments.length - 1];
-         window.__KANNA_E2E__.terminalBuffers.write(
-           ${JSON.stringify(taskId)},
-           ${JSON.stringify(output)},
-           function() { cb("ok"); }
-         );`,
-      );
-
-      await client.click(await client.findElement('[data-testid="mentioned-files-open"]'));
-      await client.waitForElement('[data-testid="mentioned-files-overlay"]', 5_000);
-      const state = await client.executeSync<{
-        available: string[];
-        unavailable: string[];
-        unavailableDisabled: boolean;
-      }>(
-        `return {
-          available: Array.from(document.querySelectorAll('[data-testid="mentioned-file-available"]'))
-            .map(function(row) { return row.textContent || ""; }),
-          unavailable: Array.from(document.querySelectorAll('[data-testid="mentioned-file-unavailable"]'))
-            .map(function(row) { return row.textContent || ""; }),
-          unavailableDisabled: document.querySelector('[data-testid="mentioned-file-unavailable"]')?.disabled === true,
-        };`,
-      );
-      expect(state.available.join("\n")).toContain(localAbsolutePath);
-      expect(state.available.join("\n")).toContain("src/available.ts");
-      expect(state.unavailable.join("\n")).toContain("File not found on this machine");
-      expect(state.unavailableDisabled).toBe(true);
-
-      const evidenceDir = process.env.KANNA_VISUAL_EVIDENCE_DIR;
-      if (evidenceDir) {
-        await mkdir(evidenceDir, { recursive: true });
-        await client.executeSync(
-          `document.querySelectorAll(".toast-dismiss").forEach(function(button) { button.click(); });`,
-        );
-        await client.screenshot(join(evidenceDir, "desktop-mentioned-files-mixed.png"));
-      }
-
-      await client.click(await client.findElement('[data-testid="mentioned-file-available"]'));
-      await waitForPreviewVisible();
-      expect(await previewedFilePath()).toBe(localAbsolutePath);
-      await waitForPreviewText("local absolute verification");
-    } finally {
-      await rm(localAbsolutePath, { force: true });
-    }
   });
 
   it("shows feedback when Cmd+L finds no file mention in the focused agent terminal", async () => {
