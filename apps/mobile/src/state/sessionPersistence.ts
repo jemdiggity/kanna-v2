@@ -22,6 +22,7 @@ export interface PersistedSessionContext {
   activeView: MobileView;
   authUser?: MobileAuthUser | null;
   trustedDesktops?: TrustedDesktopRecord[];
+  pendingAnonymousPushRevocations?: TrustedDesktopRecord[];
   repoCreationProfiles?: RepoCreationProfile[];
   taskCreationAttempts?: PendingTaskCreation[];
   /** Legacy singleton retained for migration from older mobile builds. */
@@ -110,6 +111,9 @@ function parsePersistedSessionContext(
       activeView: parsed.activeView,
       authUser: parsePersistedAuthUser(parsed.authUser),
       trustedDesktops: parseTrustedDesktops(parsed.trustedDesktops),
+      pendingAnonymousPushRevocations: parseTrustedDesktops(
+        parsed.pendingAnonymousPushRevocations
+      ),
       repoCreationProfiles: parseRepoCreationProfiles(parsed.repoCreationProfiles),
       taskCreationAttempts,
       pendingTaskCreation: taskCreationAttempts[0] ?? null

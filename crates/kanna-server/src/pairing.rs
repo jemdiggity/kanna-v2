@@ -519,7 +519,10 @@ fn issue_push_pairing_material_with_identity(
     PushPairingMaterial {
         desktop_push_identity: DesktopPushIdentity {
             public_key: encode_public_key(&identity),
-            relay_url: config.relay_url.clone(),
+            relay_url: advertised_relay_url(
+                config,
+                std::env::var("KANNA_ADVERTISED_RELAY_URL").ok(),
+            ),
             environment: config.environment.clone(),
         },
         push_pairing_cert: PushPairingCertificate {
@@ -529,6 +532,13 @@ fn issue_push_pairing_material_with_identity(
             signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
         },
     }
+}
+
+fn advertised_relay_url(config: &Config, override_url: Option<String>) -> String {
+    override_url
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| config.relay_url.clone())
 }
 
 /// Canonical bytes verified by the relay. The domain prefix prevents this
@@ -961,6 +971,20 @@ mod tests {
         let permissions = std::fs::metadata(identity_path).unwrap().permissions();
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(permissions.mode() & 0o077, 0);
+    }
+
+    #[test]
+    fn pairing_identity_uses_phone_reachable_relay_override() {
+        let config = test_config("advertised-relay");
+
+        assert_eq!(
+            super::advertised_relay_url(&config, Some(" ws://192.168.1.25:9086 ".to_string())),
+            "ws://192.168.1.25:9086"
+        );
+        assert_eq!(
+            super::advertised_relay_url(&config, None),
+            "wss://relay.example"
+        );
     }
 
     #[test]

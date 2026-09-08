@@ -236,6 +236,7 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
     cwd: `${input.repoRoot}/apps/desktop`,
     env: {
       ...sharedEnv,
+      KANNA_ADVERTISED_RELAY_URL: resolveRelayUrl(input),
       ...(input.desktopSecretEnv ?? {}),
     },
     // KANNA_REQUIRE_SIDECARS keeps the Tauri build script's `externalBin`
