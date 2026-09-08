@@ -108,22 +108,39 @@ describe("useMainTabPersistence", () => {
     expect(saved).toHaveLength(0);
   });
 
-  it("drops a scope when its task leaves the desktop, and stores that", async () => {
-    const { tabs, scope, openTaskIds, saved, persistence } = setup({ taskIds: ["task-a", "task-b"] });
+  it("keeps a scope whose task is missing from one snapshot and back in the next", async () => {
+    const { tabs, openTaskIds, persistence } = setup({ taskIds: ["task-a"] });
     await persistence.hydrate();
 
-    tabs.openTab({ kind: "diff" });
+    tabs.openTab({ kind: "file", filePath: "src/index.txt" });
     await nextTick();
-    await vi.advanceTimersByTimeAsync(500);
-    expect(JSON.parse(saved[0].value).scopes["item:task-a"]).toBeDefined();
 
-    openTaskIds.value = ["task-b"];
+    // `store.items` is replaced whole by every refresh and only carries the
+    // tasks of the repositories that refresh returned, so one snapshot without
+    // this task is not the task leaving the desktop. Dropping on that emptied
+    // a live tab set for good and then persisted the deletion.
+    openTaskIds.value = [];
     await nextTick();
-    await vi.advanceTimersByTimeAsync(500);
+    openTaskIds.value = ["task-a"];
+    await nextTick();
 
-    scope.value = "item:task-a";
-    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID]);
-    expect(JSON.parse(saved.at(-1)!.value).scopes["item:task-a"]).toBeUndefined();
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID, "file:src/index.txt"]);
+  });
+
+  it("keeps a scope whose task is absent for as long as the app is running", async () => {
+    const { tabs, openTaskIds, persistence } = setup({ taskIds: ["task-a"] });
+    await persistence.hydrate();
+
+    tabs.openTab({ kind: "file", filePath: "src/index.txt" });
+    await nextTick();
+    openTaskIds.value = [];
+    await nextTick();
+
+    // A task really closed mid-session leaves a scope nobody can reach — it is
+    // gone from the sidebar — and the next launch is where it is dropped, by
+    // the liveness filter hydrate applies to a fully loaded snapshot. Costing
+    // a few objects until then is the price of never destroying a live one.
+    expect(tabs.tabs.value.map((tab) => tab.id)).toEqual([AGENT_TAB_ID, "file:src/index.txt"]);
   });
 
   it("keeps a scope whose task has simply not loaded yet", async () => {

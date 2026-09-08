@@ -22,9 +22,9 @@ const SAVE_DEBOUNCE_MS = 500;
 
 interface UseMainTabPersistenceOptions {
   tabs: MainTabsController;
-  /** Ids of the tasks this desktop currently holds — closed ones are absent. */
+  /** Ids of the tasks the latest snapshot reported, read once at startup. */
   openTaskIds: Ref<string[]>;
-  /** Ids of the repositories currently known to this desktop. */
+  /** Ids of the repositories the latest snapshot reported, likewise. */
   openRepoIds: Ref<string[]>;
   readStorage: (key: string) => string | null | Promise<string | null>;
   writeStorage: (key: string, value: string) => Promise<unknown>;
@@ -33,8 +33,8 @@ interface UseMainTabPersistenceOptions {
 }
 
 /**
- * Carries the main area's tab sets across restarts, and drops the ones whose
- * subject is gone.
+ * Carries the main area's tab sets across restarts, leaving behind the ones
+ * whose subject is gone.
  *
  * Tab state is UI convenience, so it is written on a debounce and every
  * failure is logged rather than raised: a write that does not land must never
@@ -52,14 +52,6 @@ export function useMainTabPersistence({
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let lastWritten = "";
   let hydrated = false;
-  /**
-   * Scope subjects this session has actually seen. A scope is pruned only
-   * after its task or repository was observed and then went away — never
-   * because the first snapshot has not arrived yet, which would drop every
-   * restored tab set a moment after restoring it.
-   */
-  const seenTaskIds = new Set<string>();
-  const seenRepoIds = new Set<string>();
 
   async function flush(): Promise<void> {
     saveTimer = null;
@@ -83,9 +75,19 @@ export function useMainTabPersistence({
   }
 
   /**
-   * Restores the stored tab sets. Runs once the store holds this desktop's
-   * tasks and repositories, so a scope whose subject disappeared while the app
-   * was closed is left behind instead of restored into an empty window.
+   * Restores the stored tab sets, and is the only place a departed subject's
+   * scope is left behind.
+   *
+   * It runs once, after `store.init` has loaded this desktop's tasks and
+   * repositories, which is the one moment the snapshot can be read as the
+   * whole picture. Nothing prunes after that. `store.items` is replaced whole
+   * by every refresh and only ever carries the tasks of the repositories that
+   * refresh returned, and a task is absent from it while an optimistic close
+   * is in flight as well — so a task missing from one snapshot is not a task
+   * that left the desktop, and treating it as one emptied a live tab set for
+   * good and then persisted the deletion. A scope whose task really did close
+   * mid-session is unreachable anyway, since the task is gone from the
+   * sidebar; it costs a few objects until the next launch drops it here.
    */
   async function hydrate(): Promise<void> {
     if (hydrated) return;
@@ -108,33 +110,9 @@ export function useMainTabPersistence({
     }
   }
 
-  function pruneDeparted(
-    ids: string[],
-    seen: Set<string>,
-    scopeKeyFor: (id: string) => string,
-  ): void {
-    const live = new Set(ids);
-    for (const id of [...seen]) {
-      if (live.has(id)) continue;
-      tabs.dropScope(scopeKeyFor(id));
-      seen.delete(id);
-    }
-    for (const id of live) seen.add(id);
-  }
-
-  const stopPruning = watch(
-    [openTaskIds, openRepoIds],
-    ([taskIds, repoIds]) => {
-      pruneDeparted(taskIds, seenTaskIds, mainTabScopeKeyForTask);
-      pruneDeparted(repoIds, seenRepoIds, mainTabScopeKeyForRepo);
-    },
-    { immediate: true },
-  );
-
   const stopSaving = watch(() => tabs.snapshotScopes(), scheduleSave, { deep: true });
 
   function dispose(): void {
-    stopPruning();
     stopSaving();
     if (!saveTimer) return;
     // A change made in the last half-second is still worth storing: the window
