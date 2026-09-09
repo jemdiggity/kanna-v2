@@ -30,6 +30,7 @@ import {
   shouldSkipReconnect,
 } from "./terminalSessionRecovery"
 import { base64ToBytes, type TerminalInputQueue } from "./terminalInputQueue"
+import { applyTerminalSnapshot } from "./terminalSnapshotApply"
 import type { TerminalClipboardBridge } from "./terminalClipboardBridge"
 import type { TerminalLayoutController } from "./terminalLayout"
 import {
@@ -182,25 +183,30 @@ export function createTerminalSessionLifecycle(params: {
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
-            if (
-              shouldResetTerminalForSnapshot({
-                preserveRecoveredScrollback:
-                  params.state.preserveRecoveredScrollbackForNextSnapshot,
-                sessionRespawned: params.state.resetTerminalOnNextSnapshot,
-                agentProvider: agentProvider ?? params.options?.agentProvider,
-              })
-            ) {
-              liveTerminal.reset()
-            }
-            params.state.applyingSnapshot = true
-            if (liveTerminal.cols !== cols || liveTerminal.rows !== rows) {
-              liveTerminal.resize(cols, rows)
-            }
-            params.state.applyingSnapshot = false
+            const replaceBuffer = shouldResetTerminalForSnapshot({
+              preserveRecoveredScrollback:
+                params.state.preserveRecoveredScrollbackForNextSnapshot,
+              sessionRespawned: params.state.resetTerminalOnNextSnapshot,
+              agentProvider: agentProvider ?? params.options?.agentProvider,
+            })
             params.state.preserveRecoveredScrollbackForNextSnapshot = false
             params.state.resetTerminalOnNextSnapshot = false
             params.clipboardBridge.restoreTerminalModesFromSnapshot(vt)
-            liveTerminal.write(vt)
+            // A snapshot arriving mid-stream — the server re-attached to a
+            // replacement daemon — must land in the buffer behind whatever
+            // output this viewer has already accepted, not ahead of it.
+            applyTerminalSnapshot({
+              terminal: liveTerminal,
+              cols,
+              rows,
+              data: vt,
+              replaceBuffer,
+              applyGeometry: (resize) => {
+                params.state.applyingSnapshot = true
+                resize()
+                params.state.applyingSnapshot = false
+              },
+            })
           },
           onOutput: (dataB64, metadata) => {
             const perf = outputPerf
@@ -381,9 +387,15 @@ export function createTerminalSessionLifecycle(params: {
     params.state.respawningAfterAttachFailure = true
     try {
       if (recoveryState?.serialized) {
-        liveTerminal.reset()
         params.clipboardBridge.restoreTerminalModesFromSnapshot(recoveryState.serialized)
-        liveTerminal.write(recoveryState.serialized)
+        // Same serialization, same ordering rule as a live snapshot.
+        applyTerminalSnapshot({
+          terminal: liveTerminal,
+          cols: liveTerminal.cols,
+          rows: liveTerminal.rows,
+          data: recoveryState.serialized,
+          replaceBuffer: true,
+        })
         params.state.preserveRecoveredScrollbackForNextSnapshot = true
       }
       params.toast.warning(i18n.global.t(getRespawnToastKey(normalizedError, hasRecoveryState)))

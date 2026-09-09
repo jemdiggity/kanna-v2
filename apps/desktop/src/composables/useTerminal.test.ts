@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../appError";
 import { resetDaemonReadyObservationForTests } from "./daemonReadyState";
 import { bytesToBase64 } from "./terminalInputQueue";
+import { TERMINAL_FULL_RESET } from "./terminalSnapshotApply";
 
 const markTaskSwitchFirstOutputMock = vi.hoisted(() => vi.fn());
 const forwardTerminalRuntimeStatusMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -148,6 +149,11 @@ class FakeTerminal {
   dispose = vi.fn();
   write = vi.fn((data: string | Uint8Array, callback?: () => void) => {
     if (typeof data === "string") {
+      // xterm routes RIS straight back to Terminal.reset(), which is how a
+      // snapshot's reset travels in the byte stream instead of jumping ahead
+      // of queued output. The ordering itself is covered against a real xterm
+      // in terminalSnapshotApply.test.ts.
+      if (data === TERMINAL_FULL_RESET) this.reset();
       this.pendingStringWrites.push({ data, callback });
       return;
     }
