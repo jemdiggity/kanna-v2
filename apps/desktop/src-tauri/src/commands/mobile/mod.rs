@@ -278,15 +278,11 @@ impl MobileServerManager {
             }
         };
         let mut child = match Command::new(server_bin)
-            // The desktop explicitly authorizes its own database. An isolated
-            // test/dev context still vetoes this in the server at every open.
-            .env(
-                kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV,
-                "desktop",
-            )
-            .env("KANNA_SERVER_CONFIG", &config_path)
-            .env("KANNA_DESKTOP_EXECUTABLE", desktop_executable)
-            .envs(transfer_identity_env)
+            .envs(server_spawn_env(
+                &config_path,
+                &desktop_executable,
+                transfer_identity_env,
+            ))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(server_stderr_log(&config_path))
@@ -655,6 +651,30 @@ fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
     }
 
     Ok(app_data_dir.join("kanna-v2.db"))
+}
+
+/// Environment contract for the desktop-owned server process.
+fn server_spawn_env(
+    config_path: &Path,
+    desktop_executable: &Path,
+    mut transfer_identity_env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    transfer_identity_env.extend([
+        // Explicit authorization never overrides an isolated test/dev context.
+        (
+            kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV.into(),
+            "desktop".into(),
+        ),
+        (
+            "KANNA_SERVER_CONFIG".into(),
+            config_path.to_string_lossy().into_owned(),
+        ),
+        (
+            "KANNA_DESKTOP_EXECUTABLE".into(),
+            desktop_executable.to_string_lossy().into_owned(),
+        ),
+    ]);
+    transfer_identity_env
 }
 
 /// Peer identity for the transfer sidecar, resolved once here and handed to
@@ -1174,6 +1194,27 @@ fn escape_toml_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mobile_server_spawn_authorizes_the_desktop_database() {
+        let env: std::collections::HashMap<_, _> = super::server_spawn_env(
+            std::path::Path::new("/desktop/server.toml"),
+            std::path::Path::new("/Applications/Kanna.app/Contents/MacOS/Kanna"),
+            vec![("KANNA_TRANSFER_PEER_ID".into(), "peer".into())],
+        )
+        .into_iter()
+        .collect();
+        assert_eq!(
+            env[kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV],
+            "desktop"
+        );
+        assert_eq!(env["KANNA_SERVER_CONFIG"], "/desktop/server.toml");
+        assert_eq!(
+            env["KANNA_DESKTOP_EXECUTABLE"],
+            "/Applications/Kanna.app/Contents/MacOS/Kanna"
+        );
+        assert_eq!(env["KANNA_TRANSFER_PEER_ID"], "peer");
+    }
+
     use super::cloud_env::relay_url;
     use super::config::{build_server_config, sidecar_sha256_config_line};
     use super::{

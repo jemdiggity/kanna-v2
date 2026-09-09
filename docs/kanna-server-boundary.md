@@ -19,6 +19,12 @@ relocation touches either file, and immediately before every `Db::open` or
 independent companion SQLite opener uses the same runtime-defaults check.
 Path resolution, including canonical/legacy preference, does not grant access.
 
+Close-time worktree cleanup is a server-owned command appended after repository
+teardown. The teardown retains task isolation. Only the cleanup command restores
+`KANNA_TASK_ID` / `KANNA_WORKTREE` to the parent server's values and forwards its
+explicit desktop authorization, after checking database access in that parent.
+Other isolation signals remain intact, and the cleanup opener checks again.
+
 The real desktop database requires explicit `KANNA_DESKTOP_DB_ACCESS=desktop`,
 supplied by the desktop when it launches the server. Isolated/test/worktree
 processes cannot override the veto with that authorization. `kd` supplies

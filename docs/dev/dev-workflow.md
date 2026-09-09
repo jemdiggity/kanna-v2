@@ -60,6 +60,12 @@ The database selection crosses several independently launched processes:
 | Headless worker | The Phase 1 launcher selects a DB and supplies server configuration. A lost `--db-path`, including in an installed service unit, leaves the downstream server with a production fallback but no desktop authorization. The worker is developed separately from this checkout. |
 | Tests | Unit fixtures open temporary paths directly; relocation integration tests use canonical/legacy resolvers with temporary roots; process gates launch ordinary binaries. A dependency's `cfg(test)` does not identify an integration-test child, so launch context must travel to that child. |
 
+Close-time worktree cleanup is a server-owned command appended after repository
+teardown. The teardown retains task isolation. Only the cleanup command restores
+`KANNA_TASK_ID` / `KANNA_WORKTREE` to the parent server's values and forwards its
+explicit desktop authorization, after checking database access in that parent.
+Other isolation signals remain intact, and the cleanup opener checks again.
+
 Database naming is not permission to open the production database. The Rust
 SQLite opening and legacy-relocation boundaries enforce
 `kanna_runtime_defaults::database_access`: accessing the account's real

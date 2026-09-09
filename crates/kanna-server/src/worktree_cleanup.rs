@@ -81,14 +81,10 @@ pub(crate) fn cleanup_closed_task_worktrees_shell_command(
     repo_path: &str,
     task_id: &str,
 ) -> String {
-    format!(
-        "cd '{}' && '{}' worktree-cleanup '{}' '{}'",
-        shell_single_quote(repo_path),
-        shell_single_quote(&current_exe_for_shell()),
-        shell_single_quote(db_path),
-        shell_single_quote(task_id)
-    )
+    command::cleanup_shell_command(&current_exe_for_shell(), db_path, repo_path, task_id)
 }
+
+mod command;
 
 pub(crate) fn run_cleanup_cli(args: &[String]) -> Result<bool, String> {
     if args.first().map(|arg| arg.as_str()) != Some("worktree-cleanup") {
@@ -337,10 +333,6 @@ fn format_git_error(args: &[&str], output: Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
-}
-
-fn shell_single_quote(value: &str) -> String {
-    value.replace('\'', "'\\''")
 }
 
 fn current_exe_for_shell() -> String {
