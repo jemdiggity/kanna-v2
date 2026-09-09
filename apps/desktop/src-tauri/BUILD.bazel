@@ -342,6 +342,7 @@ rust_library(
         "//crates/claude-agent-sdk:claude_agent_sdk",
         "//crates/kanna-agent-protocol:kanna_agent_protocol",
         "//crates/runtime-defaults:kanna_runtime_defaults",
+        "//crates/server-process:kanna_server_process",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -372,6 +373,7 @@ rust_library(
         "//crates/claude-agent-sdk:claude_agent_sdk",
         "//crates/kanna-agent-protocol:kanna_agent_protocol",
         "//crates/runtime-defaults:kanna_runtime_defaults",
+        "//crates/server-process:kanna_server_process",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -402,6 +404,7 @@ rust_library(
         "//crates/claude-agent-sdk:claude_agent_sdk",
         "//crates/kanna-agent-protocol:kanna_agent_protocol",
         "//crates/runtime-defaults:kanna_runtime_defaults",
+        "//crates/server-process:kanna_server_process",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
