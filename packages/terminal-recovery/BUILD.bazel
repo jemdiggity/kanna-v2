@@ -46,6 +46,7 @@ rust_binary(
     crate_name = "kanna_terminal_recovery",
     edition = "2021",
     deps = all_crate_deps(normal = True) + [
+        "//crates/runtime-defaults:kanna_runtime_defaults",
         ":kanna_terminal_recovery_lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
