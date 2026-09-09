@@ -1,0 +1,31 @@
+load("@desktop_crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "cargo_srcs",
+    srcs = [
+        "Cargo.toml",
+    ] + glob(["src/**/*.rs"]),
+)
+
+rust_library(
+    name = "kanna_server_process",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "kanna_server_process",
+    edition = "2021",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "crates/server-process",
+    ),
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        package_name = "crates/server-process",
+    ),
+)
