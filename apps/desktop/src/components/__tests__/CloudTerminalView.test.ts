@@ -36,7 +36,13 @@ const testState = vi.hoisted(() => {
       this.cols = cols;
       this.rows = rows;
     });
-    write = vi.fn((_data: string | Uint8Array, callback?: () => void) => {
+    write = vi.fn((data: string | Uint8Array, callback?: () => void) => {
+      // xterm routes RIS straight back to Terminal.reset(), which is how a
+      // snapshot's reset travels in the byte stream instead of jumping ahead
+      // of output this viewer accepted but xterm has not parsed yet. The
+      // literal is `TERMINAL_FULL_RESET`, inlined because this mock factory is
+      // hoisted above the imports.
+      if (data === "\u001bc") this.reset();
       callback?.();
     });
 
@@ -867,13 +873,15 @@ describe("CloudTerminalView remote visual companion links", () => {
       throw new Error("remote terminal was not initialized");
     }
     client.resize.mockClear();
-    const snapshot = new TextEncoder().encode("\u001b[?1049h\u001b[2J\u001b[24;80Hcorner");
+    // Deliberately wider and taller than the viewer's own grid: the snapshot
+    // must be parsed at the dimensions the owner serialized it for.
+    const snapshot = new TextEncoder().encode("\u001b[?1049h\u001b[2J\u001b[40;120Hcorner");
 
     terminalListener({
       type: "snapshot",
       taskId: "task-1",
-      cols: 80,
-      rows: 24,
+      cols: 120,
+      rows: 40,
       data: snapshot,
     });
     await flushAsync();
@@ -887,11 +895,11 @@ describe("CloudTerminalView remote visual companion links", () => {
     });
     expect(terminal.options).not.toHaveProperty("convertEol");
     expect(terminal.reset).toHaveBeenCalledTimes(2);
-    expect(terminal.resize).toHaveBeenCalledWith(80, 24);
+    expect(terminal.resize).toHaveBeenCalledWith(120, 40);
     expect(terminal.write).toHaveBeenCalledWith(snapshot, expect.any(Function));
     expect(wrapper.attributes("data-status")).toBe("live");
     expect(client.resize).not.toHaveBeenCalled();
-    expect(terminal.refresh).toHaveBeenCalledWith(0, 23);
+    expect(terminal.refresh).toHaveBeenCalledWith(0, 39);
     wrapper.unmount();
   });
 

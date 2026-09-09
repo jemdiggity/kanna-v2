@@ -11928,13 +11928,17 @@ mod tests {
                 } else {
                     "after restart"
                 };
+                // The successor serves the session at the geometry it adopted,
+                // which the re-attach must carry to the viewer along with the
+                // snapshot: a grid hydrated at the wrong size renders wrong.
+                let (rows, cols) = if round == 0 { (24, 80) } else { (40, 120) };
                 let mut events = vec![
                     DaemonEvent::Snapshot {
                         session_id: "shell-wt-reattach-1".to_string(),
                         snapshot: kanna_daemon::protocol::TerminalSnapshot {
                             version: 1,
-                            rows: 24,
-                            cols: 80,
+                            rows,
+                            cols,
                             cursor_row: 0,
                             cursor_col: 0,
                             cursor_visible: true,
@@ -12007,8 +12011,14 @@ mod tests {
 
         // First attach: snapshot + output, then the daemon connection dies.
         match recv_frame(&mut socket).await {
-            ServerFrame::TermSnapshot { data_b64, .. } => {
+            ServerFrame::TermSnapshot {
+                data_b64,
+                cols,
+                rows,
+                ..
+            } => {
                 assert_eq!(decode(data_b64), b"before restart");
+                assert_eq!((cols, rows), (80, 24));
             }
             other => panic!("expected first snapshot, got {other:?}"),
         }
@@ -12026,8 +12036,14 @@ mod tests {
         // The stream must transparently re-attach (no client action, no error
         // frame) and resync with a fresh snapshot instead of going silent.
         match recv_frame(&mut socket).await {
-            ServerFrame::TermSnapshot { data_b64, .. } => {
+            ServerFrame::TermSnapshot {
+                data_b64,
+                cols,
+                rows,
+                ..
+            } => {
                 assert_eq!(decode(data_b64), b"after restart");
+                assert_eq!((cols, rows), (120, 40));
             }
             other => panic!("expected re-attach snapshot, got {other:?}"),
         }

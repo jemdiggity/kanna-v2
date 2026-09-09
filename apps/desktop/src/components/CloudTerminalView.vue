@@ -31,6 +31,10 @@ import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 import { useToast } from "../composables/useToast";
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "../composables/terminalKeyboard";
 import { createTerminalInputProducerClassifier } from "../composables/terminalInputProducer";
+import {
+  applyTerminalSnapshot,
+  TERMINAL_FULL_RESET,
+} from "../composables/terminalSnapshotApply";
 import { useTerminalFocusWhenActive } from "../composables/useTerminalFocusWhenActive";
 import { nextFrameOrTimeout } from "../utils/animationFrame";
 import {
@@ -291,13 +295,21 @@ function applyRemoteSnapshot(
   // dimensions. Replaying it into the viewer's unrelated dimensions reflows
   // full-screen TUIs before their cursor-addressed redraw can run. Restore the
   // source geometry first; the viewer's fit proposal remains presentation-only.
-  terminal.reset();
-  terminal.resize(cols, rows);
-  terminal.write(data, () => {
-    if (!terminal || unmounted || generation !== lifecycleGeneration) return;
-    status.value = "live";
-    terminal.refresh(0, terminal.rows - 1);
-    void fitAndResizeRemoteAfterLayout(generation);
+  // The reset travels in the byte stream so a snapshot pushed mid-stream — the
+  // owner's server re-attached to a replacement daemon — cannot erase output
+  // this viewer accepted but xterm has not parsed yet.
+  applyTerminalSnapshot({
+    terminal,
+    cols,
+    rows,
+    data,
+    replaceBuffer: true,
+    onParsed: () => {
+      if (!terminal || unmounted || generation !== lifecycleGeneration) return;
+      status.value = "live";
+      terminal.refresh(0, terminal.rows - 1);
+      void fitAndResizeRemoteAfterLayout(generation);
+    },
   });
 }
 
@@ -314,7 +326,9 @@ async function start() {
   fileLinkProvider?.clearFileCache();
   status.value = "connecting";
   errorMessage.value = null;
-  terminal?.reset();
+  // Same ordering rule as a snapshot: bytes from the subscription being
+  // replaced must not survive the wipe by being parsed after it.
+  terminal?.write(TERMINAL_FULL_RESET);
   terminal?.write("Connecting to remote terminal...\r\n");
 
   let acquiredClient: DesktopRemoteTaskClient | null = null;
