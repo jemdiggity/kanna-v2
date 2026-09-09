@@ -832,6 +832,30 @@ mod tests {
     }
 
     #[test]
+    fn bounds_bare_filename_resolution_when_the_match_is_beyond_the_walk_limit() {
+        let fixture = TaskFileFixture::new();
+        fixture.write("nested/available.ts", b"available");
+
+        let result = resolve_task_file_mentions_with_limit(
+            &fixture.db,
+            "task-1",
+            vec![TaskFileMention {
+                path: "available.ts".into(),
+                line: None,
+            }],
+            0,
+        )
+        .unwrap();
+
+        assert!(result.mentions[0].matches.is_empty());
+        assert!(result.mentions[0].truncated);
+        assert_eq!(
+            result.mentions[0].unavailable_reason.as_deref(),
+            Some("file not found")
+        );
+    }
+
+    #[test]
     fn reads_bare_relative_file() {
         let fixture = TaskFileFixture::new();
         fixture.write("README.md", b"read me");
