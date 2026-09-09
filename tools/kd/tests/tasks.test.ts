@@ -382,6 +382,7 @@ describe("task executors", () => {
             KANNA_FIREBASE_UI_PORT: 9103
           },
           env: {
+            KANNA_DB_PATH: join(repoRoot, "test.db"),
             HOME: home,
             KANNA_DEV_PORT: "1421",
             KANNA_MOBILE_PORT: "8084",
@@ -474,6 +475,7 @@ describe("task executors", () => {
           KANNA_FIREBASE_UI_PORT: 9103
         },
         env: {
+          KANNA_DB_PATH: join(repoRoot, "test.db"),
           KANNA_DEV_PORT: "1421",
           KANNA_MOBILE_PORT: "8084",
           KANNA_FIREBASE_AUTH_PORT: "9100",
@@ -619,6 +621,7 @@ describe("task executors", () => {
             KANNA_FIREBASE_UI_PORT: 9103
           },
           env: {
+            KANNA_DB_PATH: join(repoRoot, "test.db"),
             HOME: home,
             KANNA_DEV_PORT: "1421",
             KANNA_MOBILE_PORT: "8084",

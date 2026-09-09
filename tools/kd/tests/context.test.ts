@@ -17,6 +17,7 @@ describe("resolveKdContext", () => {
       configPorts: {}
     });
 
+    expect(context.env.KANNA_DB_ISOLATED).toBe("1");
     expect(context.isWorktree).toBe(true);
     expect(context.worktreeName).toBe("task-abc123");
     expect(context.env.KANNA_BUILD_TASK_ID).toBe("abc123");

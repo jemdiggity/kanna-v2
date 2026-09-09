@@ -88,7 +88,9 @@ export function resolveKdContext(input: ResolveKdContextInput): KdContext {
   const appDataRoot = appDataDir(input.homeDir, input.env, platform);
   const worktreeName = isWorktree ? basename(input.repoRoot) : undefined;
   const ports = resolvePorts({ env: input.env, configPorts: input.configPorts });
-  const env: NodeJS.ProcessEnv = { ...input.env };
+  // Every kd-launched instance is development or verification. This veto
+  // travels to SQLite openers, including launchers that forget the DB override.
+  const env: NodeJS.ProcessEnv = { ...input.env, KANNA_DB_ISOLATED: "1" };
 
   if (isWorktree) {
     env.KANNA_WORKTREE = "1";
