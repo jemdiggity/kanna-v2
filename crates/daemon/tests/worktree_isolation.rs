@@ -66,10 +66,12 @@ fn worktree_daemon_ignores_production_default_env_and_writes_runtime_files_local
         .join("repo")
         .join(".kanna-worktrees")
         .join("task-isolation");
-    let production_daemon_dir = home
-        .join("Library")
-        .join("Application Support")
-        .join("Kanna");
+    // The value a production launcher would pass. It must come from the
+    // resolver rather than a literal: the daemon ignores this env var only by
+    // recognising it as *this platform's* production default, and that path
+    // is `~/Library/Application Support/Kanna` on macOS but an XDG data
+    // directory on Linux.
+    let production_daemon_dir = kanna_runtime_defaults::default_daemon_dir_for_home(&home);
 
     std::fs::create_dir_all(&worktree).expect("worktree cwd should be created");
     let expected_daemon_dir = worktree.join(".kanna-daemon");

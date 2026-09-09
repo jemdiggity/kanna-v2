@@ -1751,7 +1751,7 @@ mod tests {
 
     use super::*;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn verified_group_kill_batch_keeps_results_ordered_and_independent() {
         let spec = SpawnSpec {
@@ -1847,7 +1847,7 @@ mod tests {
         // No identity (legacy handoff) — never signalable.
         assert!(signal_agent_pid(victim.id(), None, true, libc::SIGKILL).is_err());
         // Mismatched identity (recycled pid) — never signalable.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let live = crate::proc_info::process_info(victim.id() as libc::pid_t)
                 .expect("victim info should resolve");
@@ -1874,7 +1874,7 @@ mod tests {
     /// Fault coverage for the final identity-check-to-`kill(2)` window: with
     /// the target changing inside the verify→stop window, the destructive
     /// group kill must fail closed rather than signal a possibly-recycled pid.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn verified_group_kill_fails_closed_in_the_check_to_signal_window() {
         use std::sync::atomic::Ordering;
@@ -2094,7 +2094,7 @@ mod tests {
     /// Descendant-tree teardown: an agent helper that called `setsid()` has
     /// left the leader's process group, so a bare `kill(-pid)` would leave it
     /// alive holding the child's pipes. The parent-chain walk must reach it.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn verified_group_kill_reaches_setsid_escapee_descendants() {
         if !std::path::Path::new("/usr/bin/perl").exists() {
@@ -2170,7 +2170,7 @@ mod tests {
 
     /// The happy path still works: a live child with a provable identity is
     /// frozen and killed.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn verified_group_kill_terminates_a_provable_child() {
         let spec = SpawnSpec {
@@ -2194,7 +2194,7 @@ mod tests {
     /// nothing pins the pid across delivery, so the signal is refused rather
     /// than risking an unrelated process group after PID reuse. Destructive
     /// teardown is unaffected (it freezes first).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn signal_agent_pid_refuses_unowned_children_even_with_matching_identity() {
         let mut victim = std::process::Command::new("/bin/sleep")
@@ -2251,7 +2251,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn signal_agent_pid_kills_verified_child_group() {
         let spec = SpawnSpec {

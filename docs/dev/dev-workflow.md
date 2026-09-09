@@ -26,9 +26,18 @@ run simultaneously without conflicts:
   `KANNA_DEV_PORT: 1420`); each worktree gets the next free offset and the
   resolved values are passed to its processes as env vars.
 - **Database** — main uses `kanna-v2.db`; worktrees use
-  `kanna-wt-{worktree-dir}.db` (same Application Support dir).
-- **Daemon** — worktrees use `{worktree}/.kanna-daemon/` instead of
-  `~/Library/Application Support/Kanna/`.
+  `kanna-wt-{worktree-dir}.db` (same application-data dir).
+- **Daemon** — worktrees use `{worktree}/.kanna-daemon/` instead of the
+  machine's application-data directory.
+
+Where "application data" is depends on the platform, resolved once in
+`crates/runtime-defaults` and mirrored by `kd`: `~/Library/Application Support`
+on macOS, and `$XDG_DATA_HOME` (else `~/.local/share`) on Linux — the same
+resolution `dirs::data_dir()` performs, which is how `kanna-server` reaches the
+same directory. The daemon's control sockets live in `/tmp` on macOS and in
+`$XDG_RUNTIME_DIR` on Linux when the session manager provides one, because that
+directory is per-user and `0700` while a shared `/tmp` socket path can be
+pre-created by any local user.
 - **tmux** — worktrees get their own tmux *server* named
   `kanna-{worktree-dir}`.
 - **Tauri config** — `kd dev up` writes `tauri.conf.local.json` with the port
@@ -458,6 +467,48 @@ Consequences worth knowing:
   (it declares `workflow_dispatch`).
 - `./kd pages build-schema --out-dir <dir>` still runs locally, and is the way
   to inspect exactly what CI would upload.
+
+## Linux development (headless)
+
+Linux has no GUI lane yet: `kd dev up` is macOS-only, and the Linux surface is
+the **headless worker** — the daemon, the server, the CLI and the sidecars
+under `kanna-worker`. Everything below is verified on the Ubuntu 26.04 aarch64
+VM described in
+[`docs/2026-09-08-linux-phase1-headless-worker.md`](../2026-09-08-linux-phase1-headless-worker.md).
+
+Prerequisites beyond the macOS list: the apt packages in the Phase 0 baseline
+(including `libssl-dev`, still a build prerequisite because two crates route
+TLS through `native-tls`), and `sqlite3` for `./kd doctor`.
+
+```bash
+# One shared Ghostty checkout. Unset, libghostty-vt-sys clones the whole
+# repository into every new OUT_DIR, so a `cargo test` after a `cargo build`
+# re-fetches it.
+git clone --filter=blob:none https://github.com/jemdiggity/ghostty.git ~/.cache/ghostty-src
+git -C ~/.cache/ghostty-src checkout 665a03f380204ce1976941d36649963b4da80880
+export GHOSTTY_SOURCE_DIR=$HOME/.cache/ghostty-src
+
+./kd test rust                 # skips the desktop crate and its frontend off macOS
+./kd test headless-worker      # the exit gate: a real worker, daemon, server and task
+
+cargo build -p kanna-worker -p kanna-daemon -p kanna-server -p kanna-cli
+# --lan-port because 48120 is the desktop app's: a worker refuses a port
+# another Kanna instance already serves rather than stopping it.
+.build/debug/kanna-worker run --data-dir ~/.local/share/Kanna \
+  --db-path ~/.local/share/build.kanna/kanna-v2.db --lan-port 48140
+.build/debug/kanna-worker print-unit     # inspect the systemd --user unit
+.build/debug/kanna-worker install-unit   # write it, then follow the printed steps
+```
+
+Two things to know when driving a worker:
+
+- `systemctl --user` over SSH needs `XDG_RUNTIME_DIR=/run/user/$(id -u)` and
+  `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus`, and surviving
+  logout needs `loginctl enable-linger $USER`.
+- **`SIGTERM` stops only the server.** The daemon and every agent session it
+  owns keep running, exactly as they do when the desktop app is closed. The
+  unit sets `KillMode=process` so a `systemctl --user restart` behaves the same
+  way. `kanna-worker stop-daemon` is the full teardown.
 
 ## Debugging map
 

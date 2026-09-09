@@ -11,6 +11,7 @@ mod http_api;
 mod human_control;
 mod internal_ports;
 mod ksp;
+mod login_shell;
 mod mobile_api;
 mod pairing;
 mod register;

@@ -12,8 +12,11 @@ cargo build -p kanna-daemon                 # binary lands in .build/debug/ (rep
 KANNA_DAEMON_DIR=$(mktemp -d) .build/debug/kanna-daemon > /tmp/daemon-stdout.log 2>&1 &
 ```
 
-The daemon derives its socket from the dir hash and logs it at startup:
-`grep -o 'socket="[^"]*"' $KANNA_DAEMON_DIR/kanna-daemon_*.log` → `/tmp/kanna-XXXXXXXX.sock`.
+The daemon derives its socket from the dir hash and logs it at startup — read
+the path from the log rather than assuming a directory, because it is
+`/tmp/kanna-XXXXXXXX.sock` on macOS but `$XDG_RUNTIME_DIR/kanna-XXXXXXXX.sock`
+on Linux when the session manager provides one:
+`grep -o 'socket="[^"]*"' $KANNA_DAEMON_DIR/kanna-daemon_*.log`.
 
 Protocol is line-delimited JSON over the unix socket, tagged with `"type"`
 (see `crates/daemon/src/protocol.rs`). A minimal python client works well:
@@ -24,7 +27,7 @@ stream — skip them when waiting for a reply.
 Useful command shapes:
 
 ```json
-{"type":"Spawn","session_id":"v1","executable":"/bin/zsh","args":["-c","sleep 300"],"cwd":"/tmp","env":{},"cols":80,"rows":24}
+{"type":"Spawn","session_id":"v1","executable":"/bin/sh","args":["-c","sleep 300"],"cwd":"/tmp","env":{},"cols":80,"rows":24}
 {"type":"Kill","session_id":"v1"}
 {"type":"List"}
 ```

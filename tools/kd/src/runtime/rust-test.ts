@@ -8,19 +8,57 @@ export interface RustTestCommand {
 
 interface ExecutedRustTestCommand extends RustTestCommand, CommandResult {}
 
-export function buildRustTestCommands(): RustTestCommand[] {
-  return [
+/**
+ * The lanes `./kd test rust` runs.
+ *
+ * Off macOS the desktop crate is excluded and its frontend build skipped.
+ * That is not a lowered bar: the Tauri app is not part of the headless
+ * worker's surface, and Phase 2 is where the GUI's own lane belongs. The
+ * sidecars, the daemon and the server are still built and tested in full.
+ */
+export function buildRustTestCommands(
+  platform: NodeJS.Platform = process.platform,
+): RustTestCommand[] {
+  const headless = platform !== "darwin";
+  const commands: RustTestCommand[] = [
     {
       name: "agent-protocol",
       command: "./scripts/check-agent-protocol-types.sh",
       args: [],
     },
-    { name: "frontend", command: "pnpm", args: ["--dir", "apps/desktop", "build"] },
-    { name: "sidecars", command: "./kd", args: ["build", "sidecars"] },
-    { name: "clippy", command: "cargo", args: ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"] },
-    { name: "workspace", command: "cargo", args: ["test", "--workspace", "--exclude", "kanna-daemon"] },
-    { name: "daemon", command: "cargo", args: ["test", "-p", "kanna-daemon", "--", "--test-threads=1"] },
   ];
+  if (!headless) {
+    commands.push({ name: "frontend", command: "pnpm", args: ["--dir", "apps/desktop", "build"] });
+  }
+  commands.push(
+    { name: "sidecars", command: "./kd", args: ["build", "sidecars"] },
+    {
+      name: "clippy",
+      command: "cargo",
+      args: [
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        ...(headless ? ["--exclude", "kanna-desktop"] : []),
+        "--",
+        "-D",
+        "warnings",
+      ],
+    },
+    {
+      name: "workspace",
+      command: "cargo",
+      args: [
+        "test",
+        "--workspace",
+        "--exclude",
+        "kanna-daemon",
+        ...(headless ? ["--exclude", "kanna-desktop"] : []),
+      ],
+    },
+    { name: "daemon", command: "cargo", args: ["test", "-p", "kanna-daemon", "--", "--test-threads=1"] },
+  );
+  return commands;
 }
 
 export async function executeRustTests(input: {

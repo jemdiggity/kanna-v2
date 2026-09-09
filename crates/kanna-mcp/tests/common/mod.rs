@@ -340,7 +340,15 @@ fn daemon_socket_path(daemon_dir: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     daemon_dir.to_path_buf().hash(&mut hasher);
     let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+    // The directory is part of the mirror too: macOS has no per-user runtime
+    // directory so these sockets live in `/tmp`, while on Linux they go in
+    // `$XDG_RUNTIME_DIR` when the session manager provides one, because a
+    // shared `/tmp` socket path is pre-creatable by any local user there.
+    let dir = match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        Some(runtime_dir) if !cfg!(target_os = "macos") && runtime_dir.is_absolute() => runtime_dir,
+        _ => PathBuf::from("/tmp"),
+    };
+    dir.join(format!("kanna-{hash:08x}.sock"))
 }
 
 /// A stand-in for the PTY daemon that speaks its wire protocol: it establishes

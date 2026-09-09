@@ -1,0 +1,20 @@
+{
+  "name": "@kanna/headless-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --maxWorkers=1 src/providerPath.test.ts",
+    "test:gate": "vitest run --maxWorkers=1 src/gate.e2e.test.ts src/process.e2e.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kanna/local-process-fetch": "workspace:*",
+    "@kanna/remote-e2e": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.4"
+  }
+}

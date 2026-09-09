@@ -188,7 +188,7 @@ pub(crate) fn write_path_health() -> WritePathHealth {
 /// A test that proves timeout handling must first get the supervised process
 /// into the state under test — output produced, descendants spawned. A fixed
 /// budget cannot express that ordering: on a loaded machine it can expire
-/// while `/bin/zsh --login` is still sourcing profiles, so the test asserts
+/// while the login shell is still sourcing profiles, so the test asserts
 /// against machine speed rather than against the timeout path. The caller
 /// therefore observes that state itself and arms this flag; the accompanying
 /// duration is only hang containment for a fixture that never arms it.
@@ -399,9 +399,10 @@ fn spawn_workspace_process(
     cwd: &Path,
     env: &HashMap<String, String>,
 ) -> Result<SupervisedChild, String> {
-    let mut command = Command::new("/bin/zsh");
+    let shell = crate::login_shell::login_shell();
+    let mut command = Command::new(shell.path());
     command
-        .args(["--login", "-c", shell_command])
+        .args(shell.login_args(shell_command))
         .current_dir(cwd)
         .envs(env)
         .stdout(Stdio::piped())

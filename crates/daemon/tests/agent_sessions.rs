@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand};
@@ -107,8 +108,70 @@ impl DaemonHandle {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
+        // Kill the sessions through the daemon before killing the daemon. A
+        // SIGKILLed daemon never runs its teardown sweep, so every agent it
+        // owned is orphaned to init and outlives the run -- and these fixtures
+        // include shells that loop, which then compete with the rest of the
+        // suite for the machine.
+        self.kill_live_sessions();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl DaemonHandle {
+    /// Best-effort teardown. Silent on failure: several fixtures leave the
+    /// daemon already gone, which is the point of them.
+    fn kill_live_sessions(&self) {
+        let Ok(stream) = UnixStream::connect(&self.socket_path) else {
+            return;
+        };
+        // Only tear down sessions if this handle's own daemon is the one
+        // serving. A superseded handle is dropped while its *successor* holds
+        // the socket -- which is exactly what the handoff fixtures do -- and
+        // killing that successor's sessions would destroy the thing under
+        // test.
+        if kanna_daemon::proc_info::socket_peer_pid(stream.as_raw_fd())
+            != Some(self.child.id() as libc::pid_t)
+        {
+            return;
+        }
+        if stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+        {
+            return;
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        let mut conn = ClientConn {
+            reader: BufReader::new(clone),
+            writer: stream,
+        };
+        conn.send(&Command::List);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sessions = loop {
+            if Instant::now() >= deadline {
+                return;
+            }
+            let mut line = String::new();
+            if conn.reader.read_line(&mut line).is_err() {
+                return;
+            }
+            match serde_json::from_str::<Event>(line.trim()) {
+                Ok(Event::SessionList { sessions }) => break sessions,
+                Ok(_) => continue,
+                Err(_) => return,
+            }
+        };
+        for session_id in sessions.iter().map(|session| session.session_id.clone()) {
+            conn.send(&Command::Kill { session_id });
+        }
+        // One drain pass so the kills are actually written and answered
+        // before the daemon is torn down under them.
+        let mut line = String::new();
+        let _ = conn.reader.read_line(&mut line);
     }
 }
 
@@ -166,6 +229,13 @@ impl ClientConn {
 
     /// Attach to an agent and collect replayed plus live events until one
     /// matches `stop` (inclusive).
+    ///
+    /// Always prefer this to `AttachAgent` followed by
+    /// [`Self::collect_agent_events_until`]: the child can reach the stop
+    /// condition before the attach lands -- the fake agents here regularly
+    /// do, and dash on Linux is fast enough that it is the common case, not
+    /// a rare race -- and the live stream then never carries the event the
+    /// caller is waiting for.
     fn attach_and_collect_agent_events_until<F: Fn(&AgentEvent) -> bool>(
         &mut self,
         session_id: &str,
@@ -308,14 +378,26 @@ done
 
 /// Fake codex agent: starts a turn, then blocks until signaled. Codex has no
 /// stdin protocol, so the daemon interrupts it with SIGINT (the path that used
-/// to be misreported as a crash). Keep the blocker in shell builtins because
-/// `/bin/sh` can defer traps while waiting for an external foreground process.
-const CODEX_SLEEPER_AGENT: &str = r#"#!/bin/sh
-trap 'exit 130' INT TERM
-echo '{"type":"thread.started","thread_id":"fake-thread"}'
-echo '{"type":"turn.started"}'
-echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"interim answer"}}'
-while :; do :; done
+/// to be misreported as a crash).
+///
+/// Not a shell script, deliberately. The daemon ignores SIGINT (and SIGHUP and
+/// SIGQUIT) so that a Ctrl-C aimed at whoever launched it cannot take the
+/// sessions down, and an *ignored* disposition survives `exec` into the child.
+/// POSIX then forbids a shell from trapping a signal that was ignored when it
+/// started, so `trap 'exit 130' INT` in `/bin/sh` is silently a no-op here and
+/// the fixture never responds to the interrupt -- measured on Linux as
+/// `SigIgn: …7` on the child, with only the TERM trap installed. A real agent
+/// CLI is not a shell: it calls `sigaction` itself, which overrides an
+/// inherited ignore. This fixture does the same, through perl, so it exercises
+/// the interrupt path a real provider actually takes.
+const CODEX_SLEEPER_AGENT: &str = r#"#!/usr/bin/perl
+$| = 1;
+$SIG{INT} = sub { exit 130 };
+$SIG{TERM} = sub { exit 130 };
+print qq({"type":"thread.started","thread_id":"fake-thread"}\n);
+print qq({"type":"turn.started"}\n);
+print qq({"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"interim answer"}}\n);
+sleep 1 while 1;
 "#;
 
 /// Fake persistent agent that emits an interim answer, then crashes before a
@@ -607,21 +689,10 @@ fn input_after_exit_resumes_via_respawn() {
         params: spawn_params(&dir, &script, "first prompt"),
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-r".to_string(),
-        from_seq: 0,
-    });
-    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
 
-    // Wait for the one-shot child to finish its turn and exit.
-    let mut seen = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !seen.iter().any(is_turn_completed) {
-        assert!(Instant::now() < deadline, "first turn never completed");
-        if let Event::AgentEvent { event, .. } = conn.recv() {
-            seen.push(event);
-        }
-    }
+    // Wait for the one-shot child to finish its turn and exit. The turn can
+    // complete before this attach, so the snapshot counts too.
+    conn.attach_and_collect_agent_events_until("agent-r", 0, is_turn_completed);
     wait_for_session_exit(&mut conn, "agent-r");
 
     // Input after exit must respawn (the fake ignores --resume args but the
@@ -651,12 +722,7 @@ fn input_after_handoff_uses_persisted_provider_session_id() {
         params: spawn_params(&dir, &script, "first prompt"),
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-rp".to_string(),
-        from_seq: 0,
-    });
-    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
-    conn.collect_agent_events_until(is_turn_completed);
+    conn.attach_and_collect_agent_events_until("agent-rp", 0, is_turn_completed);
     wait_for_session_exit(&mut conn, "agent-rp");
 
     let new_daemon = DaemonHandle::start_in(&dir);
@@ -692,14 +758,12 @@ fn permission_flow_with_allow_session_auto_approval() {
         params: spawn_params(&dir, &script, "needs permissions"),
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-p".to_string(),
-        from_seq: 0,
-    });
-    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
-
-    // First permission request surfaces for a decision.
-    let until_first_request = conn.collect_agent_events_until(
+    // First permission request surfaces for a decision. It may already be in
+    // the attach snapshot -- the child can outrun the attach -- so the
+    // snapshot counts towards the stop condition.
+    let until_first_request = conn.attach_and_collect_agent_events_until(
+        "agent-p",
+        0,
         |e| matches!(e, AgentEvent::PermissionRequest { request_id, .. } if request_id == "perm-1"),
     );
     assert!(until_first_request.iter().any(
@@ -750,13 +814,11 @@ fn agent_session_survives_daemon_handoff() {
         params: spawn_params(&dir, &script, "survive the swap"),
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-h".to_string(),
-        from_seq: 0,
-    });
-    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
-    // Let the first turn land in the journal before swapping daemons.
-    conn.collect_agent_events_until(is_turn_completed);
+    // Let the first turn land in the journal before swapping daemons. The
+    // turn may already have completed before this attach -- a fake agent on a
+    // fast machine routinely finishes first -- so the snapshot must be
+    // searched for the stop condition rather than only the live stream.
+    conn.attach_and_collect_agent_events_until("agent-h", 0, is_turn_completed);
 
     // Start a new daemon in the same dir — it performs handoff; the old one exits.
     let new_daemon = DaemonHandle::start_in(&dir);
@@ -970,13 +1032,7 @@ fn opencode_headless_spawn_passes_task_cwd_as_project_dir() {
         params,
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-oc-cwd".to_string(),
-        from_seq: 0,
-    });
-    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
-
-    let events = conn.collect_agent_events_until(is_turn_completed);
+    let events = conn.attach_and_collect_agent_events_until("agent-oc-cwd", 0, is_turn_completed);
     let expected = format!("dir={}", task_cwd.display());
     assert!(
         events
@@ -1042,11 +1098,9 @@ fn kill_removes_agent_session() {
         params: spawn_params(&dir, &script, "kill me"),
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-k".to_string(),
-        from_seq: 0,
-    });
-    conn.collect_agent_events_until(
+    conn.attach_and_collect_agent_events_until(
+        "agent-k",
+        0,
         |e| matches!(e, AgentEvent::AssistantText { text, .. } if text == "interim answer"),
     );
 
@@ -1132,12 +1186,7 @@ fn kill_during_resumed_turn_terminates_the_resumed_child() {
         params,
     });
     conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
-    conn.send(&Command::AttachAgent {
-        session_id: "agent-slow".to_string(),
-        from_seq: 0,
-    });
-    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
-    conn.collect_agent_events_until(is_turn_completed);
+    conn.attach_and_collect_agent_events_until("agent-slow", 0, is_turn_completed);
     // The next input must take the resume path, which requires the daemon to
     // have observed EOF first.
     wait_for_session_exit(&mut conn, "agent-slow");

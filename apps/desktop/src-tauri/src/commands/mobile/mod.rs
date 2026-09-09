@@ -17,7 +17,8 @@ use config::{
     server_config_matches_runtime, server_config_path_for_app_data_dir,
     server_lock_path_for_config, try_claim_server_lock, write_server_config,
 };
-use process::{find_sidecar, server_pids_on_port, stop_server_on_port};
+use kanna_server_process::stop_server_on_port;
+use process::find_sidecar;
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_SERVER_PORT: u16 = kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT;
@@ -469,14 +470,7 @@ impl MobileServerManager {
 }
 
 async fn listening_server_pid(cloud_env: Option<DesktopCloudEnvironment>) -> Result<u32, String> {
-    let pids = server_pids_on_port(local_server_port_for_cloud_env(cloud_env)).await?;
-    let [pid] = pids.as_slice() else {
-        return Err(format!(
-            "expected exactly one kanna-server listener, found {}",
-            pids.len()
-        ));
-    };
-    u32::try_from(*pid).map_err(|_| format!("invalid kanna-server pid: {pid}"))
+    kanna_server_process::listening_server_pid(local_server_port_for_cloud_env(cloud_env)).await
 }
 
 #[tauri::command]

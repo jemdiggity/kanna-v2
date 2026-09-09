@@ -1512,6 +1512,7 @@ fn prepare_workspace_teardown_with_extra(
         build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config).ok()?;
     let session_id = format!("td-{branch}");
     let shell_command = build_teardown_shell_command(&teardown);
+    let shell = crate::login_shell::login_shell();
     Some(PreparedWorkspaceTeardown {
         session_id,
         daemon_dir: config.daemon_dir.clone(),
@@ -1521,13 +1522,8 @@ fn prepare_workspace_teardown_with_extra(
         env: spawn_env,
         session: PreparedSessionSpawn::Pty {
             agent_executable: None,
-            executable: "/bin/zsh".to_string(),
-            args: vec![
-                "--login".to_string(),
-                "-i".to_string(),
-                "-c".to_string(),
-                shell_command,
-            ],
+            executable: shell.path().to_string(),
+            args: shell.login_interactive_args(&shell_command),
             cols: 80,
             rows: 24,
             agent_provider: AgentProvider::Claude,
@@ -1713,15 +1709,11 @@ fn build_prepared_session(
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
                 shell_path.as_deref(),
             );
+            let shell = crate::login_shell::login_shell();
             (
                 PreparedSessionSpawn::Pty {
-                    executable: "/bin/zsh".to_string(),
-                    args: vec![
-                        "--login".to_string(),
-                        "-i".to_string(),
-                        "-c".to_string(),
-                        full_cmd,
-                    ],
+                    executable: shell.path().to_string(),
+                    args: shell.login_interactive_args(&full_cmd),
                     cols: 80,
                     rows: 24,
                     agent_provider: provider,

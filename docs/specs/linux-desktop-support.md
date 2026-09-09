@@ -482,7 +482,7 @@ Phase 0 touched neither.
 | Phase | Deliverable and exit gate | Effort |
 | --- | --- | --- |
 | 0: Bound the platform | Confirm VM/distro/architecture and dependency policy; prove pinned sidecar builds; measure process identity and PTY behavior; decide launcher ownership. | **Done 2026-09-07**, inside one working session — well below the original S–M estimate, because the build spike came out clean |
-| 1: Headless worker | Daemon, server, CLI/MCP, definitions and recovery resources; Linux paths/shells; authenticated startup/handoff. Exercise create → execute → durable input → completion → stage fork → close, server restart, and daemon replacement. **Now also: a Kanna-owned per-user supervisor/launcher binary and its user unit.** | L: 5–8 weeks (was 4–8; the low end is no longer plausible) |
+| 1: Headless worker | Daemon, server, CLI/MCP, definitions and recovery resources; Linux paths/shells; authenticated startup/handoff. Exercise create → execute → durable input → completion → stage fork → close, server restart, and daemon replacement. **Now also: a Kanna-owned per-user supervisor/launcher binary and its user unit.** | **Done 2026-09-08** — the gate passes on the VM; see [the evidence](../2026-09-08-linux-phase1-headless-worker.md) |
 | 2: GUI preview | Real Tauri app through `kd`, terminal matrix, Linux integrations/shortcuts, WebDriver lane, local credential tests, and paired mobile access. | L: 3–6 additional weeks (unchanged; the build-side risk is gone, the runtime risk is not) |
 | 3: Supported distribution | Clean-machine install without developer tools, signed update strategy, installed live-session upgrade tests, supported display/hardware matrix, release automation, support documentation. **Now also: Linux triples in the `crate_universe` graph.** | M–L: 2–4 additional weeks (unchanged) |
 
@@ -533,6 +533,11 @@ Phase 0 was scoped to produce evidence for these, not to make them. None is the
 build stage's to settle; each still needs the owner. What changed is that four
 of the six now have measurements attached rather than assumptions.
 
+Phase 1 was built under the recommended answers and did not settle any of
+them. Where it committed code to one — the supervisor in question 4 — it says
+so, and the commitment is reversible: `kanna-worker` is one crate that owns
+startup and authorization only, and nothing else in the system knows it exists.
+
 1. Is the launch product a local headless worker, a full desktop replacement,
    or both in that order? Recommendation: both in that order.
    **Still open — no new evidence; unchanged recommendation.**
@@ -556,7 +561,12 @@ of the six now have measurements attached rather than assumptions.
    move to `rustls` first. Agent CLIs and repo toolchains remain unaddressed.
 4. Who owns launcher startup, daemon/server recovery, installation, and
    updates? Must sessions survive logout as well as app restart and upgrade?
-   **Evidence now in hand, and it eliminates one option outright.** A daemon
+   **Answered in Phase 1 by building the recommendation:** `kanna-worker`, a
+   Kanna-owned per-user supervisor under a `systemd --user` unit, is
+   implemented and exercised. Installation and updates remain Phase 3, and the
+   strict `(deleted)` rule means an installed *live* upgrade is explicitly not
+   claimed. The evidence below is what the choice rested on.
+   **Evidence in hand, and it eliminates one option outright.** A daemon
    launched directly by `systemd --user` can never capture a launcher trust
    root: the user manager holds capabilities, so it is non-dumpable and
    `/proc/<pid>/exe` is `EACCES` even to the same uid. The recommendation is a

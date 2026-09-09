@@ -82,6 +82,32 @@ The full contract — invariants, startup/handoff sequence, session lifecycle �
 is specified in [`crates/daemon/SPEC.md`](../../crates/daemon/SPEC.md). Read it
 before touching daemon code.
 
+### Headless worker — `crates/kanna-worker/`
+
+The per-user supervisor that runs Kanna without a GUI. It launches the daemon
+and the server as its own direct children, authorizes the server on every
+daemon generation, and restarts the server when it dies. It owns startup,
+authorization and lifetime — nothing else. Orchestration stays in
+`kanna-server`; terminal authority stays in the daemon.
+
+It exists because the daemon's trust roots are its **live direct parent**, and
+on Linux the obvious arrangement — daemon and server as two `systemd --user`
+units — cannot supply one: the user manager holds capabilities, so the kernel
+marks it non-dumpable and `/proc/<pid>/exe` is unreadable even to the same uid.
+An ordinary user binary in between is the only shape that keeps both the trust
+root and the service manager's lifetime. On macOS the desktop app plays this
+role; the worker is portable and runs there too, which is what lets one
+exit-gate lane cover both platforms.
+
+Its signals mirror the desktop's semantics deliberately: `SIGHUP`
+(`systemctl --user reload`) spawns a replacement daemon and live sessions hand
+off to it; `SIGTERM` stops the server and leaves the daemon and its sessions
+running, exactly as closing the app does. Its unit sets `KillMode=process` for
+the same reason. `kanna-worker stop-daemon` is the explicit full teardown.
+
+Evidence and the platform measurements behind it:
+[`docs/2026-09-08-linux-phase1-headless-worker.md`](../2026-09-08-linux-phase1-headless-worker.md).
+
 ### Local API server — `crates/kanna-server/`
 
 The desktop-side service boundary for every non-desktop consumer (mobile app,
@@ -227,6 +253,7 @@ never the Firebase CLI directly; function deploys additionally require
 | Path | Purpose |
 |---|---|
 | `crates/runtime-defaults/` | Shared constants: bundle ids, DB name, relay URLs, Firebase project ids, ports |
+| `crates/server-process/` | Who is listening on `kanna-server`'s port, and how to stop them — shared by both launchers (the desktop app and `kanna-worker`), because a launcher must attribute a port to a real pid before it authorizes one, and two copies would drift |
 | `crates/task-transfer/` | Peer-to-peer desktop protocol (mDNS discovery via `_kanna-xfer._tcp`, crypto, peer registry): task transfer plus peer task snapshots and observing/sending input to peer sessions |
 | `crates/tauri-plugin-delta-updater/` | Self-updater plugin (stub) |
 | `packages/core/` | Shared TS business logic: workflow types/tags, repo config, custom tasks, GitHub/Slack/Discord clients |

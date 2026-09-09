@@ -284,10 +284,21 @@ async fn start_server(
     symlink(git, runtime_bin.join("git")).expect("isolated runtime should expose git");
     let isolated_path = runtime_bin.to_string_lossy();
     let login_path_override = format!("export PATH=\"{isolated_path}\"\n");
-    std::fs::write(home.join(".zprofile"), &login_path_override)
-        .expect("isolated login profile should be written");
-    std::fs::write(home.join(".zshrc"), &login_path_override)
-        .expect("isolated interactive profile should be written");
+    // Written for every shell the login-shell policy can resolve to, because
+    // which one that is depends on the machine: zsh on macOS, and on Linux
+    // `$SHELL` when it is bash or zsh, else /bin/bash, else /bin/sh. The
+    // point of the fixture is that PATH comes from the user's own startup
+    // files, so it has to reach whichever files those turn out to be.
+    for startup_file in [
+        ".zprofile",
+        ".zshrc",
+        ".bash_profile",
+        ".bashrc",
+        ".profile",
+    ] {
+        std::fs::write(home.join(startup_file), &login_path_override)
+            .unwrap_or_else(|error| panic!("isolated {startup_file} should be written: {error}"));
+    }
 
     let mut command = Command::new(server_executable);
     command
@@ -296,6 +307,12 @@ async fn start_server(
         .env("HOME", &home)
         .env("ZDOTDIR", &home)
         .env("XDG_DATA_HOME", data_root)
+        // `XDG_RUNTIME_DIR` must survive `env_clear()`: this harness computes
+        // the daemon socket path in-process, and on Linux that path lives in
+        // the per-user runtime directory. A server that cannot see the
+        // variable looks for the socket in `/tmp` instead, never reaches the
+        // fake daemon, and so never opens its HTTP listeners.
+        .envs(std::env::var_os("XDG_RUNTIME_DIR").map(|dir| ("XDG_RUNTIME_DIR", dir)))
         .env("PATH", runtime_bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

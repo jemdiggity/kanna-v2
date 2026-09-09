@@ -99,6 +99,11 @@ sessions untouched. A timeout is not evidence that any session was lost.
     AttachSnapshot (reattach) ──► snapshot + live stream
 ```
 
+A PTY session ends when its last slave descriptor closes, and the two kernels
+report that differently: the master reads EOF on macOS and `EIO` on Linux.
+Both are the same event — a session ending normally — so both reach one hangup
+path, and neither is an error.
+
 Runtime status is classified from the headless terminal's rendered grid, after
 ANSI control sequences have been interpreted. A DEC synchronized-output frame
 is not observable provider state until its closing `CSI ? 2026 l`: intermediate
@@ -261,6 +266,14 @@ process before entering the transactional lifecycle boundary:
 - Both identities, the direct-parent relationship, and both executable paths
   are re-read immediately before authorization succeeds.
 
+The metadata frame and the descriptors are one stream, and the adopter must
+not read past the frame's newline. The byte that follows carries the session
+descriptors as `SCM_RIGHTS`, and a buffered read that pulls it in makes the
+Linux kernel discard the ancillary data outright — the descriptors are gone and
+the following `recvmsg` reports `EAGAIN`. macOS instead stops a read at the
+ancillary boundary, which is why this protocol worked there unchanged. The
+adopter therefore reads that one frame a byte at a time.
+
 Any missing or changed identity or path is refused with
 `handoff_unauthorized`. Refusal occurs before the daemon-lifecycle write guard,
 registry seals, snapshots, `HandoffReady`, and `SCM_RIGHTS`. Unsupported
@@ -270,6 +283,28 @@ The wire request is unchanged. Installed releases and kd worktrees launch
 successive daemon versions from stable instance-local executable paths, so
 rolling and development upgrades keep sessions alive. Starting a replacement
 from an unrelated shell or helper is intentionally unauthorized.
+
+Executable-path comparisons are byte-exact and stay that way. On Linux,
+replacing a binary in place makes the running process's `/proc/<pid>/exe` read
+`… (deleted)`, and that suffix is deliberately **not** stripped. The upgrade
+rule that follows is: replace the file, then restart the launcher and the
+server. The incumbent daemon never re-reads its own path, so daemon replacement
+across an upgrade still works.
+
+### The launcher, per platform
+
+The trusted launcher is whatever process is the daemon's live direct parent at
+startup, and it must be an executable this daemon can read through the kernel.
+
+- **macOS:** the desktop app.
+- **Linux:** `kanna-worker`, a per-user supervisor started by a
+  `systemd --user` unit. Two unrelated user units is not an equivalent design
+  and does not work: `systemd --user` holds capabilities, so the kernel marks
+  it non-dumpable and `/proc/<pid>/exe` is `EACCES` even to the same uid, and a
+  daemon parented by it can never capture a trust root. The supervisor is an
+  ordinary user binary, so it can. Its unit sets `KillMode=process`, because
+  stopping the *service* must not stop the daemon or the agent sessions living
+  in its control group.
 
 Before the acknowledgement, the adopter pins the daemon process identity,
 checks Unix-socket peer credentials, validates every metadata-declared FD
@@ -287,6 +322,19 @@ During adoption, the transferred descriptor is the authority:
   optional stdin descriptor has the expected direction and is bound to the
   claimed child. Otherwise the descriptors are closed and the logical agent
   session remains resumable from its journal.
+
+"Bound to the claimed child" is as strong as each kernel allows, and the two
+differ. macOS names a pipe's far end with a distinct handle, so the descriptor
+can be bound to the exact process holding it. On Linux both ends share one
+inode, so the strongest provable statement is that *some* descriptor in that
+process refers to this same pipe in the **opposite** direction. Both are
+kernel-authoritative and independent of anything the sender claims; the Linux
+one may not be stated more strongly than that.
+
+Received descriptors are close-on-exec before any `fork`/`exec` can see them.
+On Linux `MSG_CMSG_CLOEXEC` has the kernel create them that way; macOS has no
+such flag, so the receive-and-mark window is fenced by the process-wide
+spawn/fd boundary. The boundary exists on both platforms.
 
 The same receiver checks apply in legacy-v2 mode. They prevent forged
 descriptor authority, but they cannot reconstruct the lifecycle seal absent

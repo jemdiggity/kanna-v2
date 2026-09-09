@@ -4,7 +4,7 @@ import type { CommandRunner } from "../src/runtime/process";
 
 describe("Rust test orchestration", () => {
   it("checks generated agent protocol types before Tauri inputs and Rust tests", () => {
-    expect(buildRustTestCommands()).toEqual([
+    expect(buildRustTestCommands("darwin")).toEqual([
       {
         name: "agent-protocol",
         command: "./scripts/check-agent-protocol-types.sh",
@@ -15,6 +15,48 @@ describe("Rust test orchestration", () => {
       { name: "clippy", command: "cargo", args: ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"] },
       { name: "workspace", command: "cargo", args: ["test", "--workspace", "--exclude", "kanna-daemon"] },
       { name: "daemon", command: "cargo", args: ["test", "-p", "kanna-daemon", "--", "--test-threads=1"] },
+    ]);
+  });
+
+  /**
+   * Off macOS there is no Tauri app to build or test yet, but the sidecars,
+   * the daemon and the server are still covered in full — the exclusions are
+   * the desktop crate and its frontend, nothing else.
+   */
+  it("skips the desktop crate and its frontend build on a headless platform", () => {
+    const planned = buildRustTestCommands("linux");
+
+    expect(planned.map((command) => command.name)).toEqual([
+      "agent-protocol",
+      "sidecars",
+      "clippy",
+      "workspace",
+      "daemon",
+    ]);
+    expect(planned.find((command) => command.name === "clippy")?.args).toEqual([
+      "clippy",
+      "--workspace",
+      "--all-targets",
+      "--exclude",
+      "kanna-desktop",
+      "--",
+      "-D",
+      "warnings",
+    ]);
+    expect(planned.find((command) => command.name === "workspace")?.args).toEqual([
+      "test",
+      "--workspace",
+      "--exclude",
+      "kanna-daemon",
+      "--exclude",
+      "kanna-desktop",
+    ]);
+    expect(planned.find((command) => command.name === "daemon")?.args).toEqual([
+      "test",
+      "-p",
+      "kanna-daemon",
+      "--",
+      "--test-threads=1",
     ]);
   });
 

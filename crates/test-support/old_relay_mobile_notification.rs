@@ -66,11 +66,20 @@ impl Drop for OldRelayMobileNotificationServer {
     }
 }
 
+/// Mirrors `kanna_runtime_defaults::socket_path`, directory included: these
+/// sockets live in `/tmp` on macOS but in `$XDG_RUNTIME_DIR` on Linux when the
+/// session manager provides one. A mirror that hardcoded `/tmp` would bind
+/// somewhere the server never looks, and the server would wait forever for a
+/// daemon generation instead of opening its listeners.
 fn daemon_socket_path(daemon_dir: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     daemon_dir.to_path_buf().hash(&mut hasher);
     let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+    let dir = match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        Some(runtime_dir) if !cfg!(target_os = "macos") && runtime_dir.is_absolute() => runtime_dir,
+        _ => PathBuf::from("/tmp"),
+    };
+    dir.join(format!("kanna-{hash:08x}.sock"))
 }
 
 fn spawn_fake_daemon(daemon_dir: &Path) -> (FakeDaemon, mpsc::Receiver<()>) {

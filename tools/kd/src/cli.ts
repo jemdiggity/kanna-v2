@@ -916,6 +916,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "test" && command === "rust") {
     return { taskId: "test.rust", input: {} };
   }
+  if (group === "test" && command === "headless-worker") {
+    return { taskId: "test.headless-worker", input: {} };
+  }
   if (group === "test" && command === "desktop-e2e") {
     return { taskId: "test.desktop-e2e", input: {} };
   }
@@ -1045,6 +1048,7 @@ const helpTopics: Record<string, string[]> = {
     "  relay stats --staging|--production [--open] [--dry-run]",
     "  pages build-schema --out-dir <dir>",
     "  test rust",
+    "  test headless-worker",
     "  test desktop-e2e",
     "  test desktop-e2e-operator",
     "  test desktop-mock-e2e",
@@ -1581,6 +1585,13 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd test rust",
     "",
     "Run workspace Rust tests with daemon integration tests serialized."
+  ],
+  "test headless-worker": [
+    "Usage: kd test headless-worker",
+    "",
+    "Run the headless worker's exit gate end to end: create, execute, durable",
+    "input, completion, stage fork and close, plus a server restart and a",
+    "daemon replacement under a live session. Builds the binaries it drives.",
   ],
   "test desktop-e2e": [
     "Usage: kd test desktop-e2e",

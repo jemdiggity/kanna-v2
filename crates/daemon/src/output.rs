@@ -307,6 +307,12 @@ pub(crate) async fn stream_output(
                         }
                     }
                     Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    // Same hangup, seen from the write side: on Linux writing
+                    // to a master whose last slave has closed reports EIO.
+                    Ok(Err(error)) if is_pty_hangup(&error) => {
+                        log::info!("[stream] hangup on write session={}", session_id);
+                        break;
+                    }
                     Ok(Err(error)) => {
                         log::error!("[stream] PTY write error session={} error={}", session_id, error);
                         break;
@@ -396,6 +402,18 @@ pub(crate) async fn stream_output(
                         .await;
                     }
                     Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    // Hangup. macOS reports the last slave closing as a plain
+                    // EOF (the `Ok(0)` arm above); Linux reports it as EIO on
+                    // the master. Both are the same event -- a session ending
+                    // normally -- so neither may be logged as an error.
+                    Ok(Err(error)) if is_pty_hangup(&error) => {
+                        log::info!(
+                            "[stream] hangup session={} chunks={}",
+                            session_id,
+                            chunk_count
+                        );
+                        break;
+                    }
                     Ok(Err(error)) => {
                         log::info!(
                             "[stream] read error session={} kind={:?} error={}",
@@ -970,10 +988,21 @@ async fn log_status_observation(session: &Arc<SessionHandle>, session_id: &str, 
     }
 }
 
+/// A PTY master read or write that reports the far end is gone.
+///
+/// The two kernels spell the same event differently: when the last slave fd
+/// closes, macOS's master reports a plain EOF while Linux's reports `EIO`.
+/// A session ending normally is not an error on either, so both must reach
+/// the hangup path rather than the error log.
+fn is_pty_hangup(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EIO)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{schedule_lag_recovery_retry, STATUS_IDLE_FLUSH_MS};
     use crate::fanout::SessionFanout;
+    use std::os::fd::FromRawFd;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -993,6 +1022,69 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(1), fanout.recovery_notify.notified())
                 .await
                 .expect("failed lag recovery should retry after the bounded interval");
+        }
+    }
+    /// The whole point of [`is_pty_hangup`]: a master whose last slave has
+    /// closed must terminate the stream through the hangup path, never the
+    /// error path. macOS gets there with `Ok(0)` and Linux with `EIO`, so the
+    /// assertion is over both shapes rather than over one platform's spelling.
+    #[test]
+    fn a_master_whose_last_slave_closed_reads_as_a_hangup_not_an_error() {
+        use std::os::fd::AsRawFd;
+
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "openpty should succeed"
+        );
+        let master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master) };
+        unsafe { libc::close(slave) };
+
+        let mut buf = [0u8; 64];
+        // The hangup can take a moment to be observable; a read may also
+        // return buffered output first. Loop until the stream ends.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let read = unsafe {
+                libc::read(
+                    master.as_raw_fd(),
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
+                    buf.len(),
+                )
+            };
+            if read == 0 {
+                break; // EOF: the macOS spelling of hangup.
+            }
+            if read < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "master should hang up"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                assert!(
+                    super::is_pty_hangup(&error),
+                    "a closed slave must classify as hangup, got {error:?}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "master should hang up"
+            );
         }
     }
 }
