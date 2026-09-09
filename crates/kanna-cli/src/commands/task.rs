@@ -1040,6 +1040,31 @@ pub(crate) async fn run(command: TaskCommands) {
                 process::exit(1);
             }
         }
+        TaskCommands::ReplaceWorkflow {
+            task_id,
+            workflow_definition,
+            expected_definition,
+            source,
+            machine_id,
+            server_url,
+        } => {
+            let mut arg = vec![
+                format!("task_id={task_id}"),
+                format!("workflow_definition={workflow_definition}"),
+                format!("expected_definition={expected_definition}"),
+            ];
+            if let Some(source) = source {
+                arg.push(format!("source={source}"));
+            }
+            super::tool::run(crate::ToolCommands::Call {
+                name: "kanna_replace_task_workflow".into(),
+                json: None,
+                arg,
+                machine_id,
+                server_url,
+            })
+            .await;
+        }
         TaskCommands::WaitEvents {
             task_id,
             parent_task_id,

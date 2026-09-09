@@ -3838,3 +3838,54 @@ fn caller_declared_input_sources_are_a_closed_set() {
     assert!(super::TaskInputSource::from_caller_declared("unspecified").is_err());
     assert!(super::TaskInputSource::from_caller_declared("owner").is_err());
 }
+
+#[test]
+fn workflow_edit_audit_and_execution_supersession_survive_feed_pruning() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().unwrap()).unwrap();
+    db.conn
+        .execute_batch(
+            "INSERT INTO repo (id, path, name) VALUES ('repo-1', '/fixture', 'Repo');
+         INSERT INTO pipeline_item (id, repo_id, stage) VALUES ('task-1', 'repo-1', 'review');",
+        )
+        .unwrap();
+    db.append_task_event(
+        "task-1",
+        super::TaskEventKind::WorkflowChanged,
+        serde_json::json!({
+            "supersededRunIds": ["run-old"], "changedExecutionStages": ["review"]
+        }),
+    )
+    .unwrap();
+    db.append_task_event(
+        "task-1",
+        super::TaskEventKind::RunStarted,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "UPDATE task_event SET created_at = '2000-01-01 00:00:00'",
+            [],
+        )
+        .unwrap();
+    drop(db);
+    let db = Db::open_migrated(path.to_str().unwrap()).unwrap();
+    assert!(db
+        .stage_run_workflow_superseded("task-1", "run-old")
+        .unwrap());
+    assert!(db
+        .workflow_stage_execution_edited("task-1", "review")
+        .unwrap());
+    assert!(!db.workflow_stage_execution_edited("task-1", "pr").unwrap());
+    let events = db
+        .list_task_events(
+            &super::TaskEventScope::Tasks(vec!["task-1".into()]),
+            0,
+            i64::MAX,
+            10,
+        )
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "task.workflow_changed");
+}

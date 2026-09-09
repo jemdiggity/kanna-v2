@@ -5,6 +5,15 @@ use super::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 
+/// Validated authoring intent, committed with its complete provenance record.
+#[derive(Clone, Copy)]
+pub struct WorkflowReplacement<'a> {
+    pub expected_definition: &'a str,
+    pub source: &'a str,
+    pub superseded_run_ids: &'a [String],
+    pub changed_execution_stages: &'a [String],
+}
+
 const MANAGER_ACTIVITY_DEBOUNCE_SECONDS: u64 = 10;
 
 /// Change an open task's activity and arm the settled-transition debounce in
@@ -1272,6 +1281,29 @@ impl Db {
         revision_rounds: i64,
         revision_limit: i64,
     ) -> Result<bool, rusqlite::Error> {
+        self.replace_task_workflow(
+            id,
+            expected_stage,
+            workflow_name,
+            workflow_def,
+            revision_rounds,
+            revision_limit,
+            None,
+        )
+    }
+
+    /// Shared atomic pin boundary for named switches and inline replacements.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_task_workflow(
+        &self,
+        id: &str,
+        expected_stage: &str,
+        workflow_name: &str,
+        workflow_def: &str,
+        revision_rounds: i64,
+        revision_limit: i64,
+        edit: Option<WorkflowReplacement<'_>>,
+    ) -> Result<bool, rusqlite::Error> {
         self.with_immediate_transaction(|db| {
             let current = db
                 .conn
@@ -1295,6 +1327,11 @@ impl Db {
                     "task stage changed while setting workflow: expected {expected_stage}, found {}",
                     current.2.as_deref().unwrap_or("<none>")
                 )));
+            }
+            if let Some(edit) = edit {
+                if current.1.as_deref() != Some(edit.expected_definition) {
+                    return Err(rusqlite::Error::InvalidParameterName("pinned workflow changed; read it again before replacing".into()));
+                }
             }
             if current.0.as_deref() == Some(workflow_name)
                 && current.1.as_deref() == Some(workflow_def)
@@ -1322,6 +1359,12 @@ impl Db {
                     "stage": expected_stage,
                     "revisionRounds": revision_rounds,
                     "revisionLimit": revision_limit,
+                    "source": edit.map(|edit| edit.source).unwrap_or("unspecified"),
+                    "operation": if edit.is_some() { "replace" } else { "select" },
+                    "beforeDefinition": current.1.as_ref().and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
+                    "afterDefinition": serde_json::from_str::<serde_json::Value>(workflow_def).ok(),
+                    "supersededRunIds": edit.map(|edit| edit.superseded_run_ids).unwrap_or(&[]),
+                    "changedExecutionStages": edit.map(|edit| edit.changed_execution_stages).unwrap_or(&[]),
                 }),
             )?;
             Ok(true)

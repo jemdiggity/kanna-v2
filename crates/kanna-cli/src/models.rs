@@ -127,6 +127,9 @@ pub(crate) struct TaskDetail {
     pub(crate) title: String,
     pub(crate) stage: Option<String>,
     pub(crate) workflow_name: Option<String>,
+    /// Exact pinned snapshot used as the workflow replacement concurrency fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_definition: Option<Value>,
     pub(crate) stage_transition: Option<String>,
     /// Derived display value blending the runtime and read dimensions:
     /// `working` | `idle` | `unread`.
@@ -181,6 +184,8 @@ struct TaskDetailDef {
     title: String,
     stage: Option<String>,
     workflow_name: Option<String>,
+    #[serde(default)]
+    workflow_definition: Option<Value>,
     stage_transition: Option<String>,
     activity: Option<String>,
     #[serde(default)]

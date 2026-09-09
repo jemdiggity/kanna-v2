@@ -1760,6 +1760,7 @@ mod tests {
                 "kanna_wait_events",
                 "kanna_notify_mobile",
                 "kanna_set_task_workflow",
+                "kanna_replace_task_workflow",
                 "kanna_task_logs",
                 "kanna_task_inputs",
                 "kanna_task_transfers",

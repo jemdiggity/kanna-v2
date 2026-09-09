@@ -169,6 +169,8 @@ pub struct TaskSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDetail {
+    /// Exact durable snapshot, also used as the replacement concurrency fence.
+    pub workflow_definition: Option<serde_json::Value>,
     pub id: String,
     pub repo_id: String,
     pub title: String,
@@ -1234,6 +1236,10 @@ fn map_task_detail(
         .or(item.agent_provider);
     ports.sort_by(|left, right| left.port.cmp(&right.port).then(left.name.cmp(&right.name)));
     TaskDetail {
+        workflow_definition: item
+            .pipeline_def
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
         id: item.id,
         repo_id: item.repo_id,
         title,

@@ -607,6 +607,7 @@ async fn get_task_via_api_fetches_single_task_path() {
                 "repoId": "repo-1",
                 "title": "Wanted",
                 "stage": "pr",
+                "workflowDefinition": {"name": "pinned", "stages": [{"name": "pr", "policy": {"transition": "manual"}}]},
                 "activity": "unread",
                 "snippet": null,
                 "agentType": "pty",
@@ -626,6 +627,13 @@ async fn get_task_via_api_fetches_single_task_path() {
     let task = get_task_via_api(&base_url, "task-123").await.unwrap();
     let request = handle.await.unwrap();
 
+    assert_eq!(
+        serde_json::to_value(&task).unwrap()["workflowDefinition"],
+        json!({
+            "name": "pinned", "stages": [{"name": "pr", "policy": {"transition": "manual"}}]
+        }),
+        "typed task get must preserve the editable snapshot"
+    );
     assert_eq!(task.id, "task-123");
     assert_eq!(task.activity.as_deref(), Some("unread"));
     assert_eq!(

@@ -182,6 +182,20 @@
       ]
     },
     {
+      "name": "kanna_replace_task_workflow",
+      "description": "Edit an open task's pinned workflow by replacing its complete definition. Read workflowDefinition from kanna_get_task, pass that unchanged as expected_definition, and submit the edited document as workflow_definition. Only this task changes; its workflow name, live session and spent revision rounds remain. Current and recorded stage/post names and ownership must survive. Execution edits apply at the next spawn (rerun, recovery, revision or transition); superseded conversations start fresh. Policies on live runs remain stamped. Accepts current workflow schema syntax; legacy snapshots must be normalized to posts before submission. The atomic task.workflow_changed event records full before/after definitions, caller-declared source and superseded runs. This edits the pinned definition, not global provider precedence.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/replace-workflow",
+      "response": "json",
+      "params": [
+        { "name": "machine_id", "description": "Machine id; omit for the connected local machine.", "type": "string", "required": false, "location": "routing" },
+        { "name": "task_id", "description": "Durable task id or its branch name.", "type": "string", "required": true, "location": "path" },
+        { "name": "workflow_definition", "description": "Complete replacement satisfying .kanna/workflows/schema.json; maximum 256 KiB and 32 stages including posts.", "type": "object", "required": true, "location": "body", "key": "workflowDefinition" },
+        { "name": "expected_definition", "description": "Exact workflowDefinition object last read from task detail; stale edits return 409.", "type": "object", "required": true, "location": "body", "key": "expectedDefinition" },
+        { "name": "source", "description": "Caller-declared, unauthenticated authorship.", "type": "string", "required": false, "location": "body", "enum": ["operator", "manager", "agent", "unspecified"] }
+      ]
+    },
+    {
       "name": "kanna_task_logs",
       "description": "Fetch recent agent-session log lines for a Kanna task, oldest first.",
       "method": "GET",

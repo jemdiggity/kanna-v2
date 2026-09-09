@@ -314,6 +314,121 @@ pub(super) async fn set_task_workflow(
     Ok(Json(response))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ReplaceTaskWorkflowRequest {
+    workflow_definition: serde_json::Value,
+    expected_definition: serde_json::Value,
+    source: Option<String>,
+}
+
+pub(super) async fn replace_task_workflow(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<ReplaceTaskWorkflowRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let source = payload.source.as_deref().unwrap_or("unspecified");
+    if !["operator", "manager", "agent", "unspecified"].contains(&source) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "source must be operator, manager, agent, or unspecified (caller-declared)".into(),
+        ));
+    }
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
+    let response = {
+        let state = Arc::clone(&state);
+        super::blocking::run_handler_blocking("task workflow replacement", move || {
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            let item = db
+                .get_pipeline_item(&task_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| (StatusCode::NOT_FOUND, format!("task not found: {task_id}")))?;
+            if item.closed_at.is_some() {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "cannot replace a closed task's workflow".into(),
+                ));
+            }
+            let stage = item
+                .stage
+                .as_deref()
+                .ok_or_else(|| (StatusCode::CONFLICT, "task has no current stage".into()))?;
+            let previous = item
+                .pipeline_def
+                .as_deref()
+                .ok_or_else(|| (StatusCode::CONFLICT, "task has no pinned workflow".into()))?;
+            let before: serde_json::Value = serde_json::from_str(previous).map_err(|error| {
+                (
+                    StatusCode::CONFLICT,
+                    format!("invalid pinned workflow: {error}"),
+                )
+            })?;
+            if before != payload.expected_definition {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "pinned workflow changed; read it again before replacing".into(),
+                ));
+            }
+            let repo = db
+                .get_repo(&item.repo_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "task repository not found".into()))?;
+            let runs = db
+                .list_stage_runs_for_task(&task_id)
+                .map_err(|error| db_write_error("db error", error))?;
+            let validated = crate::task_creator::validate_task_workflow_replacement(
+                &repo,
+                &payload.workflow_definition,
+                previous,
+                stage,
+                &runs,
+            )
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+            let snapshot = validated.snapshot;
+            let superseded = validated.superseded_run_ids;
+            let changed = db
+                .replace_task_workflow(
+                    &task_id,
+                    stage,
+                    item.pipeline.as_deref().unwrap_or("no-review"),
+                    &snapshot.definition_json,
+                    item.revision_rounds,
+                    snapshot.revision_limit,
+                    Some(crate::db::WorkflowReplacement {
+                        expected_definition: previous,
+                        source: payload.source.as_deref().unwrap_or("unspecified"),
+                        superseded_run_ids: &superseded,
+                        changed_execution_stages: &validated.changed_execution_stages,
+                    }),
+                )
+                .map_err(|error| db_write_error("db error", error))?;
+            let definition_value = serde_json::from_str::<serde_json::Value>(
+                &snapshot.definition_json,
+            )
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("invalid stored workflow: {error}"),
+                )
+            })?;
+            Ok(
+                serde_json::json!({"taskId": task_id, "stage": stage, "changed": changed,
+                "workflowDefinition": definition_value,
+                "revisionLimit": snapshot.revision_limit, "revisionRounds": item.revision_rounds,
+                "supersededRunIds": if changed { superseded } else { vec![] }}),
+            )
+        })
+        .await?
+    };
+    if response["changed"] == true {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
+    Ok(Json(response))
+}
+
 /// How a blocker resolved — determines the wording dependents receive.
 /// Passed explicitly because the close paths collect instructions before
 /// `closed_at` is written, so the row itself cannot be trusted mid-close.

@@ -724,6 +724,23 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Replace one task's pinned workflow using a complete validated JSON definition
+    ReplaceWorkflow {
+        #[arg(long)]
+        task_id: String,
+        /// Complete replacement JSON object
+        #[arg(long)]
+        workflow_definition: String,
+        /// Unchanged workflowDefinition JSON object from task detail
+        #[arg(long)]
+        expected_definition: String,
+        #[arg(long, value_parser = ["operator", "manager", "agent", "unspecified"])]
+        source: Option<String>,
+        #[arg(long)]
+        machine_id: Option<String>,
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Watch several tasks at once and return their events since a cursor
     WaitEvents {
         /// Task IDs (or branch names) to watch; repeat or comma-separate

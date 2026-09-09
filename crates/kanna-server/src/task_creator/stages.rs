@@ -817,10 +817,31 @@ pub(crate) fn prepare_revision_task_for_api(
     let last_run = db
         .latest_stage_run_for_stage(source_task_id, &target_stage.name, run_kind)
         .map_err(|error| format!("db error: {error}"))?;
-    let agent_overrides = SpawnAgentOverrides {
-        provider: loaded.source_task.agent_provider.clone(),
-        model: last_run.as_ref().and_then(|run| run.model.clone()),
-        effort: last_run.as_ref().and_then(|run| run.effort.clone()),
+    let superseded = last_run
+        .as_ref()
+        .map(|run| db.stage_run_workflow_superseded(source_task_id, &run.id))
+        .transpose()
+        .map_err(|error| format!("db error: {error}"))?
+        .unwrap_or(false);
+    let execution_edited = db
+        .workflow_stage_execution_edited(source_task_id, &target_stage.name)
+        .map_err(|error| format!("db error: {error}"))?;
+    let agent_overrides = if superseded {
+        SpawnAgentOverrides::default()
+    } else if execution_edited {
+        // Once a replacement has spawned, its new run owns the conversation's
+        // tuning. A fresh revision must not resurrect the creation-time task
+        // provider just because that provider has no resumable transcript.
+        last_run
+            .as_ref()
+            .map(SpawnAgentOverrides::from_stage_run)
+            .unwrap_or_default()
+    } else {
+        SpawnAgentOverrides {
+            provider: loaded.source_task.agent_provider.clone(),
+            model: last_run.as_ref().and_then(|run| run.model.clone()),
+            effort: last_run.as_ref().and_then(|run| run.effort.clone()),
+        }
     };
     let trigger = last_run
         .as_ref()
@@ -839,11 +860,16 @@ pub(crate) fn prepare_revision_task_for_api(
         agent_overrides,
         None,
         trigger,
-        // A fresh revision fork re-resolves its provider from the task's stamp
-        // rather than reproducing the previous run's, so carrying that run's
-        // override record forward could attribute a provider nobody chose.
-        // Silence beats a misattribution; the run row still carries the model.
-        None,
+        // Edited stages reproduce their new run's coherent stamp and origin.
+        // The legacy fresh-revision path uses the task's provider and therefore
+        // cannot attribute it to a previous run's per-advance override.
+        if execution_edited && !superseded {
+            last_run
+                .as_ref()
+                .and_then(|run| run.provider_override.clone())
+        } else {
+            None
+        },
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
@@ -985,28 +1011,35 @@ fn prepare_stage_restart(
         StageRestartIntent::FreshAfterRejectedResume { .. } => run.feedback.clone(),
         StageRestartIntent::ResumeProviderSession => None,
     };
-    let resume = match &intent {
-        StageRestartIntent::FreshAfterRejectedResume { reason, .. } => Err(reason.clone()),
-        StageRestartIntent::ResumeProviderSession => match run.cwd.as_deref() {
-            Some(run_cwd)
-                if std::path::Path::new(run_cwd).is_dir()
-                    && std::path::Path::new(&current_worktree).is_dir()
-                    && !same_cwd(run_cwd, &current_worktree) =>
-            {
-                Err(
-                    "previous run was recorded in a different worktree than the current stage"
-                        .into(),
-                )
-            }
-            _ => prepare_resume_workspace(
-                run.agent_provider.as_deref(),
-                source_task.agent_type.as_deref(),
-                run.cwd.as_deref(),
-                run.provider_session_id.as_deref(),
-                &run.id,
-                &current_worktree,
-            ),
-        },
+    let superseded = db
+        .stage_run_workflow_superseded(task_id, &run.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let resume = if superseded {
+        Err("pinned workflow execution binding changed".into())
+    } else {
+        match &intent {
+            StageRestartIntent::FreshAfterRejectedResume { reason, .. } => Err(reason.clone()),
+            StageRestartIntent::ResumeProviderSession => match run.cwd.as_deref() {
+                Some(run_cwd)
+                    if std::path::Path::new(run_cwd).is_dir()
+                        && std::path::Path::new(&current_worktree).is_dir()
+                        && !same_cwd(run_cwd, &current_worktree) =>
+                {
+                    Err(
+                        "previous run was recorded in a different worktree than the current stage"
+                            .into(),
+                    )
+                }
+                _ => prepare_resume_workspace(
+                    run.agent_provider.as_deref(),
+                    source_task.agent_type.as_deref(),
+                    run.cwd.as_deref(),
+                    run.provider_session_id.as_deref(),
+                    &run.id,
+                    &current_worktree,
+                ),
+            },
+        }
     };
     let (workspace_spec, final_prompt, resume_fallback_reason) = match resume {
         Ok((_provider, workspace)) => (
@@ -1071,15 +1104,22 @@ fn prepare_stage_restart(
         // the run history does not read as an unexplained re-run of the stage.
         requested_changes.clone(),
         source_task.agent_type.as_deref(),
-        // Recovery continues the interrupted run: it must respawn with what
-        // that run was actually using, not with what the stage would resolve
-        // to today.
-        SpawnAgentOverrides::from_stage_run(&run),
+        // Reproduce the interrupted run unless an explicit workflow edit has
+        // superseded its execution binding.
+        if superseded {
+            SpawnAgentOverrides::default()
+        } else {
+            SpawnAgentOverrides::from_stage_run(&run)
+        },
         source_task.agent_provider.as_deref(),
         stage_trigger_from_stored(Some(&run.trigger)),
         // Reproducing a run reproduces where its provider came from, so the
         // record keeps naming whoever picked this stage's model.
-        run.provider_override.clone(),
+        if superseded {
+            None
+        } else {
+            run.provider_override.clone()
+        },
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
@@ -1114,6 +1154,12 @@ fn prepare_revision_resume(
         Some(run) => run,
         None => return fall_back("no stage run recorded a provider session"),
     };
+    if db
+        .stage_run_workflow_superseded(task_id, &run.id)
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        return fall_back("pinned workflow execution binding changed");
+    }
     let source_task = context.source_task;
     let Some(current_branch_name) = source_task.branch.as_deref() else {
         return fall_back("task has no branch");

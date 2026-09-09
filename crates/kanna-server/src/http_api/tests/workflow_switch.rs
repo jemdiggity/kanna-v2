@@ -429,3 +429,243 @@ async fn the_legacy_pipeline_route_and_request_key_still_switch_the_workflow() {
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.pipeline.as_deref(), Some("single-reviewer"));
 }
+
+async fn replace_workflow(
+    app: &axum::Router,
+    expected: &Value,
+    definition: &Value,
+) -> (StatusCode, Value) {
+    // Resolve the public catalog input before crossing HTTP, as MCP and CLI do.
+    let request = kanna_tool_catalog::resolve_request(
+        &kanna_tool_catalog::bundled_catalog(),
+        "kanna_replace_task_workflow",
+        &serde_json::json!({
+            "task_id": "task-1", "expected_definition": expected,
+            "workflow_definition": definition, "source": "operator"
+        }),
+    )
+    .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(request.path)
+                .header("content-type", "application/json")
+                .body(Body::from(request.body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into())),
+    )
+}
+
+fn replacement_fixture(label: &str) -> (tempfile::TempDir, Arc<AppState>, Value) {
+    let (temp, repo_path) = workflow_test_repo(label);
+    let before = serde_json::json!({"name": "pinned", "stages": [
+        {"name": "review", "agent": "review", "agent_provider": ["claude-fable", "codex-astra"], "policy": {"transition": "manual"}},
+        {"name": "pr", "agent": "pr", "policy": {"transition": "manual"}}
+    ]});
+    let saved = before.clone();
+    let state = test_state_with_seed(label, "Studio Mac", move |db| {
+        seed_workflow_task(
+            db,
+            &repo_path,
+            "task-1",
+            "pinned",
+            "review",
+            &saved.to_string(),
+        );
+        db.insert_stage_run(NewStageRun {
+            id: "run-old",
+            task_id: "task-1",
+            stage: "review",
+            kind: "main",
+            agent: Some("review"),
+            agent_provider: Some("claude"),
+            model: Some("fable"),
+            effort: None,
+            status: "failed",
+            result: None,
+            feedback: None,
+            session_id: Some("session-old"),
+            provider_session_id: Some("provider-old"),
+            cwd: Some(&repo_path),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    });
+    (temp, state, before)
+}
+
+#[tokio::test]
+async fn replacement_supersedes_only_changed_execution_and_is_durable_and_fenced() {
+    let (_temp, state, before) = replacement_fixture("workflow-replace-incident");
+    let app = router(Arc::clone(&state));
+    let mut after = before.clone();
+    after["stages"][0]["agent_provider"] = serde_json::json!(["codex-astra"]);
+    let (status, body) = replace_workflow(&app, &before, &after).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["supersededRunIds"], serde_json::json!(["run-old"]));
+    let db = Db::open(&state.config.db_path).unwrap();
+    assert!(db
+        .stage_run_workflow_superseded("task-1", "run-old")
+        .unwrap());
+    assert!(!db
+        .stage_run_workflow_superseded("another-task", "run-old")
+        .unwrap());
+    assert!(!db
+        .stage_run_workflow_superseded("task-1", "new-run")
+        .unwrap());
+    let old_run = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(old_run.agent_provider.as_deref(), Some("claude"));
+    assert_eq!(old_run.status, "failed");
+    let events = db
+        .list_task_events(
+            &TaskEventScope::Tasks(vec!["task-1".into()]),
+            0,
+            i64::MAX,
+            100,
+        )
+        .unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event_type == "task.workflow_changed")
+        .unwrap();
+    assert_eq!(event.payload["beforeDefinition"], before);
+    assert_eq!(event.payload["afterDefinition"], body["workflowDefinition"]);
+    assert_eq!(event.payload["source"], "operator");
+    let (status, _) = replace_workflow(&app, &before, &before).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, unchanged) = replace_workflow(
+        &app,
+        &body["workflowDefinition"],
+        &body["workflowDefinition"],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["changed"], false);
+}
+
+#[tokio::test]
+async fn replacement_rejects_unrunnable_or_history_breaking_definitions_without_a_write() {
+    let (_temp, state, before) = replacement_fixture("workflow-replace-invalid");
+    let app = router(Arc::clone(&state));
+    let mut cases = vec![];
+    for (pointer, value) in [
+        ("/stages/0/name", serde_json::json!("renamed")),
+        ("/stages/1/name", serde_json::json!("review")),
+        ("/stages/0/agent", serde_json::json!("nonexistent-agent")),
+        (
+            "/stages/0/agent_provider",
+            serde_json::json!("unknown-model"),
+        ),
+        (
+            "/stages/0/policy/transition",
+            serde_json::json!("sometimes"),
+        ),
+    ] {
+        let mut invalid = before.clone();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        cases.push(invalid);
+    }
+    let mut invalid = before.clone();
+    invalid["stages"][0]["environment"] = serde_json::json!("absent");
+    cases.push(invalid);
+    let mut invalid = before.clone();
+    invalid["typo"] = serde_json::json!(true);
+    cases.push(invalid);
+    for invalid in cases {
+        let (status, body) = replace_workflow(&app, &before, &invalid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let db = Db::open(&state.config.db_path).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &db.get_pipeline_item("task-1")
+                    .unwrap()
+                    .unwrap()
+                    .pipeline_def
+                    .unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        assert!(!db
+            .stage_run_workflow_superseded("task-1", "run-old")
+            .unwrap());
+    }
+}
+
+#[tokio::test]
+async fn future_stage_and_description_edits_keep_current_provider_stamp() {
+    let (_temp, state, before) = replacement_fixture("workflow-replace-future");
+    let app = router(Arc::clone(&state));
+    let mut after = before.clone();
+    after["stages"][0]["description"] = serde_json::json!("updated description");
+    after["stages"][1]["agent_provider"] = serde_json::json!("codex-astra");
+    let (status, body) = replace_workflow(&app, &before, &after).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["supersededRunIds"], serde_json::json!([]));
+    let db = Db::open(&state.config.db_path).unwrap();
+    assert!(!db
+        .stage_run_workflow_superseded("task-1", "run-old")
+        .unwrap());
+}
+
+#[tokio::test]
+async fn replacement_preserves_history_and_compiles_legacy_post_snapshots() {
+    let (_temp, state, before) = replacement_fixture("workflow-replace-legacy");
+    let db = Db::open(&state.config.db_path).unwrap();
+    let mut legacy = before.clone();
+    legacy["stages"][0]["post_action"] = serde_json::json!({
+        "name": "commit", "agent": "commit", "prompt": "commit the changes"
+    });
+    db.update_test_pipeline_item_pipeline_def("task-1", &legacy.to_string())
+        .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "historical-post",
+        task_id: "task-1",
+        stage: "commit",
+        kind: "post",
+        agent: Some("commit"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: None,
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let app = router(Arc::clone(&state));
+    let (status, _) = replace_workflow(&app, &legacy, &before).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "historical post cannot disappear"
+    );
+    let mut canonical = before.clone();
+    canonical["stages"][0]["post"] = legacy["stages"][0]["post_action"].clone();
+    let mut moved = canonical.clone();
+    moved["stages"][0].as_object_mut().unwrap().remove("post");
+    moved["stages"][1]["post"] = canonical["stages"][0]["post"].clone();
+    let (status, _) = replace_workflow(&app, &legacy, &moved).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "historical post cannot change owners"
+    );
+    let (status, body) = replace_workflow(&app, &legacy, &canonical).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["supersededRunIds"], serde_json::json!([]));
+    assert!(body["workflowDefinition"]["stages"][0]
+        .get("post_action")
+        .is_none());
+}

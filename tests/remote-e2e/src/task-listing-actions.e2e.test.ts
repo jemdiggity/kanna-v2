@@ -10,6 +10,7 @@ import {
 } from "./harness";
 import {
   collectTerminalEvents,
+  collectLocalTerminalEvents,
   createScriptedTask,
   waitForCondition,
   waitForTerminalOutput
@@ -113,6 +114,59 @@ describe("remote task listing, creation, and actions E2E", () => {
   afterAll(async () => {
     await harness?.stop();
   }, 30_000);
+
+  it("replaces a quota-failed pinned stage through the CLI and reruns on the new provider", async () => {
+    const task = await createScriptedTask(harness, { displayName: "Workflow quota recovery" });
+    const untouched = { taskId: getString(asRecord(await invokeDesktop(harness, "POST", "/v1/tasks", {
+      repoId: task.repoId, displayName: "Unaffected sibling", prompt: "Stay on the original workflow",
+      agentProvider: "codex", agentType: "pty"
+    })), "taskId") };
+    const detail = async (id: string) => asRecord(await invokeDesktop(harness, "GET", `/v1/tasks/${id}`, null));
+    const siblingBefore = await detail(untouched.taskId);
+    const initial = asRecord(await runKannaCliJson(harness, ["task", "get", "--task-id", task.taskId]));
+    // Both CLIs are deterministic fixture executables. No account quota is used.
+    await writeFile(`${task.worktreePath}/bin/claude`,
+      "#!/bin/sh\nprintf 'WORKFLOW_QUOTA_EXHAUSTED\\n'\nexit 1\n", { mode: 0o755 });
+    const pinned = {
+      name: "quota-recovery",
+      stages: [{ name: initial.stage, agent_provider: ["claude-fable", "codex-astra"],
+        prompt: "$TASK_PROMPT", policy: { transition: "manual" } }]
+    };
+    const pin = asRecord(await runKannaCliJson(harness, ["task", "replace-workflow",
+      "--task-id", task.taskId, "--expected-definition", JSON.stringify(initial.workflowDefinition),
+      "--workflow-definition", JSON.stringify(pinned), "--source", "operator"]));
+    await runKannaCliJson(harness, ["task", "rerun-stage", "--task-id", task.taskId]);
+    await waitForCondition(async () => {
+      const current = await detail(task.taskId);
+      return current.runtimeState === "exited" && current.agentProvider === "claude";
+    }, 60_000, "quota fixture should exit on Claude");
+    const failed = await detail(task.taskId);
+    const failedRun = asRecord(failed.latestRun);
+    expect(failed.model).toBe("fable");
+    const patched = structuredClone(pinned);
+    patched.stages[0]!.agent_provider = ["codex-astra"];
+    const replacement = asRecord(await runKannaCliJson(harness, ["task", "replace-workflow",
+      "--task-id", task.taskId, "--expected-definition", JSON.stringify(pin.workflowDefinition),
+      "--workflow-definition", JSON.stringify(patched), "--source", "operator"]));
+    expect(replacement.supersededRunIds).toContain(failedRun.id);
+    expect(asRecord((await detail(task.taskId)).latestRun).id).toBe(failedRun.id);
+    await runKannaCliJson(harness, ["task", "rerun-stage", "--task-id", task.taskId]);
+    const events = await collectLocalTerminalEvents(harness, task.taskId);
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_READY");
+      const recovered = await detail(task.taskId);
+      expect(recovered.id).toBe(task.taskId);
+      expect(recovered.branch).toBe(initial.branch);
+      expect(recovered.worktreePath).toBe(initial.worktreePath);
+      expect(recovered).toMatchObject({ agentProvider: "codex", model: "astra" });
+      expect(asRecord(recovered.latestRun).id).not.toBe(failedRun.id);
+      const siblingAfter = await detail(untouched.taskId);
+      expect(siblingAfter.workflowDefinition).toEqual(siblingBefore.workflowDefinition);
+      expect(asRecord(siblingAfter.latestRun).id).toBe(asRecord(siblingBefore.latestRun).id);
+    } finally {
+      events.close();
+    }
+  });
 
   it("lists repos and tasks from the desktop database through relay invokes", async () => {
     const fullAlphaPrompt = `${"p".repeat(600)}END-OF-FULL-PROMPT`;
