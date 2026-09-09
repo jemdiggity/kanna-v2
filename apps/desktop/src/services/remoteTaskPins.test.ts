@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setDesktopServerClientHandlersForTests } from "./desktopServerClient";
 import {
   REMOTE_TASK_PINS_SETTING,
+  forgetRemoteTaskPin,
   parseRemoteTaskPins,
   pinRemoteTask,
   reorderRemoteTaskPins,
   unpinRemoteTask,
+  type RemoteTaskPin,
 } from "./remoteTaskPins";
 
 describe("parseRemoteTaskPins", () => {
@@ -34,9 +36,19 @@ describe("parseRemoteTaskPins", () => {
 
   it("drops entries whose order is not a finite number", () => {
     const pins = parseRemoteTaskPins({
-      [REMOTE_TASK_PINS_SETTING]: JSON.stringify({ "task-a": 1, "task-b": "top", "task-c": null }),
+      [REMOTE_TASK_PINS_SETTING]: '{"task-a":1,"task-b":"top","task-c":[]}',
     });
     expect(pins).toEqual(new Map([["task-a", 1]]));
+  });
+
+  it("reads an explicit unpin back as its own state", () => {
+    // `null` is not absence: the row is a directory singleton this machine
+    // would otherwise pin by default, and the operator turned that off.
+    expect(
+      parseRemoteTaskPins({
+        [REMOTE_TASK_PINS_SETTING]: JSON.stringify({ "task-merge": null }),
+      }),
+    ).toEqual(new Map([["task-merge", null]]));
   });
 
   it("ignores non-object payloads", () => {
@@ -68,7 +80,7 @@ describe("remote task pin mutations", () => {
     setDesktopServerClientHandlersForTests(null);
   });
 
-  function storedPins(): Map<string, number> {
+  function storedPins(): Map<string, RemoteTaskPin> {
     return parseRemoteTaskPins(Object.fromEntries(settings));
   }
 
@@ -88,6 +100,22 @@ describe("remote task pin mutations", () => {
     await unpinRemoteTask("task-a");
     expect(settings.has(REMOTE_TASK_PINS_SETTING)).toBe(false);
     expect(deletedKeys).toContain(REMOTE_TASK_PINS_SETTING);
+  });
+
+  it("records an unpin of a default-pinned row instead of forgetting it", async () => {
+    await unpinRemoteTask("task-merge", { defaultPinned: true });
+    expect(storedPins()).toEqual(new Map([["task-merge", null]]));
+
+    // Nothing republishes the default over it, and pinning it again replaces
+    // the record rather than layering on top of it.
+    await pinRemoteTask("task-merge", 0);
+    expect(storedPins()).toEqual(new Map([["task-merge", 0]]));
+  });
+
+  it("forgets an entry whose task is gone", async () => {
+    await unpinRemoteTask("task-merge", { defaultPinned: true });
+    await forgetRemoteTaskPin("task-merge");
+    expect(settings.has(REMOTE_TASK_PINS_SETTING)).toBe(false);
   });
 
   it("upserts orders for reordered pins", async () => {

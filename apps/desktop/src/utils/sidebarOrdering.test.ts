@@ -12,9 +12,11 @@ import {
   sidebarTaskChildItems,
   sidebarSubtreeRows,
   sidebarTaskSubtreeRows,
+  sortedSidebarPinnedItems,
   sortSidebarItemsForRepo,
   sortSidebarTaskItemsForRepo,
 } from "./sidebarOrdering";
+import { DEFAULT_SINGLETON_PIN_ORDER } from "./singletonTask";
 
 const ORDER = ["merge", "pr", "review", "in progress"];
 const getStageOrder = () => ORDER;
@@ -68,6 +70,42 @@ function sidebarItem(overrides: Partial<SidebarTaskItem> = {}): SidebarTaskItem 
 }
 
 describe("sidebarOrdering", () => {
+  it("puts a defaulted singleton pin above the operator's own pins", () => {
+    // buildWorkspace gives a directory singleton with no explicit pin the
+    // default order; ordering must read that as the top of the pinned group
+    // without renumbering the pins the operator placed.
+    const singleton = item({
+      id: "task-merge",
+      singleton_agent: "merge",
+      pinned: 1,
+      pin_order: DEFAULT_SINGLETON_PIN_ORDER,
+    });
+    const firstPin = item({ id: "task-a", pinned: 1, pin_order: 0 });
+    const secondPin = item({ id: "task-b", pinned: 1, pin_order: 1 });
+
+    expect(
+      sortedSidebarPinnedItems({
+        repoId: "repo-1",
+        items: [firstPin, secondPin, singleton],
+        getStageOrder,
+      }).map((entry) => entry.id),
+    ).toEqual(["task-merge", "task-a", "task-b"]);
+  });
+
+  it("leaves an unpinned singleton row in its stage group", () => {
+    // The owner's machine stamps the pin once at claim time, so a cleared
+    // `pinned` is an explicit unpin — nothing re-derives the default over it.
+    const singleton = item({ id: "task-merge", pipeline: "singleton-merge", pinned: 0 });
+
+    expect(
+      sortedSidebarPinnedItems({ repoId: "repo-1", items: [singleton], getStageOrder }),
+    ).toEqual([]);
+    expect(
+      groupedSidebarItemsByStage({ repoId: "repo-1", items: [singleton], getStageOrder })
+        .flatMap((group) => group.items.map((entry) => entry.id)),
+    ).toEqual(["task-merge"]);
+  });
+
   it("uses slot identity for rows and durable identity for blockers and parents", () => {
     const parent = sidebarItem({
       slot_id: "slot-parent",

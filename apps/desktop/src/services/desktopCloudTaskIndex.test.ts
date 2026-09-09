@@ -211,6 +211,29 @@ describe("mapDesktopCloudTasks", () => {
     });
   });
 
+  it("carries the owner's singleton identity onto the presentation row", () => {
+    // The presentation row cannot reproduce the owner's synthetic
+    // `singleton-{agent}` workflow name, so singleton identity travels as its
+    // own published field — it is what lets a viewing machine pin the
+    // account-wide singleton by default.
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-merge",
+        ownerLocalTaskId: "task-merge",
+        singletonAgent: "merge",
+      }),
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-ordinary",
+        ownerLocalTaskId: "task-ordinary",
+      }),
+    ]);
+
+    const singleton = snapshot.items.find((item) => item.id.endsWith("task-merge"));
+    const ordinary = snapshot.items.find((item) => item.id.endsWith("task-ordinary"));
+    expect(singleton?.singleton_agent).toBe("merge");
+    expect(ordinary?.singleton_agent).toBeNull();
+  });
+
   it("resolves an owner-published parent into the local presentation id", () => {
     const snapshot = mapDesktopCloudTasks([
       remoteTaskSnapshot({

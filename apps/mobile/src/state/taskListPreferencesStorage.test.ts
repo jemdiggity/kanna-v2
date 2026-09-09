@@ -15,6 +15,7 @@ const storage = {
 
 const pinned = {
   pins: [{ taskId: "task-1", repoId: "repo-1" }],
+  unpinnedDefaults: [{ taskId: "task-merge", repoId: "repo-1" }],
   dismissedActivity: [
     { taskId: "task-2", repoId: "repo-1", activityRevision: 7 }
   ],

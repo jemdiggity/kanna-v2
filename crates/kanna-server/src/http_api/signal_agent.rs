@@ -442,7 +442,7 @@ pub(super) async fn release_closed_singleton_reservation(
         let Some(agent) = task
             .pipeline
             .as_deref()
-            .and_then(|name| name.strip_prefix("singleton-"))
+            .and_then(crate::task_creator::directory_singleton_agent)
         else {
             return Ok(None);
         };

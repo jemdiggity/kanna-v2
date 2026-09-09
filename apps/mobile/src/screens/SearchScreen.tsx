@@ -71,7 +71,7 @@ export function SearchScreen({
               ? "No tasks matched that search yet."
               : "Start typing to search tasks across your desktop."
           }
-          pinnedTaskIds={localPinnedTaskIds(taskListPreferences)}
+          pinnedTaskIds={localPinnedTaskIds(taskListPreferences, results)}
           taskSlots={projectTaskUiSlots(results, [])}
           onOpenTask={onOpenTask}
           onSetTaskPinned={onSetTaskPinned}

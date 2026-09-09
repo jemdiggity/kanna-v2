@@ -37,6 +37,13 @@ export interface PipelineItem {
   prompt: string | null;
   /** Workflow name. `pipeline` is the legacy storage column name. */
   pipeline: string;
+  /**
+   * The agent this task is the account-wide singleton for, when it is one.
+   * A local row derives it from `pipeline`; a cross-machine row carries the
+   * owner's published value, whose workflow name this presentation row does
+   * not reproduce. Read it through `utils/singletonTask`.
+   */
+  singleton_agent?: string | null;
   /** Pinned workflow definition JSON; legacy storage column name. */
   pipeline_def: string | null;
   stage: string;

@@ -106,6 +106,18 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         "2026-07-01T00:00:00Z",
     )
     .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-merge",
+        "task-merge",
+        &format!("singleton-{agent}"),
+        None,
+        "claude",
+    )
+    .unwrap();
+    // The singleton was pinned by default when it was claimed, and the
+    // operator turned that off. Reclaiming it must leave that decision alone.
+    db.pin_pipeline_item_at_top("repo-1", "task-merge").unwrap();
+    db.unpin_pipeline_item("task-merge").unwrap();
     db.insert_stage_run(crate::db::NewStageRun {
         id: "run-merge",
         task_id: "task-merge",
@@ -126,6 +138,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
     .unwrap();
     drop(db);
 
+    let db_path = config.db_path.clone();
     let app = super::router(Arc::new(super::AppState::new(config)));
     let message = "Please assess whether PR 123 is ready to merge";
     let response = app
@@ -152,6 +165,14 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
     assert_eq!(body["created"], false);
     let inputs = daemon_server.await.unwrap();
     assert_eq!(inputs, vec![message.as_bytes().to_vec()]);
+
+    let reclaimed = Db::open(&db_path)
+        .unwrap()
+        .get_pipeline_item("task-merge")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.pinned, Some(0));
+    assert_eq!(reclaimed.pin_order, None);
 
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);

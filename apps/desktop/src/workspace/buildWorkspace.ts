@@ -1,4 +1,6 @@
 import type { PipelineItem } from "../types/kanna";
+import type { RemoteTaskPin } from "../services/remoteTaskPins";
+import { DEFAULT_SINGLETON_PIN_ORDER, isDefaultPinnedTask } from "../utils/singletonTask";
 import type {
   BuildWorkspaceInput,
   BuildWorkspaceResult,
@@ -217,9 +219,8 @@ function remoteCandidates(
     const ownerLocalTaskId = terminalRef?.ownerLocalTaskId ?? stripRemoteTaskPrefix(item.id);
     const logicalKey = `${repoKey}${LOGICAL_OWNER_TASK_MARKER}${ownerLocalTaskId}`;
     if (closedLocalKeys.has(logicalKey)) return null;
-    const pinOrder = remoteTaskPins?.get(ownerLocalTaskId);
     return {
-      item: pinOrder === undefined ? item : { ...item, pinned: 1, pin_order: pinOrder },
+      item: applyRemoteTaskPin(item, remoteTaskPins?.get(ownerLocalTaskId)),
       repoKey,
       logicalKey,
       source: {
@@ -234,6 +235,23 @@ function remoteCandidates(
       },
     };
   });
+}
+
+/**
+ * Resolves a cross-machine row's pin state on this viewer's machine.
+ *
+ * The owner's own `pinned`/`pin_order` never crosses: pinning is per-operator,
+ * and the row arrives unpinned. What this machine decides on its own is the
+ * default — an account-wide singleton is pinned at the top of the pinned group
+ * on every machine — and the viewer-local overlay overrides it in both
+ * directions: an explicit order pins the row there, and an explicit `null`
+ * unpin keeps it out of the pinned group for good.
+ */
+function applyRemoteTaskPin(item: PipelineItem, pin: RemoteTaskPin | undefined): PipelineItem {
+  if (pin === null) return item;
+  if (pin !== undefined) return { ...item, pinned: 1, pin_order: pin };
+  if (!isDefaultPinnedTask(item)) return item;
+  return { ...item, pinned: 1, pin_order: DEFAULT_SINGLETON_PIN_ORDER };
 }
 
 function buildClosedLocalKeys(

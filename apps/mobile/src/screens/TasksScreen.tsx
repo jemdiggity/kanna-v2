@@ -59,7 +59,10 @@ export function TasksScreen({
   onSetTaskPinned
 }: TasksScreenProps) {
   const isRecentView = heading === "Recent";
-  const pinnedTaskIds = localPinnedTaskIds(taskListPreferences);
+  const pinnedTaskIds = localPinnedTaskIds(
+    taskListPreferences,
+    taskSlots.map(taskUiSlotToTaskSummary)
+  );
   const repoNamesById = new Map(repos.map((repo) => [repo.id, repo.name]));
   const recentTaskRepoLabel = (task: TaskSummary): string =>
     task.repoName?.trim() ||

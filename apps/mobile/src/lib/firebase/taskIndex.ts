@@ -32,6 +32,10 @@ export interface CloudTaskSnapshot {
   agent?: { provider?: string | null; type?: string | null } | null;
   parentTaskId?: string | null;
   blockedByTaskIds?: string[];
+  /** The agent this task is the account-wide singleton for, when it is one.
+   * Published by the owner's desktop; it is what lets a phone reading the
+   * cloud index pin the singleton by default, exactly as it does on the LAN. */
+  singletonAgent?: string | null;
   pinned?: boolean;
   pinOrder?: number | null;
   createdAt: string;
@@ -268,6 +272,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     agent: parseCloudTaskAgent(value.agent),
     parentTaskId: optionalNullableString(value.parentTaskId),
     blockedByTaskIds: parseCloudTaskBlockerIds(value.blockedByTaskIds),
+    singletonAgent: optionalNullableString(value.singletonAgent),
     pinned: optionalBoolean(value.pinned),
     pinOrder: optionalNullableNumber(value.pinOrder),
     createdAt,
@@ -376,6 +381,11 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     queuedInputReason: snapshot.queuedInputReason ?? null,
     parentTaskId: snapshot.parentTaskId ?? null,
     blockedByTaskIds: snapshot.blockedByTaskIds ?? [],
+    // A document that never carried the field says nothing rather than saying
+    // "not a singleton": absent stays absent so a later LAN read can fill it.
+    ...(snapshot.singletonAgent === undefined
+      ? {}
+      : { singletonAgent: snapshot.singletonAgent }),
     pinned: snapshot.pinned ?? false,
     pinOrder: snapshot.pinOrder ?? null,
     ownerDesktopId: snapshot.ownerDesktopId,
