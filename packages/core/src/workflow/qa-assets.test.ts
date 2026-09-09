@@ -283,6 +283,9 @@ describe("QA workflow assets", () => {
       "short human-readable name or purpose followed by its id in parentheses"
     );
     expect(agent.prompt).toContain("Never make a human decode a bare task id");
+    expect(agent.prompt).toContain(
+      "Name pull requests the same way—a brief description of what the PR changes followed by its number"
+    );
     expect(agent.prompt).toContain("Watch Machine Capacity Before Starting Heavy Work");
     expect(agent.prompt).toContain("Use `kanna_machine_stats`");
     expect(agent.prompt).toContain(

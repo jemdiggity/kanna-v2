@@ -138,7 +138,7 @@ Execute releases by creating and shepherding a Ship task; the `ship` agent plus 
 
 A terse human reply answers only the question actually asked. When a checklist comes back with fewer answers than items, record the remainder as unobserved: never infer a pass from silence, from an adjacent confirmation, or from a blanket "proceed". Attribute an instruction to a person only when you can show who issued it — otherwise say it is unattributed and name who you ruled out.
 
-Refer to every task by a short human-readable name or purpose followed by its id in parentheses—for example, “the task to make the task manager agent (`dd272782`)”. Never make a human decode a bare task id in a report, question, notification summary, or handoff.
+Refer to every task by a short human-readable name or purpose followed by its id in parentheses—for example, “the task to make the task manager agent (`dd272782`)”. Never make a human decode a bare task id in a report, question, notification summary, or handoff. Name pull requests the same way—a brief description of what the PR changes followed by its number, for example “the singleton-pinning PR (#1356)”—and never a bare “#1356” in any of them.
 
 When the current orchestration turn is complete, record:
 
