@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { CloudEnvironmentName } from "./environment";
 import type { MobileOtaContext } from "./mobile-ota";
 
 const buildSchema = z.object({
@@ -19,14 +20,30 @@ export interface OtaObservation {
 }
 
 export async function observeMobileDevices(
-  context: MobileOtaContext, channel: string, runtime: string, updateId?: string
+  context: MobileOtaContext, environment: CloudEnvironmentName, channel: string, runtime: string, updateId?: string
 ): Promise<OtaObservation> {
-  const url = context.env.KANNA_OTA_DEVICE_SERVER_URL ?? "http://127.0.0.1:48120";
+  const url = context.env.KANNA_OTA_DEVICE_SERVER_URL ?? (environment === "staging" ? "http://127.0.0.1:48121" : "http://127.0.0.1:48120");
+  const expectedEnvironment = environment === "production" ? "prod" : environment;
   const lines = [`device source: ${url} (paired devices on this desktop; last LAN reports, not a fleet census)`];
   try {
     const parsedUrl = new URL(url);
     if (!["127.0.0.1", "localhost", "[::1]"].includes(parsedUrl.hostname) || parsedUrl.protocol !== "http:" || parsedUrl.username || parsedUrl.password) {
       throw new Error("KANNA_OTA_DEVICE_SERVER_URL must be a local HTTP server");
+    }
+    let reportedEnvironment = "UNKNOWN (status unreadable or environment missing)";
+    try {
+      const status = await context.runner.run("curl", ["--silent", "--show-error", "--fail", "--max-time", "5", `${url.replace(/\/$/, "")}/v1/status`], {
+        cwd: context.repoRoot, env: context.env
+      });
+      if (status.exitCode === 0) {
+        const parsed = z.object({ environment: z.string().min(1) }).safeParse(parseJson(status.stdout));
+        if (parsed.success) reportedEnvironment = parsed.data.environment;
+      }
+    } catch {
+      // An unavailable status cannot establish which desktop owns the inventory.
+    }
+    if (reportedEnvironment !== expectedEnvironment) {
+      throw new Error(`desktop at ${url} reported environment ${reportedEnvironment}; expected ${expectedEnvironment}; no devices counted`);
     }
     const result = await context.runner.run("curl", ["--silent", "--show-error", "--fail", "--max-time", "5", `${url.replace(/\/$/, "")}/v1/mobile/builds`], {
       cwd: context.repoRoot, env: context.env
@@ -44,7 +61,7 @@ export async function observeMobileDevices(
         lines.push(`${device.deviceName} (${device.deviceId}): UNKNOWN — no build report; launch a reporting-capable app on LAN`);
         continue;
       }
-      if (build.channel !== channel || build.environment !== (channel === "production" ? "prod" : channel)) {
+      if (build.channel !== channel || build.environment !== expectedEnvironment) {
         lines.push(`${device.deviceName}: other environment/channel ${build.environment}/${build.channel}, runtime ${build.runtimeVersion ?? "unknown"}`);
         continue;
       }

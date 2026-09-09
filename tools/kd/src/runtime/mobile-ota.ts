@@ -285,7 +285,7 @@ export async function executeMobileOtaPublishWithContext(
     }
     return {
       ok: true,
-      message: (await observeMobileDevices(context, identity.otaChannel, runtimeVersion, input.rollbackTo)).detail + "\n" + formatRollbackMessage({
+      message: (await observeMobileDevices(context, environment, identity.otaChannel, runtimeVersion, input.rollbackTo)).detail + "\n" + formatRollbackMessage({
         dryRun: input.dryRun === true,
         bucket: identity.otaBucket,
         channel: identity.otaChannel,
@@ -353,7 +353,7 @@ export async function executeMobileOtaPublishWithContext(
     ], context.repoRoot, context.env);
   }
 
-  const devices = await observeMobileDevices(context, plan.channel, plan.runtimeVersion, plan.updateId);
+  const devices = await observeMobileDevices(context, environment, plan.channel, plan.runtimeVersion, plan.updateId);
   return {
     ok: true,
     message: `${formatPublishMessage(plan)}\n${devices.detail}`,
@@ -396,7 +396,7 @@ export async function executeMobileOtaStatusWithContext(
   ], { cwd: context.repoRoot, env: context.env });
 
   const pointers = await observeRuntimePointers(context, identity.otaBucket, identity.otaChannel, runtimeVersion);
-  const devices = await observeMobileDevices(context, identity.otaChannel, runtimeVersion, parsePointer(pointer.stdout)?.currentUpdateId);
+  const devices = await observeMobileDevices(context, environment, identity.otaChannel, runtimeVersion, parsePointer(pointer.stdout)?.currentUpdateId);
   return {
     ok: pointer.exitCode === 0,
     message: [
@@ -721,7 +721,7 @@ export async function executeMobileOtaDoctorWithContext(
   }
 
   checks.push({ name: "runtime channel pointers", ...await observeRuntimePointers(context, bucket, channel, runtimeVersion) });
-  checks.push({ name: "device compatibility", ...await observeMobileDevices(context, channel, runtimeVersion, updateId) });
+  checks.push({ name: "device compatibility", ...await observeMobileDevices(context, environment, channel, runtimeVersion, updateId) });
   const ok = checks.every((check) => check.status === "PASS");
   return {
     ok,

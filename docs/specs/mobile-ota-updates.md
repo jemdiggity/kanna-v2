@@ -265,8 +265,12 @@ result for WARN as well as FAIL, so unknown device data cannot produce an
 all-PASS preflight. A matching runtime alone does not confirm application:
 confirmation requires a recent report naming the channel's current update id.
 
-The inventory source is `http://127.0.0.1:48120/v1/mobile/builds`, the running
-local desktop, regardless of the publishing worktree's development ports.
+The inventory source defaults to `http://127.0.0.1:48121` for staging and
+`http://127.0.0.1:48120` for production, regardless of the publishing worktree's
+development ports. Before reading `/v1/mobile/builds`, tooling checks
+`/v1/status`: its environment must be `staging` or `prod`, respectively. An
+unreadable status or environment mismatch produces WARN naming the queried URL
+and reported environment (UNKNOWN when unavailable), and counts no devices.
 Set `KANNA_OTA_DEVICE_SERVER_URL=http://127.0.0.1:<port>` to inspect a different
 local desktop instance. Output names the source and desktop id. This is a
 census of that desktop's paired devices, not every installation or every

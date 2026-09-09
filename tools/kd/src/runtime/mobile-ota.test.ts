@@ -624,7 +624,10 @@ describe("kd mobile OTA", () => {
     const base = publishRunner(repoRoot);
     const runner: CommandRunner = {
       async run(command, args, options) {
-        if (command === "curl" && args.at(-1)?.endsWith("/v1/mobile/builds")) return {
+        if (command === "curl" && args.at(-1) === "http://127.0.0.1:48121/v1/status") return {
+          exitCode: 0, stderr: "", stdout: JSON.stringify({ environment: "staging" })
+        };
+        if (command === "curl" && args.at(-1) === "http://127.0.0.1:48121/v1/mobile/builds") return {
           exitCode: 0, stderr: "", stdout: JSON.stringify({ desktopId: "owner-mac", devices: [{
             deviceId: "iphone", deviceName: "Owner iPhone", build: {
               environment: "staging", channel: "staging", runtimeVersion: "0.9.0",
@@ -651,6 +654,9 @@ describe("kd mobile OTA", () => {
     const prefix = `gs://${resolveKdEnvironment("staging").otaBucket}/ota/ios/`;
     const runner: CommandRunner = {
       async run(command, args) {
+        if (command === "curl" && args.at(-1) === "http://127.0.0.1:48121/v1/status") return {
+          exitCode: 0, stderr: "", stdout: JSON.stringify({ environment: "staging" })
+        };
         if (command === "curl") return { exitCode: 0, stderr: "", stdout: JSON.stringify({
           desktopId: "owner-mac", devices: [{ deviceId: "iphone", deviceName: "Owner iPhone", build: {
             environment: "staging", channel: "staging", runtimeVersion: "0.9.0",
