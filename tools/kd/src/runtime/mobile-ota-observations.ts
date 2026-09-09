@@ -23,7 +23,10 @@ export async function observeMobileDevices(
   context: MobileOtaContext, environment: CloudEnvironmentName, channel: string, runtime: string, updateId?: string
 ): Promise<OtaObservation> {
   const url = context.env.KANNA_OTA_DEVICE_SERVER_URL ?? (environment === "staging" ? "http://127.0.0.1:48121" : "http://127.0.0.1:48120");
-  const expectedEnvironment = environment === "production" ? "prod" : environment;
+  // Separate contracts: crates/kanna-server/src/config.rs uses production;
+  // apps/mobile/src/mobileEnvironment.ts uses prod for mobile build reports.
+  const expectedServerEnvironment = environment;
+  const expectedMobileEnvironment = environment === "production" ? "prod" : environment;
   const lines = [`device source: ${url} (paired devices on this desktop; last LAN reports, not a fleet census)`];
   try {
     const parsedUrl = new URL(url);
@@ -42,8 +45,8 @@ export async function observeMobileDevices(
     } catch {
       // An unavailable status cannot establish which desktop owns the inventory.
     }
-    if (reportedEnvironment !== expectedEnvironment) {
-      throw new Error(`desktop at ${url} reported environment ${reportedEnvironment}; expected ${expectedEnvironment}; no devices counted`);
+    if (reportedEnvironment !== expectedServerEnvironment) {
+      throw new Error(`desktop at ${url} reported environment ${reportedEnvironment}; expected ${expectedServerEnvironment}; no devices counted`);
     }
     const result = await context.runner.run("curl", ["--silent", "--show-error", "--fail", "--max-time", "5", `${url.replace(/\/$/, "")}/v1/mobile/builds`], {
       cwd: context.repoRoot, env: context.env
@@ -61,7 +64,7 @@ export async function observeMobileDevices(
         lines.push(`${device.deviceName} (${device.deviceId}): UNKNOWN — no build report; launch a reporting-capable app on LAN`);
         continue;
       }
-      if (build.channel !== channel || build.environment !== expectedEnvironment) {
+      if (build.channel !== channel || build.environment !== expectedMobileEnvironment) {
         lines.push(`${device.deviceName}: other environment/channel ${build.environment}/${build.channel}, runtime ${build.runtimeVersion ?? "unknown"}`);
         continue;
       }

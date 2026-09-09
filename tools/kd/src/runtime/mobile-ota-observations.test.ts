@@ -12,24 +12,30 @@ function context(devices: unknown[], environment = "staging"): MobileOtaContext 
 }
 describe("OTA device observations", () => {
   it.each([
-    ["staging", "staging", "http://127.0.0.1:48121"],
-    ["production", "prod", "http://127.0.0.1:48120"]
-  ] as const)("queries the %s desktop and respects the local URL override", async (environment, reported, defaultUrl) => {
+    ["staging", "staging", "staging", "http://127.0.0.1:48121"],
+    ["production", "production", "prod", "http://127.0.0.1:48120"]
+  ] as const)("queries the %s desktop and respects the local URL override", async (environment, reported, mobileEnvironment, defaultUrl) => {
     for (const override of [undefined, "http://localhost:49000/"]) {
-      const ctx = context([], reported);
+      const matchingDevice = device("2.2.3");
+      matchingDevice.build.environment = mobileEnvironment;
+      matchingDevice.build.channel = environment;
+      const ctx = context([matchingDevice], reported);
       ctx.env.KANNA_OTA_DEVICE_SERVER_URL = override;
-      await observeMobileDevices(ctx, environment, environment, "2.2.3");
+      const result = await observeMobileDevices(ctx, environment, environment, "2.2.3", "old-update");
+      expect(result.status).toBe("PASS");
+      expect(result.detail).toContain("Applied update confirmed");
+      expect(result.detail).not.toContain("no recently observed");
       const baseUrl = (override ?? defaultUrl).replace(/\/$/, "");
       expect(vi.mocked(ctx.runner.run).mock.calls.map(call => call[1].at(-1))).toEqual([
         `${baseUrl}/v1/status`, `${baseUrl}/v1/mobile/builds`
       ]);
     }
   });
-  it.each(["prod", "dev"])("does not use a desktop reporting %s for staging device evidence", async (reported) => {
+  it.each(["staging", "development"])("does not use a desktop reporting %s for production device evidence", async (reported) => {
     const ctx = context([device("2.2.3")], reported);
-    const result = await observeMobileDevices(ctx, "staging", "staging", "2.2.3", "old-update");
+    const result = await observeMobileDevices(ctx, "production", "production", "2.2.3", "old-update");
     expect(result.status).toBe("WARN");
-    expect(result.detail).toContain(`desktop at http://127.0.0.1:48121 reported environment ${reported}; expected staging; no devices counted`);
+    expect(result.detail).toContain(`desktop at http://127.0.0.1:48120 reported environment ${reported}; expected production; no devices counted`);
     expect(result.detail).not.toContain("Owner's iPhone");
     expect(ctx.runner.run).toHaveBeenCalledTimes(1);
   });

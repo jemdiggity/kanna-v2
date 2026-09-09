@@ -268,7 +268,8 @@ confirmation requires a recent report naming the channel's current update id.
 The inventory source defaults to `http://127.0.0.1:48121` for staging and
 `http://127.0.0.1:48120` for production, regardless of the publishing worktree's
 development ports. Before reading `/v1/mobile/builds`, tooling checks
-`/v1/status`: its environment must be `staging` or `prod`, respectively. An
+`/v1/status`: its desktop-server environment must be `staging` or `production`,
+respectively. Mobile build reports use `staging` or `prod` instead. An
 unreadable status or environment mismatch produces WARN naming the queried URL
 and reported environment (UNKNOWN when unavailable), and counts no devices.
 Set `KANNA_OTA_DEVICE_SERVER_URL=http://127.0.0.1:<port>` to inspect a different
