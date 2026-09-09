@@ -340,41 +340,88 @@ pub(super) async fn replace_task_workflow(
     let response = {
         let state = Arc::clone(&state);
         super::blocking::run_handler_blocking("task workflow replacement", move || {
-            let db = Db::open(&state.config.db_path).map_err(|error| db_write_error("db error", error))?;
-            let item = db.get_pipeline_item(&task_id).map_err(|error| db_write_error("db error", error))?
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            let item = db
+                .get_pipeline_item(&task_id)
+                .map_err(|error| db_write_error("db error", error))?
                 .ok_or_else(|| (StatusCode::NOT_FOUND, format!("task not found: {task_id}")))?;
             if item.closed_at.is_some() {
-                return Err((StatusCode::CONFLICT, "cannot replace a closed task's workflow".into()));
+                return Err((
+                    StatusCode::CONFLICT,
+                    "cannot replace a closed task's workflow".into(),
+                ));
             }
-            let stage = item.stage.as_deref().ok_or_else(|| (StatusCode::CONFLICT, "task has no current stage".into()))?;
-            let previous = item.pipeline_def.as_deref().ok_or_else(|| (StatusCode::CONFLICT, "task has no pinned workflow".into()))?;
-            let before: serde_json::Value = serde_json::from_str(previous).map_err(|error| (StatusCode::CONFLICT, format!("invalid pinned workflow: {error}")))?;
+            let stage = item
+                .stage
+                .as_deref()
+                .ok_or_else(|| (StatusCode::CONFLICT, "task has no current stage".into()))?;
+            let previous = item
+                .pipeline_def
+                .as_deref()
+                .ok_or_else(|| (StatusCode::CONFLICT, "task has no pinned workflow".into()))?;
+            let before: serde_json::Value = serde_json::from_str(previous).map_err(|error| {
+                (
+                    StatusCode::CONFLICT,
+                    format!("invalid pinned workflow: {error}"),
+                )
+            })?;
             if before != payload.expected_definition {
-                return Err((StatusCode::CONFLICT, "pinned workflow changed; read it again before replacing".into()));
+                return Err((
+                    StatusCode::CONFLICT,
+                    "pinned workflow changed; read it again before replacing".into(),
+                ));
             }
-            let repo = db.get_repo(&item.repo_id).map_err(|error| db_write_error("db error", error))?
+            let repo = db
+                .get_repo(&item.repo_id)
+                .map_err(|error| db_write_error("db error", error))?
                 .ok_or_else(|| (StatusCode::NOT_FOUND, "task repository not found".into()))?;
-            let runs = db.list_stage_runs_for_task(&task_id).map_err(|error| db_write_error("db error", error))?;
+            let runs = db
+                .list_stage_runs_for_task(&task_id)
+                .map_err(|error| db_write_error("db error", error))?;
             let validated = crate::task_creator::validate_task_workflow_replacement(
-                &repo, &payload.workflow_definition, previous, stage, &runs)
-                .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+                &repo,
+                &payload.workflow_definition,
+                previous,
+                stage,
+                &runs,
+            )
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
             let snapshot = validated.snapshot;
             let superseded = validated.superseded_run_ids;
-            let changed = db.replace_task_workflow(&task_id, stage,
-                item.pipeline.as_deref().unwrap_or("no-review"), &snapshot.definition_json,
-                item.revision_rounds, snapshot.revision_limit,
-                Some(crate::db::WorkflowReplacement {
-                    expected_definition: previous,
-                    source: payload.source.as_deref().unwrap_or("unspecified"),
-                    superseded_run_ids: &superseded,
-                    changed_execution_stages: &validated.changed_execution_stages,
-                }))
+            let changed = db
+                .replace_task_workflow(
+                    &task_id,
+                    stage,
+                    item.pipeline.as_deref().unwrap_or("no-review"),
+                    &snapshot.definition_json,
+                    item.revision_rounds,
+                    snapshot.revision_limit,
+                    Some(crate::db::WorkflowReplacement {
+                        expected_definition: previous,
+                        source: payload.source.as_deref().unwrap_or("unspecified"),
+                        superseded_run_ids: &superseded,
+                        changed_execution_stages: &validated.changed_execution_stages,
+                    }),
+                )
                 .map_err(|error| db_write_error("db error", error))?;
-            Ok(serde_json::json!({"taskId": task_id, "stage": stage, "changed": changed,
-                "workflowDefinition": serde_json::from_str::<serde_json::Value>(&snapshot.definition_json).unwrap(),
+            let definition_value = serde_json::from_str::<serde_json::Value>(
+                &snapshot.definition_json,
+            )
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("invalid stored workflow: {error}"),
+                )
+            })?;
+            Ok(
+                serde_json::json!({"taskId": task_id, "stage": stage, "changed": changed,
+                "workflowDefinition": definition_value,
                 "revisionLimit": snapshot.revision_limit, "revisionRounds": item.revision_rounds,
-                "supersededRunIds": if changed { superseded } else { vec![] }}))
-        }).await?
+                "supersededRunIds": if changed { superseded } else { vec![] }}),
+            )
+        })
+        .await?
     };
     if response["changed"] == true {
         state.publish_state_changed(StateChangeScope::Tasks);

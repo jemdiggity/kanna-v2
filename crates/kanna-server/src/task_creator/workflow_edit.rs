@@ -44,7 +44,11 @@ pub(crate) fn validate_task_workflow_replacement(
                 if bindings
                     .insert(
                         stage.name.clone(),
-                        ("main".into(), serde_json::to_value(stage).unwrap()),
+                        (
+                            "main".into(),
+                            serde_json::to_value(stage)
+                                .map_err(|error| format!("stage '{}': {error}", stage.name))?,
+                        ),
                     )
                     .is_some()
                 {
@@ -56,7 +60,8 @@ pub(crate) fn validate_task_workflow_replacement(
                             post.name.clone(),
                             (
                                 format!("post:{}", stage.name),
-                                serde_json::to_value(post).unwrap(),
+                                serde_json::to_value(post)
+                                    .map_err(|error| format!("post '{}': {error}", post.name))?,
                             ),
                         )
                         .is_some()
