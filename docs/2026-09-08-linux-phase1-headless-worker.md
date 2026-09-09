@@ -23,8 +23,8 @@ relationship, and proves the whole task lifecycle end to end on the VM.
 | `cargo test -p kanna-daemon --no-fail-fast -- --test-threads=1` | **839 passed, 0 failed**, 4 ignored, across every target | **826 passed, 0 failed**, 4 ignored |
 | `cargo clippy --workspace --all-targets -- -D warnings` (`--exclude kanna-desktop` on Linux) | exit 0 | exit 0 |
 | `cargo test --workspace --exclude kanna-daemon --exclude kanna-desktop` | 2 174 passed, **4 failed** — all four the "no agent CLI installed" class, see §6 | all pass |
-| `cargo test -p kanna-server` with any `claude`/`codex`/`opencode` executable on `PATH` | **1 352 passed, 0 failed** | — |
-| `./kd test headless-worker` (the exit gate) | **16 passed** | 14 passed, 2 skipped (systemd-only) |
+| `cargo test -p kanna-server`, with those four fixed on `main` (PR #1367) | **1 352 passed, 0 failed** | — |
+| `./kd test headless-worker` (the exit gate) | **17 passed** | 15 passed, 2 skipped (systemd-only) |
 | `./kd test all` | — | **19 of 19 lanes green**; 3 212 Rust tests passed, 0 failed |
 
 Phase 0's baseline was 651 passing / 113 failing daemon tests, 1 326/1 348
@@ -429,15 +429,30 @@ and
 `task_creator::tests::core::prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_provider_setting`.
 
 Reproduced on macOS first, as the plan required: they pass there because a real
-`claude` is installed. Putting any executable named `claude`, `codex` and
-`opencode` on the guest's `PATH` takes `kanna-server` from 1 348/4 to
-**1 352 passed, 0 failed** — which is the whole of the difference.
+`claude` is installed.
 
-That is a real hermeticity gap — these tests depend on the developer's machine
-despite their fixture shipping fake providers, and one of them
-(`advance_stage_route_…`) even overwrites the fixture's own
-`workspace.path.prepend` — but it is a pre-existing, cross-platform test
-problem rather than Phase 1 scope, so it is recorded here and left alone.
+This section first claimed that putting any executable named `claude`, `codex`
+and `opencode` on the guest's `PATH` would take `kanna-server` from 1 348/4 to
+1 352/0, and that this was the whole of the difference. That was wrong, and task
+`523a052a` disproved it by trying: installing a real `opencode` on the guest
+moved the count not at all — the VM stayed at 1 348/4 — because the four tests
+do not want *an* agent CLI, they each want a **differently named** one, so no
+single install satisfies more than its own.
+
+The question is moot on `main`. Task `53b3c818` (PR #1367, merged) closed the
+hermeticity gap at its cause: a test build now resolves
+`<workspace_root>/.kanna/test-provider-bin/<name>` from the workspace itself,
+after the repo's own prepends and before anything host-derived, and **never
+resolves an agent CLI from the host at all** — the fallback stops after
+`KANNA_TEST_PROVIDER_LOOKUP_PATH` instead of walking the process `PATH`, the
+cached login-shell `PATH`, and `~/.local/bin` / `~/.opencode/bin` /
+`/usr/local/bin`. The fixture no longer travels through `.kanna/config.json`,
+so the three tests that write a config of their own can no longer delete it,
+and the fourth was given the real worktree it never had. Production resolution
+is unchanged. On the VM that took `kanna-server` from 1 348/4 to **1 352
+passed, 0 failed** without installing anything anywhere, and these four now
+pass or fail the same way on every machine rather than by what the developer
+happens to have installed.
 
 ### Harnesses that mirrored a path
 
