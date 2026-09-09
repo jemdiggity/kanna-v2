@@ -101,21 +101,6 @@ impl Db {
                         AND stage_run.kind = 'post'
                         AND stage_run.status = 'running'
                     ) AS has_running_post,
-                    (
-                      SELECT COUNT(*) FROM queued_task_input
-                      WHERE queued_task_input.task_id = pipeline_item.id
-                    ) AS queued_input_count,
-                    (
-                      SELECT CASE queued_task_input.state
-                        WHEN 'held' THEN 'input_held_by_draft'
-                        WHEN 'uncertain' THEN 'delivery_uncertain'
-                        ELSE 'sending'
-                      END
-                      FROM queued_task_input
-                      WHERE queued_task_input.task_id = pipeline_item.id
-                      ORDER BY queued_task_input.id
-                      LIMIT 1
-                    ) AS queued_input_reason,
                     pipeline_item.activity_revision,
                     pipeline_item.blocker_revision,
                     (
@@ -213,22 +198,20 @@ impl Db {
                 created_at: row.get(30)?,
                 updated_at: row.get(31)?,
                 has_running_post: row.get(32)?,
-                queued_input_count: row.get(33)?,
-                queued_input_reason: row.get(34)?,
-                activity_revision: row.get(35)?,
-                blocker_revision: row.get(36)?,
-                transition_revision: row.get(37)?,
-                cloud_task_id: row.get(38)?,
-                transfer_id: row.get(39)?,
-                transfer_direction: row.get(40)?,
-                transfer_status: row.get(41)?,
-                transfer_source_peer_id: row.get(42)?,
-                transfer_target_peer_id: row.get(43)?,
-                transfer_source_desktop_id: row.get(44)?,
-                transfer_target_desktop_id: row.get(45)?,
-                transfer_error: row.get(46)?,
-                runtime_state: row.get(47)?,
-                read_state: row.get(48)?,
+                activity_revision: row.get(33)?,
+                blocker_revision: row.get(34)?,
+                transition_revision: row.get(35)?,
+                cloud_task_id: row.get(36)?,
+                transfer_id: row.get(37)?,
+                transfer_direction: row.get(38)?,
+                transfer_status: row.get(39)?,
+                transfer_source_peer_id: row.get(40)?,
+                transfer_target_peer_id: row.get(41)?,
+                transfer_source_desktop_id: row.get(42)?,
+                transfer_target_desktop_id: row.get(43)?,
+                transfer_error: row.get(44)?,
+                runtime_state: row.get(45)?,
+                read_state: row.get(46)?,
             })
         })?;
         rows.collect()

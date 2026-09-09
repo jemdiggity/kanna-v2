@@ -534,7 +534,7 @@ pub(super) async fn signal_agent_request(
             });
         }
         Some(SingletonOwner::Local(running)) => {
-            return signal_local_singleton(&state, &repo_id, &agent, &message, running).await;
+            return signal_local_singleton(&state, &message, running).await;
         }
         None => {}
     }
@@ -1019,8 +1019,6 @@ fn remote_singleton_unreachable(
 
 async fn signal_local_singleton(
     state: &Arc<AppState>,
-    repo_id: &str,
-    agent: &str,
     message: &str,
     running: crate::db::OpenAgentTask,
 ) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
@@ -1032,25 +1030,10 @@ async fn signal_local_singleton(
                 format!("daemon error: {}", e),
             )
         })?;
-    // A singleton that refuses delivered input is the one failure here that
-    // no retry fixes and that nothing else would ever surface.
     if let Err(error) =
         super::task_input::try_submit_task_input(&mut daemon, &running.session_id, message).await
     {
         return Err(match error {
-            super::task_input::TaskInputError::InputBlocked(reason) => {
-                super::task_input::record_input_blocked_target(state, &running.session_id).await;
-                log::error!(
-                    "the {agent} agent for repo {repo_id} refuses delivered input: {reason}"
-                );
-                (axum::http::StatusCode::CONFLICT, reason)
-            }
-            super::task_input::TaskInputError::HeldByRawDraft(reason) => {
-                log::error!(
-                    "the {agent} agent for repo {repo_id} queued delivered input behind an unsent human line: {reason}"
-                );
-                (axum::http::StatusCode::CONFLICT, reason)
-            }
             super::task_input::TaskInputError::SessionNotFound => (
                 axum::http::StatusCode::NOT_FOUND,
                 format!("session not found: {}", running.session_id),

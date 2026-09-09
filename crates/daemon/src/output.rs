@@ -18,9 +18,8 @@ use crate::fanout::{
     SessionFanouts,
 };
 use crate::session::{
-    logical_input_consumption_timeout, MirrorResult, PendingInput, PendingInputKind, SessionHandle,
-    SessionManager, StreamControl, WriteOutcome, LOGICAL_INPUT_SUBMIT_DELAY_MS,
-    STATUS_DETECTION_THROTTLE_MS,
+    MirrorResult, PendingInput, PendingInputKind, SessionHandle, SessionManager, StreamControl,
+    LOGICAL_INPUT_SUBMIT_DELAY_MS, STATUS_DETECTION_THROTTLE_MS,
 };
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
@@ -28,108 +27,35 @@ const STAGE_MIRROR_OUTPUT: &str = "mirror_output";
 const STAGE_DETECT_STATUS: &str = "detect_status";
 const STAGE_RECOVERY_WRITE: &str = "recovery_write";
 
-/// What the PTY writer is waiting for before it may write the next input.
+/// The pause the PTY writer holds after one delivered message's submission
+/// boundary, before the next one may own the composer.
 ///
-/// The writer never guesses at a submission from bytes, and it must not guess
-/// at one from a clock either. A logical message is delivered as two writes —
-/// its text, then its Enter — and the second one is only a submission if the
-/// CLI has finished consuming the first. When it has not, an interactive TUI
-/// coalesces the Enter into the burst it is still draining and the message ends
-/// up parked at the composer as a literal newline.
+/// This is the whole of the writer's input pacing. It is not a protection and
+/// it withholds nothing: a CLI needs a processing turn after Enter before it
+/// can take another line, and two deliveries written back to back without one
+/// arrive merged. It always elapses, on a fixed clock, without reading the
+/// terminal.
+///
+/// The writer used to carry a second, very different fence: after writing a
+/// message's text it waited for the terminal to *settle* before writing that
+/// message's Enter, and gave up unproven when it never did — which, for an
+/// agent mid-turn, was every time. The text then sat unsent at a composer and
+/// the session started refusing later messages. That fence is gone; a logical
+/// message is one write, Enter included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubmitFence {
-    /// A fixed pause after a synthesized Enter reached the PTY, before the next
-    /// queued message may own the composer.
-    AfterSubmission { until: Instant },
-    /// A logical message's text reached the PTY. Its Enter waits for evidence
-    /// that the CLI consumed it.
-    AwaitingConsumption {
-        /// Mirrored output chunks counted when this window last restarted.
-        /// More since then means the CLI is still repainting what it was given.
-        chunks_seen: u64,
-        /// Earliest instant the terminal could be called settled.
-        quiet_until: Instant,
-        /// Bound on the whole wait, after which submission is unproven.
-        deadline: Instant,
-    },
+struct SubmitPause {
+    until: Instant,
 }
 
-impl SubmitFence {
-    fn awaiting_consumption(chunks_seen: u64, now: Instant) -> Self {
-        Self::AwaitingConsumption {
-            chunks_seen,
-            quiet_until: now + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
-            deadline: now + logical_input_consumption_timeout(),
-        }
-    }
-
+impl SubmitPause {
     fn after_submission(now: Instant) -> Self {
-        Self::AfterSubmission {
+        Self {
             until: now + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
         }
     }
 
-    /// When this fence next needs to be looked at.
-    fn wake_at(&self) -> Instant {
-        match *self {
-            Self::AfterSubmission { until } => until,
-            Self::AwaitingConsumption {
-                quiet_until,
-                deadline,
-                ..
-            } => quiet_until.min(deadline),
-        }
-    }
-}
-
-/// What one look at a consumption fence decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FenceVerdict {
-    /// The fence is over; the writer may continue.
-    Release,
-    /// Still waiting, under this fence.
-    Wait(SubmitFence),
-    /// The bound elapsed with the terminal still repainting. Nothing here can
-    /// prove the CLI took the message, so its Enter is withheld.
-    SubmissionUnproven,
-}
-
-/// Decide a fence from the clock and the output the session has mirrored.
-///
-/// Pure so the rule can be tested without a PTY: the only inputs are the fence,
-/// the current instant, and how many output chunks the session has mirrored.
-fn evaluate_submit_fence(fence: SubmitFence, now: Instant, chunks_now: u64) -> FenceVerdict {
-    match fence {
-        SubmitFence::AfterSubmission { until } => {
-            if now >= until {
-                FenceVerdict::Release
-            } else {
-                FenceVerdict::Wait(fence)
-            }
-        }
-        SubmitFence::AwaitingConsumption {
-            chunks_seen,
-            quiet_until,
-            deadline,
-        } => {
-            let still_repainting = chunks_now != chunks_seen;
-            if !still_repainting && now >= quiet_until {
-                return FenceVerdict::Release;
-            }
-            if now >= deadline {
-                return FenceVerdict::SubmissionUnproven;
-            }
-            let quiet_until = if still_repainting {
-                now + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS)
-            } else {
-                quiet_until
-            };
-            FenceVerdict::Wait(SubmitFence::AwaitingConsumption {
-                chunks_seen: chunks_now,
-                quiet_until,
-                deadline,
-            })
-        }
+    fn elapsed(&self, now: Instant) -> bool {
+        now >= self.until
     }
 }
 
@@ -233,7 +159,6 @@ pub(crate) async fn stream_output(
     daemon_lifecycle: DaemonLifecycle,
     session: Arc<SessionHandle>,
 ) {
-    let session_pid = session.pty.lock().await.pid();
     let async_fd = match AsyncFd::new(io_fd) {
         Ok(fd) => fd,
         Err(error) => {
@@ -252,7 +177,7 @@ pub(crate) async fn stream_output(
     let mut previous_slow_stage = None;
     let mut pending_input: VecDeque<PendingInput> = VecDeque::new();
     let mut pending_offset = 0usize;
-    let mut submit_fence: Option<SubmitFence> = None;
+    let mut submit_pause: Option<SubmitPause> = None;
     let mut status_interval =
         tokio::time::interval(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS));
     let session_fanout = session_fanout(&fanouts, &session_id).await;
@@ -315,56 +240,17 @@ pub(crate) async fn stream_output(
             }
 
             _ = tokio::time::sleep_until(
-                submit_fence.as_ref().map(SubmitFence::wake_at).unwrap_or_else(Instant::now).into()
-            ), if submit_fence.is_some() => {
-                let fence = submit_fence.take().expect("the fence guarded this branch");
-                match evaluate_submit_fence(fence, Instant::now(), session.mirrored_chunks()) {
-                    FenceVerdict::Release => {}
-                    FenceVerdict::Wait(next) => submit_fence = Some(next),
-                    FenceVerdict::SubmissionUnproven => {
-                        // The terminal never settled, so nothing here can say
-                        // the CLI took the message. Its Enter is withheld
-                        // rather than written into a repaint that would
-                        // swallow it, and the text stays parked at the
-                        // composer where the caller is told to expect it.
-                        let Some(mut parked) = pending_input.pop_front() else {
-                            continue;
-                        };
-                        pending_offset = 0;
-                        // A withheld Enter carries no draft-released messages
-                        // of its own, but nothing queued behind one may be
-                        // silently dropped either: they go back at the front
-                        // and meet the parked composer through the same
-                        // refusal as any other later message.
-                        for (data, written, released_from_draft) in
-                            parked.take_logical_after_write().into_iter().rev()
-                        {
-                            pending_input.push_front(PendingInput::acknowledged_logical(
-                                data,
-                                written,
-                                released_from_draft,
-                                session.bracketed_paste_mode(),
-                            ));
-                        }
-                        if session.park_unproven_logical_input().is_err() {
-                            log::error!(
-                                "[stream] logical input coordination failed session={}",
-                                session_id
-                            );
-                            break;
-                        }
-                        log::warn!(
-                            "[stream] logical input submission unproven session={} \
-                             terminal never settled within the bound; the message text is \
-                             parked at the composer and later messages are refused",
-                            session_id
-                        );
-                        parked.resolve(WriteOutcome::SubmissionUnproven);
-                    }
+                submit_pause.as_ref().map(|pause| pause.until).unwrap_or_else(Instant::now).into()
+            ), if submit_pause.is_some() => {
+                if submit_pause
+                    .as_ref()
+                    .is_some_and(|pause| pause.elapsed(Instant::now()))
+                {
+                    submit_pause = None;
                 }
             }
 
-            writable = async_fd.writable(), if !pending_input.is_empty() && submit_fence.is_none() => {
+            writable = async_fd.writable(), if !pending_input.is_empty() && submit_pause.is_none() => {
                 let Ok(mut guard) = writable else {
                     log::error!("[stream] writable readiness failed session={}", session_id);
                     break;
@@ -377,27 +263,6 @@ pub(crate) async fn stream_output(
                 let Some(front) = pending_input.front() else {
                     continue;
                 };
-                // A message parked at the composer has not been submitted, so
-                // anything written here would land behind it and be delivered
-                // as one concatenated sentence nobody wrote. The Enter of the
-                // parked message is never in this queue — it was withheld,
-                // not queued — so only fresh message text is refused.
-                if front.kind == PendingInputKind::LogicalMessage && session.logical_input_blocked()
-                {
-                    let refused = pending_input
-                        .pop_front()
-                        .expect("pending input disappeared before refusal");
-                    pending_offset = 0;
-                    if session.complete_logical_input().is_err() {
-                        log::error!(
-                            "[stream] logical input coordination failed session={}",
-                            session_id
-                        );
-                        break;
-                    }
-                    refused.resolve(WriteOutcome::NotWritten);
-                    continue;
-                }
                 let result = guard.try_io(|inner| {
                     let fd = inner.get_ref().as_raw_fd();
                     let slice = &front.data[pending_offset..];
@@ -416,72 +281,29 @@ pub(crate) async fn stream_output(
                         session.mark_active().await;
                         pending_offset += n;
                         if pending_offset >= front.data.len() {
-                            let advanced_to_enter = pending_input
-                                .front_mut()
-                                .is_some_and(PendingInput::advance_logical_message_to_enter);
-                            if advanced_to_enter {
-                                pending_offset = 0;
-                                submit_fence = Some(SubmitFence::awaiting_consumption(
-                                    session.mirrored_chunks(),
-                                    Instant::now(),
-                                ));
-                            } else {
-                                let mut completed = pending_input
-                                    .pop_front()
-                                    .expect("pending input disappeared before completion");
-                                let logical_after_write = completed.take_logical_after_write();
-                                for (data, written, released_from_draft) in
-                                    logical_after_write.into_iter().rev()
-                                {
-                                    pending_input.push_front(PendingInput::acknowledged_logical(
-                                        data,
-                                        written,
-                                        released_from_draft,
-                                        session.bracketed_paste_mode(),
-                                    ));
-                                }
-                                if completed.kind == PendingInputKind::LogicalEnter
-                                    && session.complete_logical_input().is_err()
-                                {
-                                    log::error!(
-                                        "[stream] logical input coordination failed session={}",
-                                        session_id
-                                    );
-                                    break;
-                                }
-                                if completed.kind == PendingInputKind::LogicalEnter {
-                                    // The CLI needs a processing turn after
-                                    // Enter before another queued message can
-                                    // safely own its composer. The existing
-                                    // text -> Enter fence did not protect the
-                                    // Enter -> next-message boundary.
-                                    submit_fence =
-                                        Some(SubmitFence::after_submission(Instant::now()));
-                                    if completed.logical_released_from_draft() {
-                                        let event = Event::LogicalInputReleased {
-                                            session_id: session_id.clone(),
-                                            session_pid,
-                                        };
-                                        if let Ok(json) = serde_json::to_string(&event) {
-                                            let _ = broadcast_tx.send(json);
-                                        }
-                                    }
-                                }
-                                // A declared draft has now actually reached
-                                // the terminal, so frames rendered after it
-                                // can start being evidence about it.
-                                if completed.is_declared_draft()
-                                    && session.complete_declared_draft_write().is_err()
-                                {
-                                    log::error!(
-                                        "[stream] declared draft accounting failed session={}",
-                                        session_id
-                                    );
-                                    break;
-                                }
-                                completed.acknowledge_written();
-                                pending_offset = 0;
+                            let completed = pending_input
+                                .pop_front()
+                                .expect("pending input disappeared before completion");
+                            pending_offset = 0;
+                            if completed.kind == PendingInputKind::Logical {
+                                // The CLI needs a processing turn after the
+                                // submission boundary before another queued
+                                // message can safely own its composer.
+                                submit_pause = Some(SubmitPause::after_submission(Instant::now()));
                             }
+                            // A declared draft has now actually reached the
+                            // terminal, so frames rendered after it can start
+                            // being evidence about it.
+                            if completed.is_declared_draft()
+                                && session.complete_declared_draft_write().is_err()
+                            {
+                                log::error!(
+                                    "[stream] declared draft accounting failed session={}",
+                                    session_id
+                                );
+                                break;
+                            }
+                            completed.acknowledge_written();
                         }
                     }
                     Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -653,9 +475,9 @@ pub(crate) async fn stream_output(
                     stream_control.mark_stopped();
                     return;
                 }
-                // An inherited session that nobody types into produces no
-                // output at all, so this tick — not a keystroke and not a
-                // chunk — is what has to resolve a wedged draft state.
+                // A session nobody types into produces no output at all, so
+                // this tick — not a keystroke and not a chunk — is what has to
+                // resolve an unattested composer.
                 if let Err(error) = session.attest_empty_composer().await {
                     log::warn!(
                         "[input] failed composer attestation for session {}: {}",
@@ -663,26 +485,6 @@ pub(crate) async fn stream_output(
                         error
                     );
                 }
-                // A message queued behind a real typed draft is resolved the
-                // same way: on this tick, with nobody at the terminal. Spawned
-                // rather than awaited, because the swap waits on writes this
-                // very loop performs — awaiting it here would deadlock the
-                // writer against itself. The swap is single-flight on the
-                // session, so a tick that finds one running does nothing.
-                if !session.is_retired() && session.draft_swap_may_help() {
-                    let swapping = Arc::clone(&session);
-                    let swapping_id = session_id.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = swapping.swap_draft_and_deliver().await {
-                            log::warn!(
-                                "[input] draft swap failed for session {}: {}",
-                                swapping_id,
-                                error
-                            );
-                        }
-                    });
-                }
-                publish_input_blocked_transition(&session, &broadcast_tx, &session_id);
                 publish_composer_transition(&session, &broadcast_tx, &session_id).await;
             }
         }
@@ -1054,57 +856,10 @@ async fn emit_status_changed(
     }
 }
 
-/// Announce a change in whether this session refuses logical input.
-///
-/// Broadcast only — this is kanna-server's signal, not a terminal client's, so
-/// it does not enter the per-session fanout. Edge-triggered against the
-/// session's own published value, so adoption of an unknown draft state, a
-/// human keystroke, and composer attestation all reach the server here without
-/// any of them holding a broadcast handle. A wedged session is otherwise
-/// silent — it is idle, it renders nothing new, and the first sign of it is an
-/// unrelated agent's delivery failing.
-fn publish_input_blocked_transition(
-    session: &Arc<SessionHandle>,
-    broadcast_tx: &broadcast::Sender<String>,
-    session_id: &str,
-) {
-    if session.is_retired() {
-        return;
-    }
-    let logical_input_blocked = match session.take_input_blocked_transition() {
-        Ok(Some(blocked)) => blocked,
-        Ok(None) => return,
-        Err(error) => {
-            log::warn!(
-                "[input] failed to read blocked-input transition for session {}: {:?}",
-                session_id,
-                error
-            );
-            return;
-        }
-    };
-    if logical_input_blocked {
-        log::warn!(
-            "[input] session {} refuses logical input: inherited draft state is unknown and its \
-             composer is not provably empty",
-            session_id
-        );
-    } else {
-        log::info!("[input] session {} accepts logical input again", session_id);
-    }
-    let event = Event::InputBlockedChanged {
-        session_id: session_id.to_string(),
-        logical_input_blocked,
-    };
-    if let Ok(json) = serde_json::to_string(&event) {
-        let _ = broadcast_tx.send(json);
-    }
-}
-
 /// Publish the composer line and its attestation when either has changed.
 ///
-/// Edge-triggered from the same tick as the blocked-input transition, and for
-/// the same reason: the composer moves without anything else moving. A CLI
+/// Edge-triggered from the session's own status loop, because the composer
+/// moves without anything else moving. A CLI
 /// suggestion appearing on the `❯` line is not a status change, not a chunk
 /// worth resyncing, and not a keystroke — but it is exactly the thing a reader
 /// must not mistake for something the session said.

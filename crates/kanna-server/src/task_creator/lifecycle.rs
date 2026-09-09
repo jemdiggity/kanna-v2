@@ -1668,7 +1668,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
     prepared: PreparedPostDispatch,
-) -> Result<PostDispatchOutcome, String> {
+) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
     if !release_lifecycle_operation_for_task(daemon, db_path, &task_id).await? {
         return Err(format!(
@@ -1705,66 +1705,42 @@ pub(crate) async fn dispatch_prepared_post_for_api(
         // continue that process into a post: replace it with a newly spawned
         // post whose private run-scoped context is server-owned.
         return spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback)
-            .await
-            .map(|response| PostDispatchOutcome {
-                response,
-                held_by_raw_draft: false,
-            });
+            .await;
     }
     let run_id = generate_stage_run_id(&task_id);
     let post_payload =
         persist_post_operation_intent(db_path, &prepared, &run_id, inherited.as_ref())?;
-    let held_by_raw_draft =
-        match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
-            Ok(()) => false,
-            // The daemon accepted this semantic message and owns its automatic
-            // release after the human submits the draft. Record the post run now
-            // just as for an immediate write: otherwise the queued post would be
-            // invisible and its eventual completion would still be bound to the
-            // preceding main run.
-            Err(TaskInputError::HeldByRawDraft(_)) => true,
-            Err(TaskInputError::SessionNotFound) => {
-                abort_lifecycle_operation(db_path, &run_id)?;
-                return spawn_prepared_stage_run_for_api(
-                    db_path,
-                    daemon,
-                    replacements,
-                    prepared.fallback,
-                )
-                .await
-                .map(|response| PostDispatchOutcome {
-                    response,
-                    held_by_raw_draft: false,
-                });
-            }
-            // A blocked session is alive and refusing, so falling back to a fresh
-            // spawn would run the post twice against one live agent. Report the
-            // refusal — its message carries what unblocks it.
-            Err(TaskInputError::Other(message) | TaskInputError::InputBlocked(message)) => {
-                abort_lifecycle_operation(db_path, &run_id)?;
-                return Err(message);
-            }
-            Err(TaskInputError::Uncertain(message)) => {
-                // The intent remains submitted. Startup will bind the post
-                // exactly once; callers must not retry an ambiguous daemon
-                // acknowledgement.
-                return Err(message);
-            }
-        };
+    match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
+        Ok(()) => {}
+        Err(TaskInputError::SessionNotFound) => {
+            abort_lifecycle_operation(db_path, &run_id)?;
+            return spawn_prepared_stage_run_for_api(
+                db_path,
+                daemon,
+                replacements,
+                prepared.fallback,
+            )
+            .await;
+        }
+        // The session is alive, so falling back to a fresh spawn would run
+        // the post twice against one live agent. Report the failure.
+        Err(TaskInputError::Other(message)) => {
+            abort_lifecycle_operation(db_path, &run_id)?;
+            return Err(message);
+        }
+        Err(TaskInputError::Uncertain(message)) => {
+            // The intent remains submitted. Startup will bind the post
+            // exactly once; callers must not retry an ambiguous daemon
+            // acknowledgement.
+            return Err(message);
+        }
+    };
     finalize_post_operation(db_path, daemon.daemon_dir(), &run_id, &post_payload)?;
-    Ok(PostDispatchOutcome {
-        response: crate::mobile_api::TaskActionResponse {
-            task_id,
-            follow_task: None,
-            revision_budget: None,
-        },
-        held_by_raw_draft,
+    Ok(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+        revision_budget: None,
     })
-}
-
-pub(crate) struct PostDispatchOutcome {
-    pub(crate) response: crate::mobile_api::TaskActionResponse,
-    pub(crate) held_by_raw_draft: bool,
 }
 
 pub(crate) async fn rerun_prepared_stage_for_api(
@@ -3364,8 +3340,6 @@ mod lifecycle_operation_tests {
             idle_seconds: 0,
             status: SessionStatus::Busy,
             kind: SessionKind::Pty,
-            logical_input_blocked: false,
-            pending_logical_input_count: None,
             composer_text: None,
             composer_attestation: Default::default(),
         }
@@ -4494,8 +4468,6 @@ mod teardown_deadline_tests {
                                 idle_seconds: 0,
                                 status: SessionStatus::Busy,
                                 kind: SessionKind::Pty,
-                                logical_input_blocked: false,
-                                pending_logical_input_count: None,
                                 composer_text: None,
                                 composer_attestation: Default::default(),
                             }],
@@ -4575,8 +4547,6 @@ mod teardown_deadline_tests {
                                 idle_seconds: 0,
                                 status: SessionStatus::Busy,
                                 kind: SessionKind::Pty,
-                                logical_input_blocked: false,
-                                pending_logical_input_count: None,
                                 composer_text: None,
                                 composer_attestation: Default::default(),
                             }],

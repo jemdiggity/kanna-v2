@@ -46,8 +46,6 @@ fn live_session(task_id: &str, pid: u32) -> SessionInfo {
         idle_seconds: 0,
         status: SessionStatus::Waiting,
         kind: Default::default(),
-        logical_input_blocked: false,
-        pending_logical_input_count: None,
         composer_text: None,
         composer_attestation: Default::default(),
     }

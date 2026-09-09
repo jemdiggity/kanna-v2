@@ -1138,24 +1138,7 @@ pub(super) async fn advance_stage(
         })?
         .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
         state.publish_state_changed(StateChangeScope::Tasks);
-        let status = if outcome.held_by_raw_draft {
-            axum::http::StatusCode::ACCEPTED
-        } else {
-            axum::http::StatusCode::OK
-        };
-        let mut response = serde_json::to_value(outcome.response).map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not serialize stage post response: {error}"),
-            )
-        })?;
-        if outcome.held_by_raw_draft {
-            response["inputDelivery"] = serde_json::json!({
-                "status": "queued",
-                "reason": "input_held_by_draft",
-            });
-        }
-        return Ok((status, Json(response)).into_response());
+        return Ok(Json(outcome).into_response());
     }
     execute_stage_transition_detached_holding(
         Arc::clone(&state),
@@ -1205,7 +1188,7 @@ async fn execute_stage_transition(
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             state.publish_state_changed(StateChangeScope::Tasks);
-            Ok(Json(dispatched.response))
+            Ok(Json(dispatched))
         }
         crate::task_creator::PreparedStageTransition::Close {
             task_id,

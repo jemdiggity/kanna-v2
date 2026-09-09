@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "066_durable_task_event_cursor_handles");
+    assert_eq!(latest_migration, "067_remove_input_hold_state");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -3269,9 +3269,7 @@ fn task_event_type_names_are_stable() {
             "task.merge_signaled",
             "task.merge_handoff_missing",
             "task.input_delivered",
-            "task.input_delivery_expired",
             "task.raw_input_delivered",
-            "task.input_blocked",
             "task.teardown_failed",
             "task.lifecycle_operation_retired",
             "task.transfer_finalizing",

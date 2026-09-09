@@ -147,9 +147,7 @@ pub async fn agent_session_infos(agents: &AgentSessions) -> Vec<protocol::Sessio
                 status: record.status,
                 kind: protocol::SessionKind::Agent,
                 // Agent sessions carry no terminal composer: their input is
-                // structured NDJSON, never a draft that could be concatenated.
-                logical_input_blocked: false,
-                pending_logical_input_count: Some(0),
+                // structured NDJSON, never a line somebody types.
                 composer_text: None,
                 composer_attestation: protocol::ComposerAttestation::NotTyped,
             }

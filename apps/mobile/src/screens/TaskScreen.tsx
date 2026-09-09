@@ -186,8 +186,6 @@ function composerInputStatusMessage(
       return "Sending input to the desktop…";
     case "delivered":
       return "Input accepted by the desktop; agent processing is not confirmed yet.";
-    case "queued":
-      return "Input queued behind an unsent draft at the desktop terminal. Kanna keeps it and sends it once that draft is submitted or cleared — don't send it again.";
     case "failed":
       return `Input was not sent: ${outcome.message} Your text is still here.`;
     case "uncertain":
@@ -201,9 +199,6 @@ function composerInputStatusIconColor(
   if (outcome.status === "failed" || outcome.status === "uncertain") {
     return "#FF9A8B";
   }
-  if (outcome.status === "queued") {
-    return "#F7C66A";
-  }
   return "#9BB0CC";
 }
 
@@ -213,7 +208,7 @@ function composerInputStatusIcon(
   if (outcome.status === "failed" || outcome.status === "uncertain") {
     return "warning-outline";
   }
-  if (outcome.status === "sending" || outcome.status === "queued") {
+  if (outcome.status === "sending") {
     return "time-outline";
   }
   return "checkmark-circle-outline";
@@ -722,10 +717,7 @@ export function TaskScreen({
         taskId: submission.taskId,
         outcome: resolvedOutcome
       });
-      if (
-        resolvedOutcome.status === "delivered" ||
-        resolvedOutcome.status === "queued"
-      ) {
+      if (resolvedOutcome.status === "delivered") {
         clearDraftInput();
         Keyboard.dismiss();
       }
@@ -1421,25 +1413,6 @@ export function TaskScreen({
             </Text>
           </View>
         ) : null}
-        {(task.queuedInputCount ?? 0) > 0 ? (
-          <View
-            accessibilityLiveRegion="polite"
-            accessibilityLabel="Queued task input status"
-            style={styles.queuedInputStatus}
-            testID={MOBILE_E2E_IDS.taskQueuedInputStatus}
-          >
-            <Ionicons color="#F7C66A" name="time-outline" size={16} />
-            <Text style={styles.queuedInputStatusText}>
-              {task.queuedInputCount} {task.queuedInputCount === 1 ? "message" : "messages"}{" "}
-              {task.queuedInputReason === "delivery_uncertain"
-                ? "awaiting delivery confirmation. Check the desktop terminal before retrying."
-                : task.queuedInputReason === "sending"
-                  ? "being handed to the desktop terminal. Keep this screen open for confirmation."
-                : "queued behind an unsent draft at the desktop terminal. Kanna keeps it and sends it once that draft is submitted or cleared — don't send it again."}
-            </Text>
-          </View>
-        ) : null}
-
         <View style={styles.inputComposer}>
           {canAttachPhoto ? (
             <Pressable
@@ -1994,24 +1967,6 @@ const styles = StyleSheet.create({
   },
   attachButtonDisabled: {
     opacity: 0.45
-  },
-  queuedInputStatus: {
-    alignItems: "center",
-    backgroundColor: "rgba(92, 64, 18, 0.7)",
-    borderColor: "rgba(247, 198, 106, 0.45)",
-    borderRadius: 12,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 8,
-    marginBottom: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 9
-  },
-  queuedInputStatusText: {
-    color: "#F9D994",
-    flex: 1,
-    fontSize: 12,
-    lineHeight: 17
   },
   inputComposer: {
     alignItems: "flex-end",

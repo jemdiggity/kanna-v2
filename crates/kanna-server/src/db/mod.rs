@@ -138,6 +138,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "064_blocked_state_events",
     "065_stage_run_provider_override",
     "066_durable_task_event_cursor_handles",
+    "067_remove_input_hold_state",
 ];
 
 #[derive(Debug, Serialize)]
@@ -168,14 +169,6 @@ pub struct PipelineItem {
     /// the task's agent session — `busy` | `waiting` | `idle` | `exited`, or
     /// `None` when no session has ever reported one.
     pub runtime_status: Option<String>,
-    /// Why the task's agent session refuses messages delivered into it, or
-    /// `None` when it accepts them. Today the only value is
-    /// `inherited-draft-unknown`: the daemon cannot prove that composer is
-    /// clear, either because it adopted the session across a restart or
-    /// handoff and the composer holds text nobody here saw typed, or because a
-    /// delivered message's text is parked there unsubmitted. Submitting would
-    /// append to an unsent line.
-    pub input_blocked: Option<String>,
     /// The text the task's agent session currently renders on its composer
     /// line, or `None` when it draws no readable composer. Never folded into
     /// `last_output_preview`: this is what somebody is about to say, or what
@@ -294,8 +287,6 @@ pub struct SnapshotPipelineItem {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub has_running_post: i64,
-    pub queued_input_count: i64,
-    pub queued_input_reason: Option<String>,
     /// The runtime dimension, carried so a freshly loaded window renders work
     /// in progress without waiting for the next live change.
     pub runtime_state: Option<String>,
@@ -2014,6 +2005,25 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             ON task_event_cursor_handle(last_touched);
             "#,
         )
+    })?;
+
+    run_migration(conn, "067_remove_input_hold_state", |conn| {
+        // The owner's 2026-09-08 decision: a delivered message is written to
+        // the PTY with its submission boundary, always. Nothing is ever
+        // retained behind a human's draft and no session refuses input, so
+        // there is no queue to persist and no per-task blocked reason to
+        // report. Both were bookkeeping that outlived the mechanism — and
+        // outlived it visibly, sitting on tasks for hours against composers
+        // that had been empty the whole time.
+        conn.execute_batch(
+            r#"
+            DROP INDEX IF EXISTS idx_queued_task_input_session;
+            DROP INDEX IF EXISTS idx_queued_task_input_task_id;
+            DROP TABLE IF EXISTS queued_task_input;
+            "#,
+        )?;
+        drop_column(conn, "pipeline_item", "input_blocked");
+        Ok(())
     })?;
 
     Ok(())

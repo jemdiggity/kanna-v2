@@ -23,7 +23,6 @@ import type {
   TaskTerminalSubscription
 } from "../lib/api/client";
 import {
-  isInputHeldByDraft,
   ServerRefusalError
 } from "../lib/transports/serverRefusal";
 import type { CompanionEvent } from "@kanna/agent-protocol";
@@ -163,12 +162,6 @@ export interface MobileController {
 export type TaskInputSendOutcome =
   | { status: "delivered" }
   | {
-      status: "queued";
-      reason: "input_held_by_draft";
-      message: string;
-      queuedInputCount: number;
-    }
-  | {
       status: "failed";
       reason: "transport_rejected" | "server_rejected";
       message: string;
@@ -284,14 +277,6 @@ function nestedServerRefusal(error: unknown): ServerRefusalError | null {
 function taskInputOutcomeForError(error: unknown): TaskInputSendOutcome {
   const refusal = nestedServerRefusal(error);
   if (refusal) {
-    if (isInputHeldByDraft(refusal)) {
-      return {
-        status: "queued",
-        reason: "input_held_by_draft",
-        message: refusal.message,
-        queuedInputCount: 1
-      };
-    }
     if (refusal.reason === "delivery_uncertain") {
       return { status: "uncertain", message: refusal.message };
     }

@@ -158,12 +158,6 @@ pub struct TaskSummary {
     pub singleton_agent: Option<String>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
-    /// Inputs retained behind a typed terminal draft (or whose delivery is
-    /// explicitly uncertain). Zero means there is no sender-visible backlog.
-    #[serde(default)]
-    pub queued_input_count: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queued_input_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,18 +189,6 @@ pub struct TaskDetail {
     /// Optional only so a payload from a peer that predates the split still
     /// deserializes; this server always reports it.
     pub read_state: Option<String>,
-    /// Why messages delivered into this task's agent session are being
-    /// refused, or absent when they are not. `inherited-draft-unknown` means
-    /// the daemon cannot prove that composer is clear — it adopted the session
-    /// across a restart or handoff and the composer holds text nobody here saw
-    /// typed, or it parked a delivered message's text there unsubmitted — so
-    /// submitting would append to an unsent line; the session is otherwise healthy and idle, which is
-    /// why neither `activity` nor `runtimeState` shows anything wrong. A
-    /// sender that sees this should stop retrying and say so: an empty
-    /// composer clears itself, and anything else needs a human at that
-    /// terminal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_blocked: Option<String>,
     /// Deprecated input-only alias retained for mixed-version clients.
     #[serde(default, skip_serializing)]
     pub snippet: Option<String>,
@@ -264,10 +246,6 @@ pub struct TaskDetail {
     /// from a peer that predates the record still deserializes.
     #[serde(default)]
     pub delivered_input_count: i64,
-    #[serde(default)]
-    pub queued_input_count: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queued_input_reason: Option<String>,
     pub parent_task_id: Option<String>,
     /// Direct children of this task, oldest first — the downward view of
     /// `parent_task_id`. **Closed children are included**: parentage is
@@ -787,22 +765,12 @@ impl MobileApi {
                     .latest_stage_run(&item.id)
                     .map_err(|e| format!("db error: {}", e))?
                     .and_then(|run| run.agent);
-                let queued_input_count = self
-                    ._db
-                    .count_queued_task_inputs(&item.id)
-                    .map_err(|e| format!("db error: {}", e))?;
-                let queued_input_reason = self
-                    ._db
-                    .queued_task_input_reason(&item.id)
-                    .map_err(|e| format!("db error: {}", e))?;
                 Ok(map_task_summary(
                     item,
                     repo_name,
                     blocked_by_task_ids,
                     &self.config.desktop_id,
                     agent,
-                    queued_input_count,
-                    queued_input_reason,
                 ))
             })
             .collect()
@@ -867,14 +835,6 @@ impl MobileApi {
             ._db
             .count_task_inputs(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
-        let queued_input_count = self
-            ._db
-            .count_queued_task_inputs(&item.id)
-            .map_err(|e| format!("db error: {}", e))?;
-        let queued_input_reason = self
-            ._db
-            .queued_task_input_reason(&item.id)
-            .map_err(|e| format!("db error: {}", e))?;
         let ports = self
             ._db
             .list_task_ports_for_item(&item.id)
@@ -896,8 +856,6 @@ impl MobileApi {
                 child_task_ids,
                 blocked_by_task_ids,
                 delivered_input_count,
-                queued_input_count,
-                queued_input_reason,
                 ports,
             },
         )))
@@ -1083,8 +1041,6 @@ fn map_task_summary(
     blocked_by_task_ids: Vec<String>,
     machine_id: &str,
     agent: Option<String>,
-    queued_input_count: i64,
-    queued_input_reason: Option<String>,
 ) -> TaskSummary {
     let full_prompt = item.prompt.clone();
     let prompt = full_prompt.as_deref().map(bound_task_listing_prompt);
@@ -1121,8 +1077,6 @@ fn map_task_summary(
             .and_then(crate::task_creator::directory_singleton_agent)
             .map(str::to_string),
         blocked_by_task_ids,
-        queued_input_count,
-        queued_input_reason,
     }
 }
 
@@ -1136,8 +1090,6 @@ struct TaskDetailRelations {
     child_task_ids: Vec<String>,
     blocked_by_task_ids: Vec<String>,
     delivered_input_count: i64,
-    queued_input_count: i64,
-    queued_input_reason: Option<String>,
     ports: Vec<TaskPort>,
 }
 
@@ -1154,8 +1106,6 @@ fn map_task_detail(
         child_task_ids,
         blocked_by_task_ids,
         delivered_input_count,
-        queued_input_count,
-        queued_input_reason,
         mut ports,
     } = relations;
     let prompt = item.prompt.clone();
@@ -1250,7 +1200,6 @@ fn map_task_detail(
         stage_transition,
         runtime_state: item.runtime_status,
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
-        input_blocked: item.input_blocked,
         activity: item.activity,
         snippet: None,
         waiting_prompt_snippet,
@@ -1271,8 +1220,6 @@ fn map_task_detail(
         revision_rounds: item.revision_rounds,
         revision_limit,
         delivered_input_count,
-        queued_input_count,
-        queued_input_reason,
         parent_task_id: item.parent_task_id,
         child_task_ids,
         blocked_by_task_ids,

@@ -569,9 +569,9 @@ describe("LAN task loop E2E", () => {
     }
   }, 180_000);
 
-  it("keeps a LAN terminal draft separate from a simultaneous logical task message", async () => {
+  it("delivers a logical task message over a simultaneous LAN terminal draft", async () => {
     const task = await createScriptedTask(harness, {
-      displayName: "LAN raw draft and manager input isolation",
+      displayName: "LAN raw draft and manager input collision",
       tracePartialInput: true
     });
     const transport = createLanClient(harness);
@@ -584,34 +584,22 @@ describe("LAN task loop E2E", () => {
       events.sendInput(Buffer.from(humanDraft).toString("base64"));
       await events.waitForOutput(`SCRIPT_PARTIAL:${humanDraft}`);
 
-      // A message parked behind someone's unsent line has not been submitted.
-      // The accepted queue entry is a successful 202 response, not a refusal.
-      // Reported by the product owner on 2026-08-20: a reply sent from the
-      // phone sat at the prompt unsubmitted while the phone had been told it
-      // was delivered.
+      // The owner's 2026-09-08 directive, over the LAN transport: a human's
+      // unsent line is a collision the message lands after, never a reason to
+      // hold it. Their reply used to sit queued at the daemon, or worse, wedge
+      // the session entirely.
       await expect(
         transport.sendTaskInput(task.taskId, managerMessage)
-      ).resolves.toMatchObject({
-        status: "queued",
-        reason: "input_held_by_draft",
-        message: expect.stringMatching(/unsent line at that terminal/),
-        queuedInputCount: 1
-      });
+      ).resolves.toMatchObject({ status: "delivered" });
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${humanDraft}`);
-      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${managerMessage}`);
-
-      events.sendInput(Buffer.from("\r").toString("base64"), true);
+      // The message carries its own submission boundary, so the line the
+      // script reads is the human's draft with the message appended — both
+      // submitted, neither lost.
       const output = await events.waitForOutput(
-        `SCRIPT_INPUT:${managerMessage}`,
+        `SCRIPT_INPUT:${humanDraft}${managerMessage}`,
         30_000
       );
-      const humanIndex = output.indexOf(`SCRIPT_INPUT:${humanDraft}`);
-      const managerIndex = output.indexOf(`SCRIPT_INPUT:${managerMessage}`);
-      expect(humanIndex).toBeGreaterThanOrEqual(0);
-      expect(managerIndex).toBeGreaterThan(humanIndex);
-      expect(output).not.toContain(`${humanDraft}${managerMessage}`);
+      expect(output).toContain(`SCRIPT_INPUT:${humanDraft}${managerMessage}`);
     } finally {
       events.close();
     }

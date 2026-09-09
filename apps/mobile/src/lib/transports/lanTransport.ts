@@ -293,9 +293,7 @@ export function createLanTransport(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(attachment ? { input, attachment } : { input })
         }
-      ).then((result) =>
-        result?.status === "queued" ? result : { status: "delivered" }
-      ),
+      ).then((): TaskInputResult => ({ status: "delivered" })),
     // A LAN connection is pinned to one desktop, so that desktop's own status
     // is the answer. Read fresh rather than reusing the cached
     // `kspStreamVersion` probe: the desktop can be upgraded under a live app.

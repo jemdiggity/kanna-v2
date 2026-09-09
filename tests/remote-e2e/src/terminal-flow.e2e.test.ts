@@ -627,9 +627,9 @@ describe("remote task terminal flow E2E", () => {
     }
   }, 45_000);
 
-  it("keeps a partial raw draft separate from a simultaneous logical task message", async () => {
+  it("delivers a logical task message over a simultaneous partial raw draft", async () => {
     const task = await createScriptedTask(harness, {
-      displayName: "Raw draft and manager input isolation",
+      displayName: "Raw draft and manager input collision",
       tracePartialInput: true,
     });
     const events = collectTerminalEvents(harness, task.taskId);
@@ -641,35 +641,101 @@ describe("remote task terminal flow E2E", () => {
       events.sendInput(Buffer.from(humanDraft).toString("base64"));
       await waitForTerminalOutput(events, `SCRIPT_PARTIAL:${humanDraft}`);
 
-      // Parked behind the human's unsent line, so it has not been submitted.
-      // The accepted queue entry is a successful 202 response, not a refusal.
-      const queued = await harness.client.invokeDesktop({
+      // The owner's 2026-09-08 directive: a human's unsent line is a collision
+      // the message lands after, never a reason to hold it. Nothing is queued,
+      // and the caller is told plainly that it was delivered.
+      const delivered = await harness.client.invokeDesktop({
         desktopId: harness.desktopId,
         method: "POST",
         path: `/v1/tasks/${task.taskId}/input`,
         body: { input: managerMessage }
       });
-      expect(queued).toMatchObject({
-        status: "queued",
-        reason: "input_held_by_draft",
-        message: expect.stringMatching(/unsent line at that terminal/),
-        queuedInputCount: 1
-      });
+      expect(delivered).toBeUndefined();
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${humanDraft}`);
-      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${managerMessage}`);
-
-      events.sendInput(Buffer.from("\r").toString("base64"), true);
+      // The message carries its own submission boundary, so the line the
+      // script reads is the human's draft with the message appended.
       const output = await waitForTerminalOutput(
         events,
-        `SCRIPT_INPUT:${managerMessage}`,
+        `SCRIPT_INPUT:${humanDraft}${managerMessage}`,
       );
-      const humanIndex = output.indexOf(`SCRIPT_INPUT:${humanDraft}`);
-      const managerIndex = output.indexOf(`SCRIPT_INPUT:${managerMessage}`);
-      expect(humanIndex).toBeGreaterThanOrEqual(0);
-      expect(managerIndex).toBeGreaterThan(humanIndex);
-      expect(output).not.toContain(`${humanDraft}${managerMessage}`);
+      expect(output).toContain(`SCRIPT_INPUT:${humanDraft}${managerMessage}`);
+
+      // Delivered means recorded: a later stage reads this ledger, not the
+      // terminal, and a collision must not cost the record.
+      const inputs = (await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "GET",
+        path: `/v1/tasks/${task.taskId}/inputs`,
+        body: null,
+      })) as { inputs: Array<{ message: string }> };
+      expect(inputs.inputs.at(-1)?.message).toBe(managerMessage);
+
+      // And nothing anywhere reports a hold: the fields that carried one are
+      // gone from task detail entirely.
+      const detail = (await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "GET",
+        path: `/v1/tasks/${task.taskId}`,
+        body: null,
+      })) as Record<string, unknown>;
+      expect(detail).not.toHaveProperty("inputBlocked");
+      expect(detail).not.toHaveProperty("queuedInputCount");
+      expect(detail).not.toHaveProperty("queuedInputReason");
+      expect(detail.deliveredInputCount).toBeGreaterThan(0);
+    } finally {
+      events.close();
+    }
+  }, 45_000);
+
+  /**
+   * The failure the owner reported three times on 0.3.0-staging.12: a message
+   * sent to an agent that was mid-turn had its Enter withheld because the
+   * terminal never settled, sat unsent at the composer, and ten seconds later
+   * locked the session against every later message.
+   *
+   * The scripted agent emits a heartbeat continuously, so this session's
+   * terminal is never quiet. The message must still be written with its
+   * submission boundary, promptly, and be recorded.
+   */
+  it("delivers a logical message into a continuously streaming session", async () => {
+    const traceFile = ".kanna-e2e-streaming-inputs";
+    const task = await createScriptedTask(harness, {
+      displayName: "Streaming session input task",
+      inputTraceFile: traceFile,
+    });
+    const events = collectTerminalEvents(harness, task.taskId);
+    const managerMessage = "answer the consultation question";
+
+    try {
+      await waitForTerminalOutput(events, "SCRIPT_INPUT_READY");
+      // The heartbeat is what makes this terminal never settle.
+      await waitForTerminalOutput(events, "SCRIPT_HEARTBEAT");
+
+      const startedAt = Date.now();
+      const delivered = await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${task.taskId}/input`,
+        body: { input: managerMessage, source: "operator" }
+      });
+      expect(delivered).toBeUndefined();
+      expect(Date.now() - startedAt).toBeLessThan(10_000);
+
+      // The agent's own read of its stdin is the proof its Enter was written:
+      // the trace file only gains a line when the script's `read` returns.
+      const received = await readInputTrace(task.worktreePath, traceFile, 1);
+      expect(received).toContain(managerMessage);
+
+      const inputs = (await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "GET",
+        path: `/v1/tasks/${task.taskId}/inputs`,
+        body: null,
+      })) as { inputs: Array<{ message: string; source: string }> };
+      expect(inputs.inputs.at(-1)).toMatchObject({
+        message: managerMessage,
+        source: "operator",
+      });
     } finally {
       events.close();
     }
@@ -723,15 +789,14 @@ describe("remote task terminal flow E2E", () => {
     }
   }, 45_000);
 
-  it("keeps a queued logical message behind a multiline bracketed-paste continuation", async () => {
+  it("delivers a logical message over a multiline bracketed-paste continuation", async () => {
     const task = await createScriptedTask(harness, {
-      displayName: "Multiline paste and manager input isolation",
+      displayName: "Multiline paste and manager input collision",
       tracePartialInput: true,
     });
     const events = collectTerminalEvents(harness, task.taskId);
     const firstDraft = "human draft";
     const pasteContinuation = " continued\nsecond pasted line";
-    const completeDraft = `${firstDraft}${pasteContinuation}`;
     const managerMessage = "manager message after multiline paste";
 
     try {
@@ -739,35 +804,26 @@ describe("remote task terminal flow E2E", () => {
       events.sendInput(Buffer.from(firstDraft).toString("base64"));
       await waitForTerminalOutput(events, `SCRIPT_PARTIAL:${firstDraft}`);
 
-      const queued = await harness.client.invokeDesktop({
+      const bracketedPaste = `\u001b[200~${pasteContinuation}\u001b[201~`;
+      events.sendInput(Buffer.from(bracketedPaste).toString("base64"));
+      await waitForTerminalOutput(events, "second pasted line");
+
+      const delivered = await harness.client.invokeDesktop({
         desktopId: harness.desktopId,
         method: "POST",
         path: `/v1/tasks/${task.taskId}/input`,
         body: { input: managerMessage }
       });
-      expect(queued).toMatchObject({
-        status: "queued",
-        reason: "input_held_by_draft",
-        message: expect.stringMatching(/unsent line at that terminal/),
-        queuedInputCount: 1
-      });
+      expect(delivered).toBeUndefined();
 
-      const bracketedPaste = `\u001b[200~${pasteContinuation}\u001b[201~`;
-      events.sendInput(Buffer.from(bracketedPaste).toString("base64"));
-      await waitForTerminalOutput(events, "second pasted line");
-      expect(events.outputText()).not.toContain(`SCRIPT_INPUT:${managerMessage}`);
-
-      events.sendInput(Buffer.from("\r").toString("base64"), true);
+      // The paste's embedded newline is composer content rather than a
+      // submission, so the pasted lines and the delivered message reach the
+      // script together — the accepted collision, not a lost message.
       const output = await waitForTerminalOutput(
         events,
         `SCRIPT_INPUT:${managerMessage}`,
       );
-      const normalizedOutput = output.replaceAll("\r", "");
-      const humanIndex = normalizedOutput.indexOf(`SCRIPT_INPUT:${completeDraft}`);
-      const managerIndex = normalizedOutput.indexOf(`SCRIPT_INPUT:${managerMessage}`);
-      expect(humanIndex).toBeGreaterThanOrEqual(0);
-      expect(managerIndex).toBeGreaterThan(humanIndex);
-      expect(normalizedOutput).not.toContain(`${completeDraft}${managerMessage}`);
+      expect(output.replaceAll("\r", "")).toContain(managerMessage);
     } finally {
       events.close();
     }

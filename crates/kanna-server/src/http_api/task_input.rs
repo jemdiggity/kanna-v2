@@ -55,15 +55,6 @@ pub(super) struct TaskInputFailureRun {
     finished_at: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QueuedTaskInputResponse {
-    status: &'static str,
-    reason: &'static str,
-    message: String,
-    queued_input_count: i64,
-}
-
 pub(super) type TaskInputHttpError = (axum::http::StatusCode, Json<TaskInputFailure>);
 
 fn task_input_http_error(
@@ -107,74 +98,18 @@ pub(crate) enum TaskInputError {
     Other(String),
     /// Submission may have reached the PTY even though its response was lost.
     /// Retrying this result could duplicate terminal bytes.
+    ///
+    /// This is a lost round trip, never a message the daemon decided to hold:
+    /// a live session always writes what it is given.
     Uncertain(String),
-    /// The daemon refuses to submit into this session at all: it inherited the
-    /// session across a restart or handoff and the composer holds text nobody
-    /// here saw typed. Nothing was delivered and retrying changes nothing —
-    /// distinguished from `Other` because a caller that cannot tell this from
-    /// a transient server fault retries forever, and because it is the one
-    /// failure whose fix is a human at that terminal.
-    InputBlocked(String),
-    /// A human has an unsent line open at that terminal, so the daemon queued
-    /// the message rather than appending it to someone else's draft. Nothing
-    /// was written, and it goes out when that terminal submits — so this is
-    /// neither a success nor something to retry, and it is distinguished from
-    /// `InputBlocked` because the daemon's knowledge is fine and no human has
-    /// to repair anything.
-    HeldByRawDraft(String),
 }
 
-/// Why a session refuses delivered input. One value today; a string on the
-/// wire so a later cause can be named rather than collapsed into a boolean.
-pub(crate) const INPUT_BLOCKED_INHERITED_DRAFT: &str = "inherited-draft-unknown";
-
-/// Record that a delivery target is refusing input, and make it visible where
-/// an operator will actually meet it.
+/// Write one semantic logical message into a daemon session.
 ///
-/// The delivery that discovered this may have been made on someone else's
-/// behalf — for example, the pre-close merge handoff — so the
-/// only human-facing trace it would otherwise leave is a log line inside
-/// another task's failure. The task is marked unread for the same reason: a
-/// wedged singleton is `idle` and reads as perfectly healthy in the sidebar.
-pub(crate) async fn record_input_blocked_target(state: &AppState, task_or_session_id: &str) {
-    let db_path = state.config().db_path.clone();
-    let task_or_session_id = task_or_session_id.to_string();
-    let logged_id = task_or_session_id.clone();
-    let recorded = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        let db = Db::open(&db_path).map_err(|error| format!("db error: {error}"))?;
-        let Some(task_id) = db
-            .resolve_pipeline_item_id(&task_or_session_id)
-            .map_err(|error| format!("db error: {error}"))?
-        else {
-            return Ok(false);
-        };
-        let open = db
-            .get_pipeline_item(&task_id)
-            .map_err(|error| format!("db error: {error}"))?
-            .is_some_and(|item| item.closed_at.is_none());
-        if !open {
-            return Ok(false);
-        }
-        let changed = db
-            .update_pipeline_item_input_blocked(&task_id, Some(INPUT_BLOCKED_INHERITED_DRAFT))
-            .map_err(|error| format!("db error: {error}"))?;
-        db.update_pipeline_item_activity(&task_id, "unread")
-            .map_err(|error| format!("db error: {error}"))?;
-        Ok(changed)
-    })
-    .await;
-    match recorded {
-        Ok(Ok(_)) => state.publish_state_changed(StateChangeScope::Tasks),
-        Ok(Err(error)) => {
-            log::error!("failed to record refused input for {logged_id}: {error}")
-        }
-        Err(error) => log::error!("refused-input record worker failed for {logged_id}: {error}"),
-    }
-}
-
-/// Queue one semantic logical message in a daemon session. The daemon owns the
-/// raw-draft boundary because it is the only process that observes every raw
-/// terminal writer and survives frontend/server reconnects.
+/// The daemon types the text and its submission boundary as one write. It does
+/// not consult the composer, so there is no held, parked, or refused answer to
+/// map here: the message reaches the PTY, the session is gone, or the round
+/// trip was lost.
 async fn send_logical_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
@@ -208,22 +143,6 @@ async fn send_logical_session_input(
         } => Err(TaskInputError::SessionNotFound),
         DaemonEvent::Error {
             code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
-            message,
-        } => Err(TaskInputError::Uncertain(message)),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown),
-            message,
-        } => Err(TaskInputError::InputBlocked(message)),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft),
-            message,
-        } => Err(TaskInputError::HeldByRawDraft(message)),
-        // The text is at the composer and its Enter was withheld. That is the
-        // definition of an uncertain delivery: it may still be submitted by
-        // the human who owns that terminal, so it is neither recorded as
-        // delivered nor safe to retry.
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::LogicalInputSubmissionUnproven),
             message,
         } => Err(TaskInputError::Uncertain(message)),
         DaemonEvent::Error { message, .. }
@@ -299,9 +218,6 @@ pub(crate) async fn submit_task_input(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 format!("terminal input delivery is uncertain: {message}"),
             ),
-            TaskInputError::InputBlocked(message) | TaskInputError::HeldByRawDraft(message) => {
-                (axum::http::StatusCode::CONFLICT, message)
-            }
         })
 }
 
@@ -477,153 +393,19 @@ pub(super) async fn send_task_input(
         None => payload.input.clone(),
     };
 
-    // Reserve the durable FIFO slot before asking the daemon to accept the
-    // message. A terminal submission can release a held message immediately;
-    // pre-insertion means the watcher can always attribute that edge even if
-    // it races this HTTP response or the server restarts between the two.
-    let queue_db_path = state.config.db_path.clone();
-    let queue_task_id = task_id.clone();
-    let queue_message = task_input_message(&delivered_input).to_string();
-    let queue_result = tokio::task::spawn_blocking(move || {
-        let db = Db::open(&queue_db_path)?;
-        db.prepare_queued_task_input(&queue_task_id, live_session_pid, source, &queue_message)
-    })
-    .await;
-    let queue_id = match queue_result {
-        Ok(Ok(Some(queue_id))) => queue_id,
-        Ok(Ok(None)) => {
-            if let Some(path) = stored_attachment.as_ref() {
-                discard_stored_attachment(path);
-            }
-            return Err(task_input_http_error(
-                axum::http::StatusCode::NOT_FOUND,
-                "task_not_found",
-                format!("task not found: {task_id}"),
-                None,
-            ));
-        }
-        Ok(Err(error)) => {
-            if let Some(path) = stored_attachment.as_ref() {
-                discard_stored_attachment(path);
-            }
-            return Err(task_input_http_error(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "task_input_unavailable",
-                format!("could not reserve task input queue row: {error}"),
-                None,
-            ));
-        }
-        Err(error) => {
-            if let Some(path) = stored_attachment.as_ref() {
-                discard_stored_attachment(path);
-            }
-            return Err(task_input_http_error(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "task_input_unavailable",
-                format!("task input queue worker failed: {error}"),
-                None,
-            ));
-        }
-    };
-
     let delivered =
         try_submit_task_input_if_session(&mut daemon, &task_id, live_session_pid, &delivered_input)
             .await;
-    // Recorded before the answer is shaped: this is the one failure that says
-    // something durable about the *target* rather than about this call.
-    if let Err(TaskInputError::InputBlocked(_)) = &delivered {
-        record_input_blocked_target(&state, &task_id).await;
-    }
     if let Err(error) = &delivered {
         // Whether the file outlives a failed submission is decided by one
-        // question: can the message naming it still reach the agent?
-        // `Uncertain` may already have put the path in front of it, and
-        // `HeldByRawDraft` is queued at the daemon and goes out when that
-        // terminal submits — in both cases the path has to still resolve
-        // when the agent finally reads it, so the file stays. Every other
-        // failure means the message is gone for good, and a file no
-        // surviving message names is a leak.
-        let message_may_still_arrive = matches!(
-            error,
-            TaskInputError::Uncertain(_) | TaskInputError::HeldByRawDraft(_)
-        );
+        // question: can the message naming it still reach the agent? An
+        // `Uncertain` round trip may already have put the path in front of it,
+        // so the file stays. Every other failure means the message is gone for
+        // good, and a file no surviving message names is a leak.
+        let message_may_still_arrive = matches!(error, TaskInputError::Uncertain(_));
         if let (Some(path), false) = (stored_attachment.as_ref(), message_may_still_arrive) {
             discard_stored_attachment(path);
         }
-    }
-
-    if let Err(TaskInputError::HeldByRawDraft(message)) = delivered {
-        let db_path = state.config.db_path.clone();
-        let held_message = message.clone();
-        let held_task_id = task_id.clone();
-        let persisted = tokio::task::spawn_blocking(move || {
-            let db = Db::open(&db_path)?;
-            let still_queued =
-                db.mark_queued_task_input_held(queue_id, live_session_pid, &held_message)?;
-            let queued_input_count = db.count_queued_task_inputs(&held_task_id)?;
-            let queue_reason = (!still_queued)
-                .then(|| db.queued_task_input_reason_for_id(queue_id))
-                .transpose()?
-                .flatten();
-            Ok::<_, rusqlite::Error>((still_queued, queued_input_count, queue_reason))
-        })
-        .await;
-        let (still_queued, queued_input_count, queue_reason) = match persisted {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                // The daemon already accepted this logical message. Returning
-                // an error would invite a retry and duplicate it; the prepared
-                // row remains durable and visible while the DB error is logged.
-                log::error!("could not mark held task input {queue_id}: {error}");
-                (true, 1, None)
-            }
-            Err(error) => {
-                log::error!("held task input queue worker failed for {queue_id}: {error}");
-                (true, 1, None)
-            }
-        };
-        state.publish_state_changed(StateChangeScope::Tasks);
-        if !still_queued {
-            if queue_reason.as_deref() == Some("delivery_uncertain") {
-                return Err(task_input_http_error(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "delivery_uncertain",
-                    format!(
-                        "terminal input delivery is uncertain: the owning session for task {task_id} exited or was replaced before delivery was proven"
-                    ),
-                    None,
-                ));
-            }
-            return Ok(axum::http::StatusCode::NO_CONTENT.into_response());
-        }
-        return Ok((
-            axum::http::StatusCode::ACCEPTED,
-            Json(QueuedTaskInputResponse {
-                status: "queued",
-                reason: "input_held_by_draft",
-                message,
-                queued_input_count,
-            }),
-        )
-            .into_response());
-    }
-
-    if let Err(TaskInputError::Uncertain(message)) = &delivered {
-        let db_path = state.config.db_path.clone();
-        let message = message.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let db = Db::open(&db_path)?;
-            db.mark_queued_task_input_uncertain(queue_id, &message)
-        })
-        .await;
-        state.publish_state_changed(StateChangeScope::Tasks);
-    } else if delivered.is_err() {
-        let db_path = state.config.db_path.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let db = Db::open(&db_path)?;
-            db.discard_queued_task_input(queue_id)
-        })
-        .await;
     }
 
     delivered.map_err(|error| {
@@ -645,30 +427,30 @@ pub(super) async fn send_task_input(
                     "task_input_failed",
                     message,
                 ),
-                TaskInputError::InputBlocked(message) => (
-                    axum::http::StatusCode::CONFLICT,
-                    "input_blocked",
-                    message,
-                ),
-                TaskInputError::HeldByRawDraft(_) => unreachable!("held input returned above"),
             };
             task_input_http_error(status, reason, message, None)
         })?;
 
+    // Recorded only now, because the daemon has answered that these bytes
+    // reached the PTY. An uncertain delivery is deliberately not recorded: a
+    // row claiming text reached the agent when it may not have is a worse
+    // record than a missing one.
     let db_path = state.config.db_path.clone();
+    let record_task_id = task_id.clone();
+    let record_message = task_input_message(&delivered_input).to_string();
     let recorded = tokio::task::spawn_blocking(move || {
         let db = Db::open(&db_path)?;
-        db.deliver_queued_task_input(queue_id)
+        db.record_task_input(&record_task_id, source, &record_message)
     })
     .await;
     match recorded {
         Ok(Ok(_)) => {}
-        Ok(Err(error)) => log::error!(
-            "task input reached task {task_id}, but durable record {queue_id} failed: {error}"
-        ),
-        Err(error) => log::error!(
-            "task input reached task {task_id}, but record worker failed for {queue_id}: {error}"
-        ),
+        Ok(Err(error)) => {
+            log::error!("task input reached task {task_id}, but its durable record failed: {error}")
+        }
+        Err(error) => {
+            log::error!("task input reached task {task_id}, but the record worker failed: {error}")
+        }
     }
     state.publish_state_changed(StateChangeScope::Tasks);
 

@@ -1125,7 +1125,12 @@ pub(crate) async fn handle_handoff(
                     raw_input_draft_active: parts.raw_input_draft_active,
                     raw_input_draft_state_known: parts.raw_input_draft_state_known,
                     typed_draft_bytes: parts.typed_draft_bytes,
-                    pending_logical_inputs: parts.pending_logical_inputs,
+                    // Never sent by a current daemon: nothing is ever
+                    // retained, so there is no queue to hand over. The field
+                    // stays on the wire only so a *predecessor* that still
+                    // held messages can pass them to a successor that
+                    // submits them on adoption.
+                    pending_logical_inputs: Vec::new(),
                 });
                 fds.push(fd);
                 cloned_pty_fds.push(fd);
