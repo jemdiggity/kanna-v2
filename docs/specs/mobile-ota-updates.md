@@ -252,6 +252,50 @@ requires Google Cloud credentials for the target project and verifies:
 - Secret Manager private-key secret existence
 - relay VM service account resolution
 - relay service account IAM for Secret Manager and OTA GCS reads
+- every runtime channel pointer, with older pointer publication dates marked stale relative to the newest channel pointer
+- paired-device build observations from the running desktop, including compatibility and confirmed application when available
+
+Publish success means the artifacts and pointer were published. It does not mean
+an installation received them. Publish (including rollback) now warns when no
+recently observed paired device runs the target runtime, names the reported
+runtimes, and reports unknown inventory explicitly. It remains allowed.
+`status` includes these observations alongside the pointer and recent updates;
+its exit status still describes pointer readability. `doctor` returns a nonzero
+result for WARN as well as FAIL, so unknown device data cannot produce an
+all-PASS preflight. A matching runtime alone does not confirm application:
+confirmation requires a recent report naming the channel's current update id.
+
+The inventory source defaults to `http://127.0.0.1:48121` for staging and
+`http://127.0.0.1:48120` for production, regardless of the publishing worktree's
+development ports. Before reading `/v1/mobile/builds`, tooling checks
+`/v1/status`: its desktop-server environment must be `staging` or `production`,
+respectively. Mobile build reports use `staging` or `prod` instead. An
+unreadable status or environment mismatch produces WARN naming the queried URL
+and reported environment (UNKNOWN when unavailable), and counts no devices.
+Set `KANNA_OTA_DEVICE_SERVER_URL=http://127.0.0.1:<port>` to inspect a different
+local desktop instance. Output names the source and desktop id. This is a
+census of that desktop's paired devices, not every installation or every
+machine in the account. Environment and channel must both match. Reports over
+24 hours old (or with invalid/future timestamps) are shown as stale and never
+prove current reachability. Historical mismatches remain visible.
+
+The mobile app reports build identity when establishing a trusted LAN route,
+alongside the existing once-per-route pairing-material refresh. It does not
+require notification permission. Offline/remote-only devices retain their last
+LAN observation; older clients have no observation. Publishing this JS to a new
+runtime cannot teach an already-stranded older binary to report: until it runs
+a reporting-capable build, it remains UNKNOWN. Reinstall the compatible native
+build to receive that runtime's publications. No OTA compatibility rule,
+runtime value, or signing/provisioning behavior changes.
+
+An in-app “this build can no longer receive updates” banner is deferred. Neither
+a publisher's checkout runtime nor a newer historical bucket entry establishes
+that an older runtime is retired: publishing ahead of a native rollout is
+legitimate, runtime identifiers are opaque, and older pointers may still be
+maintained. A reliable banner needs an explicit channel support/retirement
+signal, plus bootstrap of its reader onto older installations. This change
+warns the operator about the specific publication a known device cannot receive
+without inventing that policy.
 
 The canonical staging setup and verification sequence is:
 

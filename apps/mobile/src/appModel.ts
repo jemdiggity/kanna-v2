@@ -1,3 +1,4 @@
+import { reportMobileBuild } from "./lib/updates/reportMobileBuild";
 import {
   createKannaClient,
   TaskCreationError,
@@ -1189,6 +1190,7 @@ function createTrustedLanFallbackClient({
       ? `${desktopId}\0${baseUrl}\0${credentials.deviceId}\0${credentials.deviceSecret}`
       : null;
     if (
+      !credentials ||
       !refreshKey ||
       refreshedPushPairingRoutes.has(refreshKey) ||
       !client.reissuePushPairingCertificate
@@ -1196,6 +1198,7 @@ function createTrustedLanFallbackClient({
       return;
     }
     refreshedPushPairingRoutes.add(refreshKey);
+    void reportMobileBuild(baseUrl, fetchImpl, credentials);
     void client
       .reissuePushPairingCertificate()
       .then((material) => {
