@@ -200,13 +200,15 @@ describe("remote terminal focus", () => {
     await client.waitForElement(`${remoteRowSelector}.selected`, 5_000);
     await waitForFocusedTerminal(client, remoteTextareaSelector);
 
-    // The mentioned-files control sat beside the companion control at
-    // right: 138px; only the companion control is left on this shell.
+    // The mentioned-files control that sat beside the companion control at
+    // right: 138px is gone. Two controls remain on this shell: the companion
+    // control, and the remote viewer's terminal-geometry takeover, which this
+    // follower viewer renders because the relay subscription offers takeControl.
     const controls = await client.executeSync<string[]>(
       `return Array.from(document.querySelectorAll(".cloud-terminal-shell > button"))
          .map(function(button) { return button.className; });`,
     );
-    expect(controls).toEqual(["open-companion-control"]);
+    expect(controls).toEqual(["open-companion-control", "terminal-control-control"]);
 
     const evidenceDir = process.env.KANNA_VISUAL_EVIDENCE_DIR;
     if (evidenceDir) {
