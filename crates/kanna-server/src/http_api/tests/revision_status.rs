@@ -1740,8 +1740,23 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         .unwrap()
         .success());
     super::publish_test_origin_main(&repo_root);
+    // A real task owns a workspace, and the post dispatched below prepares a
+    // fallback session for it. Preparing that session resolves the stage's
+    // agent CLI inside the workspace, which is where the scripted provider
+    // fixture lives — a task row whose branch has no worktree resolves
+    // nothing there and used to fall through to whatever CLI the host had
+    // installed.
+    let worktree_path = repo_root.join(".kanna-worktrees/task-prevmain");
+    std::fs::create_dir_all(repo_root.join(".kanna-worktrees")).unwrap();
     assert!(Command::new("git")
-        .args(["branch", "task-prevmain"])
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "task-prevmain",
+            worktree_path.to_str().unwrap(),
+            "main",
+        ])
         .current_dir(&repo_root)
         .status()
         .unwrap()
