@@ -259,6 +259,33 @@ impl Db {
         Ok(())
     }
 
+    /// A stage that never spawned has no run stamp to supersede. An explicit
+    /// execution edit also releases its creation request as a spawn template.
+    pub fn workflow_stage_execution_edited(
+        &self,
+        task_id: &str,
+        stage: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_event, json_each(task_event.payload, '$.changedExecutionStages') AS stage
+             WHERE task_event.task_id = ? AND task_event.type = 'task.workflow_changed' AND stage.value = ?)",
+            (task_id, stage), |row| row.get(0))
+    }
+
+    /// A workflow replacement explicitly invalidates only the old executions
+    /// whose stage binding changed. RunStarted and WorkflowChanged are durable
+    /// transactionally ordered events; no wall-clock comparison is involved.
+    pub fn stage_run_workflow_superseded(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_event, json_each(task_event.payload, '$.supersededRunIds') AS run
+             WHERE task_event.task_id = ? AND task_event.type = 'task.workflow_changed' AND run.value = ?)",
+            (task_id, run_id), |row| row.get(0))
+    }
+
     #[allow(dead_code)]
     pub fn list_stage_runs_for_task(
         &self,

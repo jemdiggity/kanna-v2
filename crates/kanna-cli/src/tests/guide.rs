@@ -20,6 +20,7 @@ fn assert_no_environment_sensitive_info_instruction(rendered: &str) {
 #[test]
 fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     let task = TaskDetail {
+        workflow_definition: None,
         id: "task-123".to_string(),
         repo_id: "repo-1".to_string(),
         title: "Review branch".to_string(),
@@ -131,6 +132,7 @@ fn topic_guides_render_from_the_catalog_without_live_task_state() {
 #[test]
 fn guide_markdown_tells_manual_stages_the_user_advances_the_workflow() {
     let task = TaskDetail {
+        workflow_definition: None,
         id: "task-456".to_string(),
         repo_id: "repo-1".to_string(),
         title: "Implement feature".to_string(),

@@ -37,8 +37,8 @@ use super::state::{AppState, AuthenticatedHttpInvoke, HttpInvokeResponse, Tunnel
 use super::status::status;
 use super::task_actions::{
     abort_task_creation, advance_stage, close_task, complete_stage, pin_task, reopen_task,
-    reorder_pinned_tasks, request_revision, rerun_stage, resume_task, run_merge_agent,
-    set_task_parent, set_task_workflow, unpin_task,
+    reorder_pinned_tasks, replace_task_workflow, request_revision, rerun_stage, resume_task,
+    run_merge_agent, set_task_parent, set_task_workflow, unpin_task,
 };
 use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
@@ -256,6 +256,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/set-parent",
             post(set_task_parent),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/replace-workflow",
+            post(replace_task_workflow),
         )
         .route(
             "/v1/tasks/{task_id}/actions/set-workflow",

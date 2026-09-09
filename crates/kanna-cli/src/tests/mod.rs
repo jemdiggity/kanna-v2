@@ -223,6 +223,18 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_replace_task_workflow",
+            TypedToolSurface {
+                command_path: &["task", "replace-workflow"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("workflow_definition", "workflow_definition"),
+                    ("expected_definition", "expected_definition"),
+                    ("source", "source"),
+                ],
+            },
+        ),
+        (
             "kanna_task_logs",
             TypedToolSurface {
                 command_path: &["task", "logs"],

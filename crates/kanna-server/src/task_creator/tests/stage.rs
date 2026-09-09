@@ -4125,3 +4125,121 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
+
+#[test]
+fn edited_execution_governs_rerun_recovery_and_revision_without_rewriting_the_old_stamp() {
+    edited_workflow_spawn_case(true);
+}
+
+#[test]
+fn edited_execution_releases_creation_override_when_stage_never_spawned() {
+    edited_workflow_spawn_case(false);
+}
+
+fn edited_workflow_spawn_case(seed_run: bool) {
+    let label = if seed_run {
+        "workflow-edit-spawns"
+    } else {
+        "workflow-edit-unstarted"
+    };
+    let (repo_root, config, _) = rerun_of_task_pinned_to_claude(label, seed_run);
+    let db = Db::open(&config.db_path).unwrap();
+    let before = serde_json::json!({"name": "default", "stages": [
+        {"name": "in progress", "agent": "implement", "agent_provider": "opencode-recorded-model",
+         "prompt": "$TASK_PROMPT", "policy": {"transition": "manual"}}
+    ]});
+    db.update_test_pipeline_item_pipeline_def("task-1", &before.to_string())
+        .unwrap();
+    let mut after = before.clone();
+    after["stages"][0]["agent_provider"] = serde_json::json!(["codex-astra-lo"]);
+    let repo = db.get_repo("repo-1").unwrap().unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    let validated = super::super::validate_task_workflow_replacement(
+        &repo,
+        &after,
+        &before.to_string(),
+        "in progress",
+        &runs,
+    )
+    .unwrap();
+    let snapshot = validated.snapshot;
+    db.replace_task_workflow(
+        "task-1",
+        "in progress",
+        "default",
+        &snapshot.definition_json,
+        0,
+        5,
+        Some(crate::db::WorkflowReplacement {
+            expected_definition: &before.to_string(),
+            source: "operator",
+            superseded_run_ids: &validated.superseded_run_ids,
+            changed_execution_stages: &validated.changed_execution_stages,
+        }),
+    )
+    .unwrap();
+    let rerun = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+    assert_eq!(rerun.agent_provider, "codex");
+    assert_eq!(rerun.model.as_deref(), Some("astra"));
+    assert_eq!(rerun.effort.as_deref(), Some("low"));
+    assert!(rerun.provider_override.is_none());
+    if !seed_run {
+        let _ = std::fs::remove_dir_all(&repo_root);
+        return;
+    }
+    let recovery = prepare_resume_task_for_api(&db, &config, "task-1").unwrap();
+    assert_eq!(recovery.agent_provider, "codex");
+    assert_eq!(recovery.model.as_deref(), Some("astra"));
+    assert_eq!(
+        recovery.resume_fallback_reason.as_deref(),
+        Some("pinned workflow execution binding changed")
+    );
+    assert!(recovery.resumed_from_run_id.is_none());
+    let revision = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "task-1",
+        "in progress",
+        "Fix the requested issue",
+        None,
+    )
+    .unwrap();
+    assert_eq!(revision.agent_provider, "codex");
+    assert_eq!(revision.model.as_deref(), Some("astra"));
+    let old = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(old.agent_provider.as_deref(), Some("opencode"));
+    assert_eq!(old.model.as_deref(), Some("recorded-model"));
+    db.insert_stage_run(NewStageRun {
+        id: "run-after-edit",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: Some("astra"),
+        effort: Some("low"),
+        status: "failed",
+        result: None,
+        feedback: None,
+        session_id: None,
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let later_revision = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "task-1",
+        "in progress",
+        "Finish the remaining change",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        later_revision.agent_provider, "codex",
+        "a later fresh revision must retain the new run's provider"
+    );
+    assert_eq!(later_revision.model.as_deref(), Some("astra"));
+    let _ = std::fs::remove_dir_all(&repo_root);
+}

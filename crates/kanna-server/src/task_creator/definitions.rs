@@ -972,7 +972,7 @@ fn definition_error(
     )
 }
 
-fn parse_workflow_definition(content: &str) -> Result<WorkflowDefinition, String> {
+pub(super) fn parse_workflow_definition(content: &str) -> Result<WorkflowDefinition, String> {
     let value: serde_json::Value = serde_json::from_str(content)
         .map_err(|error| format!("invalid workflow definition: {error}"))?;
     reject_explicit_null_workflow_providers(&value)?;

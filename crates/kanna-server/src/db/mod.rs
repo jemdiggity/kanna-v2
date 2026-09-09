@@ -38,7 +38,6 @@ mod transfer_work;
 mod transfers;
 mod worktrees;
 
-#[allow(unused_imports)]
 pub use analytics::RepoAnalytics;
 pub use blockers::ReplaceTaskBlockersError;
 pub use lifecycle_operations::LifecycleOperationIntent;
@@ -46,6 +45,9 @@ pub use lifecycle_operations::LifecycleOperationIntent;
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use pipeline_items::MergeSignalSource;
+#[allow(unused_imports)]
+pub use pipeline_items::WorkflowReplacement;
+#[allow(unused_imports)]
 pub(crate) use repos::RepoOrderInput;
 #[allow(unused_imports)]
 pub use stage_runs::{
@@ -2219,14 +2221,16 @@ fn create_task_approval_lineage_schema(conn: &Connection) -> Result<(), rusqlite
     )
 }
 
-/// Events exist to be tailed, not archived: a watcher that has been away for
-/// two weeks has lost the thread anyway. Pruning at open keeps the log bounded
-/// without putting a delete in the append path.
+/// Transient feed events expire after two weeks. Workflow changes are also
+/// the task's durable definition audit and execution-supersession record, so
+/// they survive pruning. Dropping them could resurrect an obsolete provider
+/// stamp on a long-lived task. Pruning stays outside the append path.
 const TASK_EVENT_RETENTION_DAYS: u32 = 14;
 
 fn prune_task_events(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "DELETE FROM task_event WHERE created_at < datetime('now', ?1)",
+        "DELETE FROM task_event WHERE created_at < datetime('now', ?1)
+         AND type != 'task.workflow_changed'",
         [format!("-{TASK_EVENT_RETENTION_DAYS} days")],
     )?;
     conn.execute(

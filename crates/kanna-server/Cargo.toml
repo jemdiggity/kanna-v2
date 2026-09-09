@@ -11,6 +11,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonschema = { version = "0.48.2", default-features = false }
 toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = "9"

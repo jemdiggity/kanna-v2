@@ -547,6 +547,7 @@ in `docs/task-specs/c9f5721b.md` and enforced by the router authorization tests.
 - `GET /v1/repos/{repo_id}/agents` (resolved named agent definitions available to task creation)
 - `GET /v1/repos/{repo_id}/recent-workflows` (workflow names the repo's tasks were most recently created with, newest first)
 - `POST /v1/tasks/{task_id}/actions/set-workflow` (re-pin an open task to a compatible workflow definition)
+- `POST /v1/tasks/{task_id}/actions/replace-workflow` (validate and replace one task's complete pinned definition, fenced by its previous snapshot)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
@@ -1886,6 +1887,31 @@ higher `revision_limit` can therefore make more rounds available, while
 switching to an equal or lower limit cannot reset spent rounds. A successful
 change emits `task.workflow_changed` with the old and new names, current stage,
 spent rounds, and new limit.
+
+The companion inline surface, `kanna_replace_task_workflow` / CLI `task
+replace-workflow`, edits the pinned definition while preserving the selected
+workflow name. It shares the atomic DB pin-write path and accepts
+`workflowDefinition`, an unchanged `expectedDefinition` from task detail, and
+caller-declared `source`. Stale edits return 409. The server validates the
+bundled workflow schema, provider selectors, agent/environment resolution, and
+retention of current/historical stage names, roles, post owners and relative
+order before writing. New submissions use current syntax; old snapshots are
+compiled through the existing legacy-post loader for compatibility checks.
+
+An execution edit (agent, provider candidates, prompt, effective environment)
+supersedes that stage's old runs as templates for its next spawn. Rerun,
+recovery and revision then resolve the new definition and start a fresh
+conversation; unchanged stages retain their provider stamps. An edited stage
+that never spawned also releases its creation-request override. Live sessions
+and their stamped completion policies remain in force. Future transitions use
+the new snapshot as usual. This edits a task definition without adding another
+provider-override layer or changing config precedence.
+
+`task.workflow_changed` carries full before/after definitions, declared source,
+operation, changed execution stages, and superseded run IDs, with task ID and
+time in the event envelope. These audit/execution records survive ordinary
+14-day feed pruning. See [Runtime workflow replacement](specs/runtime-workflow-replacement.md)
+for limits, lifecycle semantics and the incident E2E.
 
 ## Sticky Workflow Selection
 
