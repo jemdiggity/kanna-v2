@@ -23,8 +23,8 @@ use crate::operator_auth::OperatorAuthorizer;
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{
-    pty_occupancy_snapshot, DraftSwapOutcome, LogicalInputAccepted, RawInputKind, SessionHandle,
-    SessionManager, SessionRecord, StreamControl, WriteOutcome,
+    pty_occupancy_snapshot, RawInputKind, SessionHandle, SessionManager, SessionRecord,
+    StreamControl,
 };
 use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
@@ -32,123 +32,23 @@ use crate::util::{error_event, recovery_snapshot_to_terminal_snapshot};
 use crate::{agent_runtime, headless_terminal, pty};
 use kanna_daemon::terminal_perf;
 
-/// The whole unblock story, in the one line the caller actually reads.
+/// Answer one `SubmitInput`, waiting for the whole message — its text and its
+/// submission boundary — to reach the PTY before calling it delivered.
 ///
-/// The old wording ("retry after explicit terminal submission") described the
-/// daemon's internal rule rather than what anyone should do about it, and the
-/// only way to satisfy it was for a human to type into another agent's
-/// terminal. Attestation has already failed by the time this is written, so
-/// what is left really is a human decision about text on that screen.
-fn inherited_draft_state_unknown_message(session_id: &str) -> String {
-    format!(
-        "logical input refused for session {session_id}: this daemon inherited the session and \
-         cannot yet prove that its current composer is clear, so submitting could append to an \
-         unsent line; inspect the terminal's derived composer state. A composer attested empty \
-         unblocks itself with no human, and replacing the PTY discards this incarnation's hold."
-    )
-}
-
-/// Why a logical message is sitting in the queue instead of at the prompt.
-///
-/// Named separately from the inherited-draft refusal because the fix is
-/// different: nothing is wrong with this daemon's knowledge, a human simply
-/// has an unsent line open at that terminal, and the message goes out the
-/// moment they submit it.
-///
-/// This is now the uncommon answer. A draft on a composer this daemon can read
-/// and verify is lifted off, delivered over, and put back; reaching here means
-/// the composer could not be read or the swap could not be verified.
-fn logical_input_held_by_draft_message(session_id: &str) -> String {
-    format!(
-        "logical input for session {session_id} was not submitted: a human has an unsent line at \
-         that terminal and this daemon could not verifiably take it off the composer and put it \
-         back, so appending to it would submit a sentence nobody wrote. The message is queued \
-         and will be written when that terminal submits — do not send it again."
-    )
-}
-
-/// Deliver one logical message, resolving withheld draft state from the
-/// terminal first when the frame proves the composer is empty.
-///
-/// Both reasons a message is withheld — an inherited state this daemon never
-/// observed, and a declared draft no producer can un-declare — are answered by
-/// the same evidence, so both consult attestation before the message is
-/// refused or parked. Attestation runs only on those paths: a session with a
-/// known-idle draft state pays nothing for it.
-async fn enqueue_logical_input_with_attestation(
-    session: &Arc<SessionHandle>,
-    data: Vec<u8>,
-) -> Result<LogicalInputAccepted, crate::session::InputQueueError> {
-    let first = session.enqueue_logical_input(data.clone());
-    let withheld = match &first {
-        Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => true,
-        Ok(accepted) => accepted.held_by_raw_draft,
-        Err(_) => false,
-    };
-    if !withheld {
-        return first;
-    }
-    let attested = match session.attest_empty_composer().await {
-        Ok(true) => match first {
-            // Attestation dispatched the message this call already queued,
-            // carrying its own acknowledgement. Queuing it again would write
-            // it twice.
-            Ok(accepted) => {
-                return Ok(LogicalInputAccepted {
-                    written: accepted.written,
-                    held_by_raw_draft: false,
-                })
-            }
-            // The refusal happened before the message reached the queue, so it
-            // still has to be submitted.
-            Err(_) => return session.enqueue_logical_input(data),
-        },
-        Ok(false) => first,
-        Err(error) => {
-            log::warn!("[input] composer attestation failed: {error}");
-            first
-        }
-    };
-    // Attestation could not prove the composer empty, so a human really may
-    // have an unsent line there. That used to end the matter: the message
-    // waited for them, however long that took. It no longer has to — the draft
-    // can be lifted off, the message submitted, and the draft put back.
-    let Ok(accepted) = attested else {
-        return attested;
-    };
-    if !accepted.held_by_raw_draft {
-        return Ok(accepted);
-    }
-    match session.swap_draft_and_deliver().await {
-        Ok(DraftSwapOutcome::Restored)
-        | Ok(DraftSwapOutcome::DeliveredUnproven)
-        | Ok(DraftSwapOutcome::DeliveredWithoutRestore) => Ok(LogicalInputAccepted {
-            written: accepted.written,
-            held_by_raw_draft: false,
-        }),
-        Ok(DraftSwapOutcome::NotAttempted) | Ok(DraftSwapOutcome::Aborted) => Ok(accepted),
-        Err(error) => {
-            log::warn!("[input] draft swap failed: {error}");
-            Ok(accepted)
-        }
-    }
-}
-
-/// Answer one `SubmitInput`, waiting for the terminating Enter to reach the
-/// PTY before calling the message submitted.
+/// There is no withheld, parked, or queued outcome. Until 2026-09-08 this
+/// function could answer "the text is at that composer and its Enter was not
+/// written", or refuse outright because the session's composer had never been
+/// attested, and both answers stranded owner messages until a human typed into
+/// somebody else's terminal. The owner's decision is that a message colliding
+/// with a human's unsent draft is far cheaper than one that silently never
+/// arrives, so a delivery either reaches the PTY or fails loudly.
 async fn logical_input_event(
     session: &Arc<SessionHandle>,
     session_id: &str,
     data: Vec<u8>,
 ) -> Event {
-    let accepted = match enqueue_logical_input_with_attestation(session, data).await {
-        Ok(accepted) => accepted,
-        Err(crate::session::InputQueueError::InheritedDraftStateUnknown) => {
-            return error_event(
-                Some(protocol::ErrorCode::InheritedDraftStateUnknown),
-                inherited_draft_state_unknown_message(session_id),
-            )
-        }
+    let written = match session.enqueue_logical_input(data) {
+        Ok(written) => written,
         Err(_) => {
             return error_event(
                 Some(protocol::ErrorCode::WriteFailed),
@@ -156,32 +56,13 @@ async fn logical_input_event(
             )
         }
     };
-    if accepted.held_by_raw_draft {
-        return error_event(
-            Some(protocol::ErrorCode::LogicalInputHeldByDraft),
-            logical_input_held_by_draft_message(session_id),
-        );
-    }
-    match accepted.written.await {
-        Ok(WriteOutcome::Written) => Event::Ok,
-        Ok(WriteOutcome::SubmissionUnproven) => error_event(
-            Some(protocol::ErrorCode::LogicalInputSubmissionUnproven),
-            format!(
-                "logical input for session {session_id} reached the terminal but its submission \
-                 could not be proven: the terminal never settled after the message, so no Enter \
-                 was written and the text is parked at that composer. Do not retry it; a human \
-                 at that terminal decides what happens to it"
-            ),
-        ),
-        Ok(WriteOutcome::NotWritten) => error_event(
-            Some(protocol::ErrorCode::InheritedDraftStateUnknown),
-            inherited_draft_state_unknown_message(session_id),
-        ),
+    match written.await {
+        Ok(()) => Event::Ok,
         Err(_) => error_event(
             Some(protocol::ErrorCode::WriteFailed),
             format!(
                 "logical input for session {session_id} was accepted but its terminal writer \
-                 ended before the message was submitted; inspect that terminal before retrying"
+                 ended before the message was written; inspect that terminal before retrying"
             ),
         ),
     }

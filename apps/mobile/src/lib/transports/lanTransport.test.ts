@@ -68,24 +68,6 @@ describe("createLanTransport", () => {
     ).not.toContain("pair-secret");
   });
 
-  it("returns durable held-input status without inviting a retry", async () => {
-    const queued = {
-      status: "queued",
-      reason: "input_held_by_draft",
-      message: "A human has an unsent line at that terminal.",
-      queuedInputCount: 2
-    };
-    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
-      ok: true,
-      status: 202,
-      json: async () => queued
-    });
-    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
-
-    await expect(transport.sendTaskInput("task-1", "please rebase")).resolves.toEqual(queued);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
   it("carries the desktop's reported agent provider inventory", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,
@@ -118,17 +100,17 @@ describe("createLanTransport", () => {
       status: 409,
       json: async () => ({
         ok: false,
-        reason: "input_held_by_draft",
+        reason: "no_live_agent_session",
         message:
-          "logical input for session task-1 was not submitted: a human has an unsent line at that terminal"
+          "the live agent session changed before input could be delivered to task task-1"
       })
     });
     const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
 
     // A bare status code sends the person who sent the message nowhere; the
-    // server's own sentence names the terminal to go press Enter at.
+    // server's own sentence says what happened to their words.
     await expect(transport.sendTaskInput("task-1", "please rebase")).rejects.toThrow(
-      /unsent line at that terminal/
+      /live agent session changed/
     );
   });
 
@@ -170,8 +152,8 @@ describe("createLanTransport", () => {
       ok: false,
       status: 409,
       text: async () =>
-        JSON.stringify({ reason: "input_held_by_draft", message: "held" }),
-      json: async () => ({ reason: "input_held_by_draft", message: "held" })
+        JSON.stringify({ reason: "no_live_agent_session", message: "gone" }),
+      json: async () => ({ reason: "no_live_agent_session", message: "gone" })
     });
     const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
 
@@ -180,8 +162,8 @@ describe("createLanTransport", () => {
       (error: unknown) => error
     );
     expect(failure).toBeInstanceOf(ServerRefusalError);
-    expect((failure as ServerRefusalError).reason).toBe("input_held_by_draft");
-    expect((failure as ServerRefusalError).detail).toBe("held");
+    expect((failure as ServerRefusalError).reason).toBe("no_live_agent_session");
+    expect((failure as ServerRefusalError).detail).toBe("gone");
   });
 
   it("drops a proxy error page rather than rendering markup as an explanation", async () => {

@@ -36,10 +36,6 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
   interface TaskActionResponse {
     taskId: string;
     followTask?: boolean;
-    inputDelivery?: {
-      status: "queued";
-      reason: "input_held_by_draft";
-    };
   }
 
   interface StageAdvanceProjection {
@@ -262,12 +258,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
           throw new Error(message);
         }
         const result = await response.json() as TaskActionResponse;
-        const postHeldByDraft = response.status === 202
-          && result.inputDelivery?.reason === "input_held_by_draft";
         await waitForStageAdvanceSnapshot(result.taskId, nextStageName, pendingPostName, closesOnSuccess);
-        if (postHeldByDraft) {
-          context.toast.warning(context.tt("toasts.advanceHeldByDraft"));
-        }
 
         // Durable tasks: an in-workflow advance transitions the SAME task in
         // place, so the user's selection stays put. Only when the advance

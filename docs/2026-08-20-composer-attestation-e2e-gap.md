@@ -98,3 +98,35 @@ the original case: a real provider process repainting a real PTY into a frame
 the daemon reads as an *empty* composer, releasing a message that a declared
 draft had held. That is the attested-and-delivered row in the table above, and
 it still waits on a scripted-agent mode that owns its whole frame.
+
+## Update, 2026-09-08: attestation no longer gates delivery
+
+The owner directive of 2026-09-08 removed the input hold entirely — a logical
+message is written with its submission boundary immediately, whatever is on the
+composer. So the "held-and-refused" and "attested-and-delivered" halves above
+are no longer *delivery* behaviours, and the tests this note named for them
+have been rewritten or removed with the hold.
+
+What survives is the question attestation was always separately answering:
+whether text on a composer line was typed by somebody (`typed`), is provably
+the provider's own chrome (`not-typed`), or cannot be proven either way
+(`unknown`). Nothing in the codebase may read composer text as an instruction
+unless it is `typed`, so a frame that wrongly resolves to `not-typed` is still
+the harm this note is about.
+
+**The gap is unchanged in substance.** What is still uncovered end to end is a
+real provider process repainting a real PTY into a frame the daemon reads as an
+*empty* composer, resolving a declared draft to `not-typed` over the full
+server → daemon → PTY path. It still waits on a scripted-agent mode that owns
+its whole frame, for the reasons in "What blocks it" above.
+
+What covers it meanwhile has moved with the rename, and now pins attestation
+rather than release:
+
+| Test | Pins |
+|---|---|
+| `crates/daemon/src/session.rs`: `a_declared_draft_over_a_provably_empty_composer_attests_not_typed` | a navigation-key draft over a rendered empty Claude composer resolves to `not-typed` |
+| `crates/daemon/src/session.rs`: `a_declared_draft_still_queued_for_the_pty_is_never_attested_away` | a frame older than the declared draft's PTY write is not evidence about it |
+| `crates/daemon/src/session.rs`: `a_declared_draft_with_no_frame_rendered_since_is_never_attested_away` | the write landing is not enough on its own; only a repaint since resolves it |
+| `crates/daemon/src/session.rs`: `a_composer_holding_text_is_never_attested_empty` | a composer with text in it keeps attesting `typed` |
+| `crates/daemon/tests/reconnect.rs`: `a_faint_suggestion_with_the_cursor_at_the_start_clears_the_ledger` | over a real daemon socket, a faint suggestion frame resolves an armed ledger to `not-typed` |

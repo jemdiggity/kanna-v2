@@ -361,9 +361,6 @@ export interface TaskSummary {
   pinned?: boolean;
   /** Owner-side ordering position among pinned tasks in the same repo. */
   pinOrder?: number | null;
-  /** Messages accepted by the desktop but not yet confirmed at the agent. */
-  queuedInputCount?: number;
-  queuedInputReason?: "input_held_by_draft" | "delivery_uncertain" | "sending" | null;
   /** Declared ports claimed for this task. Null means this desktop supports
    * preview discovery but the task has no previewable ports; absence means an
    * older desktop. */
@@ -387,14 +384,7 @@ export interface TaskPreviewOpenResult {
   ports: TaskPreviewPort[];
 }
 
-export type TaskInputResult =
-  | { status: "delivered" }
-  | {
-      status: "queued";
-      reason: "input_held_by_draft";
-      message: string;
-      queuedInputCount: number;
-    };
+export type TaskInputResult = { status: "delivered" };
 
 export interface TaskLatestRun {
   id: string;
@@ -430,13 +420,4 @@ export interface TaskDetail extends TaskSummary {
   revisionRounds?: number;
   /** Rounds the task's workflow allows before it parks for its human; 0 = unlimited. */
   revisionLimit?: number;
-  /**
-   * Why messages delivered into this task's agent session are being refused,
-   * or absent when they are not. `inherited-draft-unknown` means the daemon
-   * cannot prove that composer is clear: it adopted the session across a
-   * restart or handoff and the composer holds text nobody saw typed, or it
-   * parked a delivered message's text there unsubmitted. Either way,
-   * submitting would append to an unsent line.
-   */
-  inputBlocked?: string | null;
 }

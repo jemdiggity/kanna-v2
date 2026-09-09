@@ -31,17 +31,6 @@ export class ServerRefusalError extends Error {
   }
 }
 
-/** The refusal reason for a logical message queued behind an unsent human line. */
-export const INPUT_HELD_BY_DRAFT_REASON = "input_held_by_draft";
-
-/** Whether this rejection is the desktop reporting a held task input. */
-export function isInputHeldByDraft(error: unknown): boolean {
-  return (
-    error instanceof ServerRefusalError &&
-    error.reason === INPUT_HELD_BY_DRAFT_REASON
-  );
-}
-
 /** The `{ reason, message }` a Kanna failure body carries, when it is one. */
 export function readServerRefusal(body: unknown): {
   reason: string | null;

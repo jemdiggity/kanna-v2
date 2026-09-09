@@ -183,8 +183,8 @@ requests cannot displace its controller. This is a compatibility limitation,
 not the synchronized-grid guarantee. Geometry changes publish an ordered
 authoritative snapshot through fanout, so the snapshot/live tail cutover is
 the same boundary as lag recovery. A failed PTY/headless resize is not
-published as applied. Draft bytes, composer attestation, and held logical
-input are independent of geometry and survive reflow. Handoff preserves the
+published as applied. Draft bytes and composer attestation are independent of
+geometry and survive reflow. Handoff preserves the
 last applied dimensions but never transfers pointer-based viewer ownership;
 clients re-register after reconnect.
 
@@ -341,7 +341,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `Resize` | session_id, cols, rows | Update terminal dimensions |
 | `Signal` | session_id, signal (string) | Send Unix signal |
 | `Kill` | session_id | Terminate and remove session |
-| `List` | — | List all sessions, each with `logical_input_blocked` |
+| `List` | — | List all sessions, each with `composer_text` and `composer_attestation` |
 | `Handoff` | version (u32) | Request session transfer |
 
 ### Events (daemon → client)
@@ -349,12 +349,10 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `Ok` | — | Command acknowledged |
-| `Error` | message, code | Command failed. `logical_input_held_by_draft` means the message is queued behind a composer the daemon could neither read nor safely swap and was not submitted; `logical_input_submission_unproven` means its text reached the composer but its Enter was withheld because the terminal never settled |
+| `Error` | message, code | Command failed. A `SubmitInput` failure is always about the session — it does not exist, its incarnation changed, or the writer ended mid-write — never about what is on its composer |
 | `Output` | session_id, data (byte array) | PTY output |
 | `Exit` | session_id, code | Process exited |
 | `SessionCreated` | session_id | New session ready |
-| `InputBlockedChanged` | session_id, logical_input_blocked | Session started or stopped refusing logical input |
-| `LogicalInputReleased` | session_id | One draft-held logical message has had its text and Enter written; consumers advance one FIFO delivery record |
 | `RawInputReady` | version | This daemon speaks the fenced raw-input contract at `version` |
 | `SessionList` | sessions | Response to List |
 | `HandoffReady` | sessions | Session metadata (followed by SCM_RIGHTS) |
@@ -416,38 +414,43 @@ restore the retired native-terminal-only merge policy.
 `NegotiateProtectedInput` version 3 must be acknowledged by the active daemon
 before the server exposes HTTP/relay or creates a merge PTY. Version 2 includes
 the observed-PTY-process-ID `InputIfSession` fence; version 3 adds daemon-owned
-logical input coordination. `SubmitInput` accepts a complete logical message,
-keeps it out of the PTY while an explicitly declared raw draft is active, then
-writes the message and its delayed Enter after the terminal producer declares a
-submission boundary. `Input`, `InputBoundary`, and `InputControl` (plus their
-one-way forms) classify raw bytes as draft, submission, or non-composer control;
-the daemon never infers a boundary from CR/LF bytes.
+logical input. `SubmitInput` accepts a complete logical message and writes it —
+text and submission boundary, as one write — immediately. `Input`,
+`InputBoundary`, and `InputControl` (plus their one-way forms) classify raw
+bytes as draft, submission, or non-composer control for the composer
+attestation ledger; the daemon never infers a boundary from CR/LF bytes.
 
-**`Ok` to `SubmitInput` means submitted, not accepted.** A logical message is
-one delivery in two writes — the message, then its fenced Enter — and the
-acknowledgement fires only after that Enter reaches the PTY. It travels with
-the message rather than with the call, so a message dispatched immediately, one
-released by a producer's boundary, one released by composer attestation and one
-delivered over a lifted draft all acknowledge through the same channel. A
-message the daemon parks behind a declared raw draft has not been submitted,
-and is answered `logical_input_held_by_draft` rather than `Ok`: the message
-stays queued for the boundary, but no caller is told a delivery happened that
-did not. That answer is now the exception rather than the rule — see
-"Delivering over a typed draft" below. Once
-released, the writer pauses after each synthesized Enter before beginning the
-next message and emits `LogicalInputReleased` only after that Enter is written;
-this preserves both provider-composer and durable-record boundaries. `List`
-reports `pending_logical_input_count` so a server reconnect can reconcile a
-release edge it missed. A writer
-that ends between the two writes answers `write_failed`, because the text may
-already be sitting unsent at the composer and a blind retry would duplicate it. A new server paired with a
-previous daemon generation therefore waits for the supporting successor before
-serving. The daemon records the exact negotiating server
+**`Ok` to `SubmitInput` means written, submission boundary included.** A
+logical message and its Enter are one PTY write, so the acknowledgement means
+what a caller assumes it means. There is no held, parked, deferred or refused
+answer: a live session always takes the message, whatever is on its composer.
+
+Until 2026-09-08 the daemon did the opposite. It kept a delivery out of the PTY
+while a producer-declared draft was active, and withheld its Enter from a
+terminal that never settled; the text then sat unsent at a composer, the
+delivery answered `logical_input_submission_unproven`, and about ten seconds
+later the session began refusing every later message until a human pressed
+Enter at that terminal. It reproduced three times in one day on
+0.3.0-staging.12, once stranding an owner's answer to a consultation sent from
+their phone, on a machine with no cross-machine raw-key path to clear it. The
+owner's decision is recorded verbatim: *"The input protection is killing me.
+I'd rather have collisions."* A message that occasionally lands after somebody's
+half-typed line is far cheaper than one that silently never arrives.
+
+So the collision is the accepted outcome. If a human has an unsent draft, the
+delivered message is written after it and both go in. What remains is the
+PTY-pid fence — a message reaches the session it was addressed to or nothing —
+and the durable `task_input` record on the server side.
+
+A writer that ends mid-write answers `write_failed`, because the bytes may
+already be sitting at the composer and a blind retry would duplicate them. A
+new server paired with a previous daemon generation waits for the supporting
+successor before serving. The daemon records the exact negotiating server
 process and refuses server-originated PTY spawns from an unnegotiated process,
-making unsupported server/daemon pairings fail closed. `ClassifyInput` shares the daemon lifecycle fence with the handoff
-snapshot; a command that loses that race receives `RetryOnSuccessor`, and the
-server repeats negotiation plus the complete classification pass on every
-published daemon generation.
+making unsupported server/daemon pairings fail closed. `ClassifyInput` shares
+the daemon lifecycle fence with the handoff snapshot; a command that loses that
+race receives `RetryOnSuccessor`, and the server repeats negotiation plus the
+complete classification pass on every published daemon generation.
 
 **The daemon's writes are not the CLI's reads.** A PTY master's input queue
 takes about a kilobyte per write — 1022 bytes on macOS — so a longer message
@@ -465,50 +468,39 @@ would become literal composer text, a worse corruption — and so is a message
 short enough to arrive in one write, which keeps provider slash commands typed
 rather than pasted.
 
-**The Enter waits for the terminal to settle, not for a clock.** Submission is
-never inferred from PTY bytes, and it is not inferred from elapsed time either.
-A CLI repaints while it consumes an input burst, so output still arriving is
-positive evidence that the burst has not been consumed; an Enter written into it
-is taken as part of the burst rather than as a submission, and the message sits
-unsent at the composer while the delivery reports success. That is what happened
-to a 1,227-byte dictated message on 2026-09-05: it drained for about 19 seconds,
-the Enter went out 150 ms in, and nothing ran for six minutes. The daemon
-therefore holds the Enter until no output has been mirrored for
-`LOGICAL_INPUT_SUBMIT_DELAY_MS` — a settle window that restarts on every chunk,
-not a countdown from the write. Output already mirrored is the only
-provider-neutral evidence there is; the rule needs no frame, only whether
-anything was drawn.
+**The submission boundary is written immediately.** It travels in the same
+buffer as the text, immediately after the closing paste marker when there is
+one, so however the kernel queue divides that buffer the marker still closes
+the editor operation in-band and the CR after it is a keypress rather than
+pasted text. The daemon does not wait for the terminal to settle, does not read
+the composer, and does not consult the ledger before writing it.
 
-**A terminal that never settles leaves the composer unknown.** The wait is
-bounded by `LOGICAL_INPUT_CONSUMPTION_TIMEOUT_MS` (25 s, kept under the server's
-30-second daemon command timeout so the caller hears the verdict). When it
-elapses the Enter is *withheld* rather than written into a repaint that would
-swallow it, and the call is answered `logical_input_submission_unproven`. The
-message text is then parked on that composer: something the daemon put there and
-cannot prove left. So the daemon stops claiming to know what is there —
-attestation drops to **unknown**, exactly the state an inherited composer is in,
-and every later logical message is refused with `inherited_draft_state_unknown`
-instead of being written behind the parked text and submitted as one sentence
-nobody wrote. It is deliberately not `not-typed`, which asserts the composer is
-clear, and deliberately not `typed`, because nobody typed it. It clears through
-the paths that already end an unknown composer: a producer-declared submission
-boundary, or a frame that renders the provider's own empty composer.
+After a message's boundary the writer holds a fixed
+`LOGICAL_INPUT_SUBMIT_DELAY_MS` pause before the next queued message may own
+the composer: a CLI needs a processing turn after Enter, and two deliveries
+written back to back without one arrive merged. It is write pacing between two
+*delivered* messages — a fixed clock that always elapses, reads nothing, and
+cannot withhold anything.
 
-Draft state and accepted logical messages are part of transactional-v3 handoff
-state. A sender refuses a legacy-v2 adopter while that state is unknown, a draft
-is active, or any logical message remains queued. A current daemon adopting a
-legacy payload treats draft state as unknown and refuses logical input until it
-is resolved. This preserves accepted messages across normal handoff without
-guessing a submission from terminal bytes: submission boundaries are still
-declared by the producer and never inferred, from PTY bytes or from rendered UI.
+The composer attestation ledger is part of transactional-v3 handoff state. A
+sender refuses a legacy-v2 adopter while a declared draft is active, because
+that is the ledger's one positive assertion and a v2 payload cannot carry it;
+nothing about *delivery* is at stake, since nothing is ever retained. A current
+daemon adopting a legacy payload treats attestation as `unknown` — it still
+delivers, it simply cannot say who wrote what is on that composer.
 
-Two things withhold a logical message from the PTY, and one piece of evidence
-answers both. An **unknown** draft state is an inherited session this daemon
-never watched being typed into. An **active** draft state is one a producer
-declared — and a producer can declare a draft but cannot un-declare one, so a
-navigation key, an Escape or a Ctrl-key press, none of which leave an unsent
-line, would otherwise withhold every later message until a human pressed Enter
-at that terminal. Both are resolved by the same two things:
+The handoff payload's `pending_logical_inputs` is always empty from a current
+daemon. It stays on the wire so that adopting from a predecessor built before
+this change submits whatever that daemon was still holding, rather than
+dropping an owner's words on the upgrade that removed the hold.
+
+Two states leave a composer unattested, and one piece of evidence answers both.
+An **unknown** state is an inherited session this daemon never watched being
+typed into. An **active** draft state is one a producer declared — and a
+producer can declare a draft but cannot un-declare one, so a navigation key, an
+Escape or a Ctrl-key press, none of which leave an unsent line, would otherwise
+leave the composer reading `typed` for the life of the session. Both are
+resolved by the same two things:
 
 - **A producer-declared boundary** — `InputBoundary` on the raw path, which is
   what a human pressing Enter in that terminal produces.
@@ -520,20 +512,19 @@ newer than the draft it is used against.** A frame says only what was on screen
 when it was rendered. A declared byte still queued in the writer, or written but
 not yet echoed by the provider, leaves a composer that renders empty because the
 keystroke has not landed on it yet — not because there is no draft — and
-clearing on that frame would write the queued message and its Enter behind the
-human's first typed character. So an **active** declared draft is cleared only
-when every declared-draft write has completed at the PTY *and* at least one
-output chunk has been mirrored since the last one did; the mirrored-chunk count
-is sampled before the frame is read, so the frame is at least that new. Anything
-short of that leaves the message held and answers
-`logical_input_held_by_draft`. The **unknown** state has no such write to wait
-for — nothing here declared a draft — so it resolves from the current frame
-alone, exactly as before.
+clearing on that frame would assert that a human's first typed character is
+provider chrome. So an **active** declared draft is cleared only when every
+declared-draft write has completed at the PTY *and* at least one output chunk
+has been mirrored since the last one did; the mirrored-chunk count is sampled
+before the frame is read, so the frame is at least that new. Anything short of
+that leaves the composer attested `typed`. The **unknown** state has no such
+write to wait for — nothing here declared a draft — so it resolves from the
+current frame alone.
 
-Attestation answers exactly the question both guards ask — whether an
+Attestation answers exactly the question the ledger asks — whether an
 unsubmitted draft is sitting at the prompt — and answers it more directly than
-the keystroke: an empty composer holds no draft, so there is nothing a logical
-message could be appended to. It is one-way (towards "no draft is here", never
+the keystroke: an empty composer holds no draft, so nothing rendered there is
+somebody's unsent words. It is one-way (towards "no draft is here", never
 the reverse and never "a draft is present"), it writes nothing to the PTY, and
 it discards nothing on screen. It matches only Claude's `❯` and Codex's `›`
 composers; only when that prompt is the last one in the status window with
@@ -578,10 +569,9 @@ out of the rule file on purpose — the matcher language describes what chrome
 reads as, and a cell being painted faint is not text — so the cells are read
 where the grid is rendered.
 
-The daemon runs attestation on each session's own status tick — an inherited
-session nobody types into produces no output at all, so nothing else would ever
-run it — and once more on the withholding path of a `SubmitInput` that would
-otherwise be refused or parked.
+The daemon runs attestation on each session's own status tick, which is the
+only thing that runs for every session: a session nobody types into produces no
+output at all, so nothing else would ever resolve it.
 
 **A frame is not the only evidence. The typed-byte ledger is the other, and it
 is the stronger one.** The daemon counts the bytes a producer declared a draft
@@ -589,22 +579,20 @@ since the session's last submission boundary, resets that count at every
 boundary and at every successful attestation, and carries it across v3 handoff.
 `Some(0)` is positive proof that no unsent line exists — and unlike a frame it
 survives the CLI painting *anything* at its own prompt. So a declared draft that
-typed nothing never withholds a message: the message is written immediately, and
-the provider throws its own suggestion away the moment it arrives. This is what
-ends the wedge a rendered suggestion used to create — no frame would ever read
-that composer empty again, so the hold became permanent and answered
-`logical_input_held_by_draft` with "a human has an unsent line at that terminal"
-when nobody had typed a byte. `None` is *not* zero: it is a draft inherited
-without its ledger, and it holds exactly like a counted one.
+typed nothing attests `not-typed`: whatever the provider is rendering there is
+its own. That is what ends the case a rendered suggestion used to create, where
+no frame would ever read that composer empty again and the session claimed a
+human's unsent line when nobody had typed a byte. `None` is *not* zero: it is a
+draft inherited without its ledger, and it reads `unknown` exactly like a
+counted one that cannot be cleared.
 
 **The ledger counts only the bytes that can put text at the composer.** A
 producer declares that bytes belong to a human's own line; their content decides
 whether one can exist. The desktop declares every non-Enter keydown a draft, so
 opening a task's terminal and pressing an arrow, an Escape or a PageUp — or
-clicking, or scrolling — used to arm the ledger and park every later phone or
-manager delivery behind a line nobody had typed, which is the owner report of
-2026-09-05: a queued-input banner on the phone with a visibly empty composer on
-the desktop. So `crates/daemon/src/draft_bytes.rs` classifies each declared
+clicking, or scrolling — used to arm the ledger against a line nobody had
+typed, which is the owner report of 2026-09-05: a queued-input banner on the
+phone with a visibly empty composer on the desktop. So `crates/daemon/src/draft_bytes.rs` classifies each declared
 write before it reaches the ledger, and a write that can create nothing declares
 nothing — it is routed exactly like an `InputControl`, leaving the draft flag,
 the write interlock and the count untouched.
@@ -638,7 +626,7 @@ the write interlock and the count untouched.
   into one write, so an *unterminated* introducer stays a two-byte Alt chord and
   the characters after it still count.
 - Anything unrecognized — an unassigned control, a truncated sequence — counts
-  as content. The safe direction is to hold.
+  as content. The safe direction is to assume somebody typed.
 
 This is not the inference this daemon refuses to make about *submission*.
 Submission stays a producer declaration because a `\r` inside a paste and a
@@ -650,82 +638,10 @@ what fixes the report above, and it asserts nothing the daemon cannot prove.
 Letting them *zero* a ledger that had already counted real typed content would
 be an assertion: nothing here knows that a given CLI's Escape empties its
 composer rather than dismissing a dialog or opening a transcript view, and being
-wrong writes a delivered message into a human's half-typed line — the exact harm
-this whole mechanism exists to prevent. Emptiness stays a claim about a rendered
+wrong would let provider chrome be read as a human's words — the exact harm
+this mechanism exists to prevent. Emptiness stays a claim about a rendered
 frame, and after a genuine clear the frame does read empty, so attestation
-releases the hold on the next status tick.
-
-### Delivering over a typed draft: stash and restore
-
-Holding is the right answer for a composer this daemon cannot read. It is a
-poor one for a composer it *can*: a message queued behind a human's unsent line
-waits as long as the human does, which in practice is hours. So when a delivery
-meets a genuinely typed draft, the daemon lifts the draft off the composer,
-submits the message on its own, and puts the draft back.
-
-The swap is single-flight per session and runs from two places: the withholding
-path of a `SubmitInput` that would otherwise be refused, and the session's own
-status tick, so a message queued earlier is not stranded. It never runs inline
-in the writer loop — it waits on writes that loop performs.
-
-It starts only when every one of these holds:
-
-- the ledger says `Some(n>0)` — a draft this daemon *watched* being typed.
-  `None` (inherited, uncounted) never swaps: nothing here knows what is on that
-  screen;
-- every declared-draft write has landed and a frame has been mirrored since, the
-  same interlock attestation uses;
-- the frame is a plain, idle, readable composer for a provider whose
-  one-keystroke clear has been measured — Claude only, `Ctrl-U`;
-- the composer's line is not faint (a faint one is the provider's own
-  suggestion, which attestation resolves without writing anything);
-- the cursor is after everything rendered on that line. This is what makes the
-  captured bytes the *whole* draft and makes `Ctrl-U` — "delete to the start of
-  the line" — clear all of it. A draft ending in whitespace fails this, because
-  trailing blanks are indistinguishable from the blank remainder of the row;
-  everything that *is* captured is byte-exact.
-
-Then, in order: the draft is captured from the composer's cells, byte for byte
-including multibyte and interior spacing; `Ctrl-U` is written as **control**
-input, so it touches neither the draft flag nor the ledger; the daemon waits
-for one repaint and reads the composer back, which must render empty or as the
-provider's own suggestion; the queued messages are dispatched
-through the ordinary logical path, with its existing paste framing and Enter
-fence; and the draft is written back as an ordinary **declared draft**, so the
-ledger counts it exactly as it counted the original and the composer attests
-`typed` again on the other side. The caller's acknowledgement fires after the
-restore, not before: the delivery is not finished until the composer is the
-human's again.
-
-Every step is verified, and an unverifiable one abandons rather than guesses:
-
-- **The clear did nothing** (the composer still renders the captured draft):
-  abandon, write nothing. Writing the draft back on top of itself would double
-  it, which is the corruption this exists to avoid. The message stays queued
-  and the draft is untouched.
-- **The composer reads as something else**, or never repaints inside the bound:
-  abandon, write nothing, and log the captured draft verbatim.
-- **The submission could not be proven** (`SubmissionUnproven`): the message
-  text is parked at the composer, so the draft is **not** written back on top
-  of it — that would submit the human's line concatenated onto a sentence
-  nobody wrote. The captured draft is logged verbatim and the caller hears
-  `logical_input_submission_unproven`.
-- **The restore write never reached the PTY**: the message *was* submitted, so
-  the caller hears success — telling them their text is parked at that composer
-  would be false. The draft is gone from the composer and is logged verbatim.
-  The daemon log is the record of every draft it could not put back.
-
-While a swap is in flight the composer is not the human's, so every raw write
-that arrives is **buffered** and replayed onto the restored draft in the order
-it was typed; the producer's acknowledgement fires when its bytes actually
-reach the PTY, after the replay, rather than at a convenient earlier moment. A
-buffered write keeps its declared meaning, so an Enter typed mid-swap submits
-the restored draft plus whatever followed it, exactly as it would have.
-
-`logical_input_held_by_draft` therefore becomes rare rather than routine: it
-now means a composer the daemon could not read or could not verify — an
-unmeasured provider, an inherited uncounted draft, a dialog, a busy frame, a
-wrapped multi-line draft, a cursor mid-line, or a clear that did not clear.
+resolves it on the next status tick.
 
 The ledger is also what labels the composer for everything outside the daemon.
 The verdict is `typed` (content bytes counted since the last boundary),
@@ -735,14 +651,11 @@ inherited from before attestation). A session typed into and then cleared by its
 human stays `typed` until a boundary or an empty-composer frame resolves it —
 the conservative side of the trade.
 
-A session that stays unknown refuses `SubmitInput` with
-`inherited_draft_state_unknown`, and that refusal is visible before anything
-tries to deliver into it: `List` reports `logical_input_blocked` per session,
-and `InputBlockedChanged` is broadcast on every edge — adoption, a human
-keystroke, attestation — from the session's own status loop, so one publisher
-covers every cause.
+**The verdict decides what may be read, never whether a message is delivered.**
+A session that stays `unknown` still takes every `SubmitInput`; what `unknown`
+costs is that nothing on that composer may be treated as an instruction.
 
-The composer itself travels the same way and for the same reason: `List`
+The composer travels to consumers on the session's own edges: `List`
 reports `composer_text` and `composer_attestation` per session, and
 `ComposerChanged` is broadcast from that same status loop on the composer's own
 edges. It is published only once a session has actually drawn a readable
@@ -754,7 +667,6 @@ session said": it is the input line, not output.
 |---------|-------------|---------|
 | `KANNA_DAEMON_DIR` | Data directory (socket, PID, log files) | `~/Library/Application Support/Kanna` |
 | `KANNA_SERVER_EXECUTABLE` | Server executable allowed to clear inherited protected-input policy | unset (fails closed) |
-| `KANNA_DAEMON_TEST_LOGICAL_CONSUMPTION_TIMEOUT_MS` | Debug-build test hook: shortens the bound on waiting for a terminal to settle after a logical message | `LOGICAL_INPUT_CONSUMPTION_TIMEOUT_MS` (25000) |
 | `RUST_LOG` | Log level filter | `info` |
 
 ## Benchmarks

@@ -283,24 +283,6 @@ function validateTask(
     throw new Error(`${path}.transitionRevision must be null or a non-empty string`);
   }
   const pinOrder = optionalNullableInteger(task.pinOrder, `${path}.pinOrder`);
-  const queuedInputCount = optionalNonNegativeInteger(
-    task.queuedInputCount,
-    `${path}.queuedInputCount`,
-  ) ?? 0;
-  const queuedInputReason = optionalNullableString(
-    task.queuedInputReason,
-    `${path}.queuedInputReason`,
-    32,
-  );
-  if (
-    queuedInputReason !== null
-    && !new Set(["input_held_by_draft", "delivery_uncertain", "sending"]).has(
-      queuedInputReason,
-    )
-  ) {
-    throw new Error(`${path}.queuedInputReason is invalid`);
-  }
-
   return {
     ...(cloudTaskId === undefined ? {} : { cloudTaskId }),
     localRepoId,
@@ -326,8 +308,6 @@ function validateTask(
     transitionRevision,
     status,
     hasRunningPost: optionalBoolean(task.hasRunningPost, `${path}.hasRunningPost`),
-    queuedInputCount,
-    queuedInputReason,
     repo: {
       cloudRepoId: requiredString(repo.cloudRepoId, `${path}.repo.cloudRepoId`, 128),
       name: requiredString(repo.name, `${path}.repo.name`, 256),

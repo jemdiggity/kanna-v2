@@ -135,8 +135,6 @@ enum ErrorCode {
     UnknownPermissionRequest,
     RetryOnSuccessor,
     InputUnauthorized,
-    InheritedDraftStateUnknown,
-    LogicalInputHeldByDraft,
 }
 
 #[allow(dead_code)]
@@ -165,9 +163,10 @@ enum Evt {
         session_id: String,
         status: SessionStatus,
     },
-    InputBlockedChanged {
+    ComposerChanged {
         session_id: String,
-        logical_input_blocked: bool,
+        composer_text: Option<String>,
+        composer_attestation: String,
     },
     AgentSnapshot {
         session_id: String,
@@ -399,18 +398,17 @@ struct ClientConn {
     writer: UnixStream,
 }
 
-/// A logical message queued behind a human's unsent line has been accepted but
-/// not submitted, so the daemon says so instead of answering `Ok`. These tests
-/// are about the queued message surviving a handoff, which is unchanged.
-fn expect_held_by_draft(connection: &mut ClientConn) {
+/// A delivered logical message is never withheld: whatever is on that
+/// composer, the daemon writes the message and its submission boundary. These
+/// tests are about that delivery surviving a handoff.
+fn expect_delivered(connection: &mut ClientConn) {
     loop {
         match connection.recv() {
-            Evt::Error {
-                code: Some(ErrorCode::LogicalInputHeldByDraft),
-                ..
-            } => break,
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
-            other => panic!("expected a held-by-draft answer, got: {other:?}"),
+            Evt::Ok => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } | Evt::ComposerChanged { .. } => {
+                continue
+            }
+            other => panic!("expected a delivered answer, got: {other:?}"),
         }
     }
 }
@@ -557,9 +555,9 @@ fn spawn_provider_frame(
     }
 }
 
-/// What `List` says about one session's refusal to accept logical input — the
-/// field kanna-server reconciles onto the task on every daemon generation.
-fn session_reports_blocked_input(conn: &mut ClientConn, session_id: &str) -> bool {
+/// What `List` says about one session's composer attestation — the field
+/// kanna-server reconciles onto the task on every daemon generation.
+fn session_composer_attestation(conn: &mut ClientConn, session_id: &str) -> String {
     conn.send(&Cmd::List);
     loop {
         match conn.recv() {
@@ -568,9 +566,14 @@ fn session_reports_blocked_input(conn: &mut ClientConn, session_id: &str) -> boo
                     .iter()
                     .find(|session| session["session_id"] == session_id)
                     .unwrap_or_else(|| panic!("{session_id} missing from List"));
-                return session["logical_input_blocked"] == Value::Bool(true);
+                return session["composer_attestation"]
+                    .as_str()
+                    .expect("a listed session reports an attestation")
+                    .to_string();
             }
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            Evt::Output { .. } | Evt::StatusChanged { .. } | Evt::ComposerChanged { .. } => {
+                continue
+            }
             other => panic!("expected SessionList, got: {other:?}"),
         }
     }
@@ -1439,9 +1442,9 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
 }
 
 #[test]
-fn shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary() {
+fn shipped_v2_adoption_delivers_logical_input_over_an_inherited_draft() {
     let Some(previous) = support::previous_daemon::binary_or_skip(
-        "shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary",
+        "shipped_v2_adoption_delivers_logical_input_over_an_inherited_draft",
     ) else {
         return;
     };
@@ -1482,17 +1485,12 @@ fn shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary()
             operator_input_only: false,
         });
         assert!(matches!(control.recv(), Evt::Ok));
-        control.send(&Cmd::SubmitInput {
-            session_id: session_id.to_string(),
-            data: b"manager message".to_vec(),
-        });
-        assert!(matches!(
-            control.recv(),
-            Evt::Error {
-                code: Some(ErrorCode::InheritedDraftStateUnknown),
-                ..
-            }
-        ));
+        // The adopted composer cannot be attested, and that is a fact about
+        // what may be *read* from it — never a reason to withhold a delivery.
+        assert_eq!(
+            session_composer_attestation(&mut control, session_id),
+            "unknown"
+        );
     }
 
     let mut adopted = current.connect();
@@ -1502,7 +1500,7 @@ fn shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary()
         session_id: "legacy-draft".to_string(),
         data: b"manager message".to_vec(),
     });
-    assert!(matches!(control.recv(), Evt::Ok));
+    expect_delivered(&mut control);
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let snapshot = loop {
@@ -1528,20 +1526,16 @@ fn shipped_v2_adoption_refuses_ambiguous_logical_input_until_explicit_boundary()
     cleanup(&dir);
 }
 
-/// The wedge from 2026-08-19: a singleton agent idle since before the current
-/// daemon adopted it refused every automated delivery — including Kanna's own
-/// pre-close merge-handoff backstop — and the only documented unblock was a
-/// human opening that terminal and pressing Enter.
+/// An adopted session's composer earns its attestation from the frame the
+/// agent draws on its own — no attach, no keystroke, no human.
 ///
-/// The guard is unchanged: a composer holding text the daemon never saw typed
-/// still refuses, because submitting would append to someone else's unsent
-/// line. What changed is that an *empty* composer now answers the question the
-/// keystroke was being asked for, so the wedge ends without a human — and that
-/// a refusing session is visible before anything tries to deliver into it.
+/// Delivery never depended on it after 2026-09-08, and both sessions here take
+/// their message. What the attestation still decides is whether anything may
+/// *read* the text on that composer as somebody's words.
 #[test]
-fn shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human() {
+fn shipped_v2_adoption_attests_a_provably_empty_composer_without_a_human() {
     let Some(previous) = support::previous_daemon::binary_or_skip(
-        "shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human",
+        "shipped_v2_adoption_attests_a_provably_empty_composer_without_a_human",
     ) else {
         return;
     };
@@ -1601,33 +1595,13 @@ fn shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human() {
             operator_input_only: false,
         });
         assert!(matches!(control.recv(), Evt::Ok));
-        control.send(&Cmd::SubmitInput {
-            session_id: session_id.to_string(),
-            data: b"MERGE task-743d8c3e -> main".to_vec(),
-        });
-        assert!(
-            matches!(
-                control.recv(),
-                Evt::Error {
-                    code: Some(ErrorCode::InheritedDraftStateUnknown),
-                    ..
-                }
-            ),
-            "an inherited session must refuse until its composer is resolved"
+        // Nothing here watched these composers being typed into, so nothing
+        // may read what is on them as an instruction.
+        assert_eq!(
+            session_composer_attestation(&mut control, session_id),
+            "unknown"
         );
     }
-
-    // A refusing session is discoverable without attempting a delivery: this
-    // is what the server reconciles onto the task, so an operator meets a
-    // wedged singleton in the UI instead of in another agent's stage failure.
-    assert!(session_reports_blocked_input(
-        &mut control,
-        "empty-composer"
-    ));
-    assert!(session_reports_blocked_input(
-        &mut control,
-        "drafted-composer"
-    ));
 
     let mut subscriber = current.connect();
     subscriber.send(&Cmd::Subscribe);
@@ -1639,14 +1613,11 @@ fn shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match subscriber.recv_with_timeout(Duration::from_millis(500)) {
-            Ok(Evt::InputBlockedChanged {
+            Ok(Evt::ComposerChanged {
                 session_id,
-                logical_input_blocked,
-            }) => {
-                assert_eq!(session_id, "empty-composer");
-                assert!(!logical_input_blocked);
-                break;
-            }
+                composer_attestation,
+                ..
+            }) if session_id == "empty-composer" && composer_attestation == "not-typed" => break,
             Ok(_) => {}
             Err(error) => assert!(
                 error.contains("read failed") || error.contains("timed out"),
@@ -1655,38 +1626,32 @@ fn shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human() {
         }
         assert!(
             Instant::now() < deadline,
-            "an inherited empty composer never announced that it accepts input again"
+            "an inherited empty composer never announced that nobody typed on it"
         );
     }
-    assert!(!session_reports_blocked_input(
-        &mut control,
-        "empty-composer"
-    ));
+    assert_eq!(
+        session_composer_attestation(&mut control, "empty-composer"),
+        "not-typed"
+    );
 
     control.send(&Cmd::SubmitInput {
         session_id: "empty-composer".to_string(),
         data: b"MERGE task-743d8c3e -> main".to_vec(),
     });
-    assert!(matches!(control.recv(), Evt::Ok));
+    expect_delivered(&mut control);
 
+    // The other composer holds text nobody here saw typed. It keeps saying so
+    // — and takes the delivery anyway, which is the collision the owner chose
+    // over a message that never arrives.
+    assert_eq!(
+        session_composer_attestation(&mut control, "drafted-composer"),
+        "unknown"
+    );
     control.send(&Cmd::SubmitInput {
         session_id: "drafted-composer".to_string(),
         data: b"MERGE task-743d8c3e -> main".to_vec(),
     });
-    assert!(
-        matches!(
-            control.recv(),
-            Evt::Error {
-                code: Some(ErrorCode::InheritedDraftStateUnknown),
-                ..
-            }
-        ),
-        "a composer holding unexplained text must stay refused"
-    );
-    assert!(session_reports_blocked_input(
-        &mut control,
-        "drafted-composer"
-    ));
+    expect_delivered(&mut control);
 
     let mut adopted = current.connect();
     attach(&mut adopted, "empty-composer");
@@ -1704,14 +1669,21 @@ fn shipped_v2_adoption_unblocks_a_provably_empty_composer_without_a_human() {
     }
 
     attach(&mut adopted, "drafted-composer");
-    let snapshot = request_snapshot(&mut adopted, "drafted-composer");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let snapshot = loop {
+        let snapshot = request_snapshot(&mut adopted, "drafted-composer");
+        if snapshot.vt.contains("MERGE task-743d8c3e") {
+            break snapshot;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the delivery never reached the drafted composer"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert!(
         snapshot.vt.contains("half typed thought"),
-        "the inherited draft must survive untouched"
-    );
-    assert!(
-        !snapshot.vt.contains("MERGE task-743d8c3e"),
-        "a refused delivery must never reach a drafted composer"
+        "the inherited draft is still there; the message landed after it"
     );
 
     drop(adopted);
@@ -1821,7 +1793,7 @@ fn current_v3_refuses_shipped_v2_adopter_while_draft_coordination_is_active() {
         session_id: session_id.to_string(),
         data: b"manager message".to_vec(),
     });
-    expect_held_by_draft(&mut connection);
+    expect_delivered(&mut connection);
 
     install_test_daemon_at(&previous, &stable_daemon);
     let mut legacy = Command::new(&stable_daemon)
@@ -1849,11 +1821,13 @@ fn current_v3_refuses_shipped_v2_adopter_while_draft_coordination_is_active() {
         "draft-coordination legacy refusal should be audited: {audit}"
     );
 
-    send_input_boundary(&mut connection, session_id, b"\r");
+    // The delivery went out over the human's draft, so the line the shell
+    // reads is both of them — the collision the owner asked for, and proof
+    // that the message was written rather than retained across the refusal.
     let deadline = Instant::now() + Duration::from_secs(3);
     let snapshot = loop {
         let snapshot = request_snapshot(&mut connection, session_id);
-        if snapshot.vt.contains("LINE:<manager message>") {
+        if snapshot.vt.contains("LINE:<human draftmanager message>") {
             break snapshot;
         }
         assert!(
@@ -1862,19 +1836,7 @@ fn current_v3_refuses_shipped_v2_adopter_while_draft_coordination_is_active() {
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    let human = snapshot
-        .vt
-        .find("LINE:<human draft>")
-        .expect("human draft remained available on the current daemon");
-    let manager = snapshot
-        .vt
-        .find("LINE:<manager message>")
-        .expect("accepted manager message remained queued on the current daemon");
-    assert!(
-        human < manager,
-        "draft must complete before the manager message"
-    );
-    assert!(!snapshot.vt.contains("human draftmanager message"));
+    assert!(snapshot.vt.contains("LINE:<human draftmanager message>"));
 
     drop(connection);
     drop(current);
@@ -2692,7 +2654,7 @@ fn test_handoff_transfers_session() {
 }
 
 #[test]
-fn test_handoff_preserves_a_logical_message_queued_behind_a_raw_draft_using_echo_wait() {
+fn test_handoff_preserves_a_logical_message_written_over_a_raw_draft_using_echo_wait() {
     let dir = test_dir("queued-logical-input");
     let session_id = "queued-logical-input";
     let daemon_a = DaemonHandle::start_in(&dir);
@@ -2729,17 +2691,19 @@ fn test_handoff_preserves_a_logical_message_queued_behind_a_raw_draft_using_echo
         session_id: session_id.to_string(),
         data: b"manager message".to_vec(),
     });
-    expect_held_by_draft(&mut conn_a);
+    expect_delivered(&mut conn_a);
 
     drop(conn_a);
     let daemon_b = DaemonHandle::start_in(&dir);
     let mut conn_b = daemon_b.connect();
     attach(&mut conn_b, session_id);
-    send_input_boundary(&mut conn_b, session_id, b"\r");
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // The message was written over the human's draft before the handoff — the
+    // collision the owner chose — so the line the shell read is both of them,
+    // and it survives the handoff as terminal state.
+    let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let snapshot = request_snapshot(&mut conn_b, session_id);
-        if snapshot.vt.contains("LINE:<manager message>") {
+        if snapshot.vt.contains("LINE:<human draftmanager message>") {
             break;
         }
         assert!(
@@ -2748,21 +2712,6 @@ fn test_handoff_preserves_a_logical_message_queued_behind_a_raw_draft_using_echo
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-
-    let snapshot = request_snapshot(&mut conn_b, session_id);
-    let human = snapshot
-        .vt
-        .find("LINE:<human draft>")
-        .expect("raw draft should submit as its own line after handoff");
-    let manager = snapshot
-        .vt
-        .find("LINE:<manager message>")
-        .expect("queued logical message should survive handoff");
-    assert!(
-        human < manager,
-        "raw draft must stay ahead of the queued message"
-    );
-    assert!(!snapshot.vt.contains("human draftmanager message"));
 
     drop(daemon_b);
     cleanup(&dir);
@@ -2802,33 +2751,22 @@ fn test_handoff_drains_unread_no_reply_raw_input_before_snapshot() {
         session_id: session_id.to_string(),
         data: b"manager message".to_vec(),
     });
-    expect_held_by_draft(&mut conn_a);
+    expect_delivered(&mut conn_a);
 
     drop(conn_a);
     let daemon_b = DaemonHandle::start_in(&dir);
     let mut conn_b = daemon_b.connect();
     attach(&mut conn_b, session_id);
-    send_input_boundary(&mut conn_b, session_id, b"\r");
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    let snapshot = loop {
+    loop {
         let snapshot = request_snapshot(&mut conn_b, session_id);
-        if snapshot.vt.contains("LINE:<manager message>") {
-            break snapshot;
+        if snapshot.vt.contains("LINE:<human draftmanager message>") {
+            break;
         }
         assert!(Instant::now() < deadline, "handoff input was not delivered");
         std::thread::sleep(Duration::from_millis(20));
-    };
-    let human = snapshot
-        .vt
-        .find("LINE:<human draft>")
-        .expect("raw draft survived");
-    let manager = snapshot
-        .vt
-        .find("LINE:<manager message>")
-        .expect("logical message survived");
-    assert!(human < manager);
-    assert!(!snapshot.vt.contains("human draftmanager message"));
+    }
 
     drop(daemon_b);
     cleanup(&dir);

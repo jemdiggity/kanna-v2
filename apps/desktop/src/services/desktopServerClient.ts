@@ -266,7 +266,6 @@ export interface DesktopTaskDetail {
    * or absent when they are not. The session is alive and idle while this is
    * set, so nothing else on screen says anything is wrong.
    */
-  inputBlocked?: string | null;
   composer?: {
     text: string | null;
     attestation: "typed" | "not-typed" | "unknown";

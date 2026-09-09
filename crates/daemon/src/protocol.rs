@@ -46,13 +46,6 @@ pub enum ErrorCode {
     RetryOnSuccessor,
     InputUnauthorized,
     ProtectedInputProtocolRequired,
-    InheritedDraftStateUnknown,
-    LogicalInputHeldByDraft,
-    /// A logical message's text reached the PTY, but the terminal never
-    /// settled inside the bound, so its Enter was withheld rather than written
-    /// into a repaint that would swallow it. The text is parked at the
-    /// composer: the delivery is uncertain and must not be retried blindly.
-    LogicalInputSubmissionUnproven,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -185,8 +178,15 @@ pub struct HandoffSession {
     /// one. Only `Some(0)` is the proof that releases a held message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_draft_bytes: Option<u64>,
-    /// Logical messages accepted but not yet submitted through the PTY. The
-    /// adopting daemon keeps their order and any raw-draft boundary.
+    /// Logical messages a *predecessor* accepted but never submitted, in the
+    /// order it accepted them.
+    ///
+    /// Always empty from a current daemon: logical input is never retained,
+    /// so there is no queue to hand over. It stays on the wire so that
+    /// adopting from a daemon built before 2026-09-08 — which could hold a
+    /// message behind a typed draft indefinitely — submits those messages
+    /// instead of dropping an owner's words on the upgrade that removed the
+    /// hold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_logical_inputs: Vec<Vec<u8>>,
 }
@@ -250,8 +250,8 @@ pub enum ComposerAttestation {
     Typed,
     /// An attested session with zero typed bytes since its last boundary.
     /// Nobody here typed anything, so whatever the `❯` line renders is the
-    /// provider's own chrome or suggestion — not session content, and not a
-    /// draft to protect.
+    /// provider's own chrome or suggestion — not session content, and not
+    /// anything a reader may act on.
     NotTyped,
     /// Inherited from before attestation: this daemon never watched what was
     /// typed, so it can prove nothing either way and says so.
@@ -553,14 +553,6 @@ pub enum Event {
     SessionCreated {
         session_id: String,
     },
-    /// A session started or stopped refusing logical input. Emitted on the
-    /// edge only, from the session's own status loop, so every cause —
-    /// adoption of an unknown draft state, a human keystroke, composer
-    /// attestation — reaches subscribers through one path.
-    InputBlockedChanged {
-        session_id: String,
-        logical_input_blocked: bool,
-    },
     /// The composer line, and what this daemon can prove about it, changed.
     ///
     /// Emitted on the edge from the session's own status loop rather than
@@ -572,15 +564,6 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         composer_text: Option<String>,
         composer_attestation: ComposerAttestation,
-    },
-    /// A logical message retained behind a typed terminal draft has now had
-    /// both its text and terminating Enter written to the PTY.
-    LogicalInputReleased {
-        session_id: String,
-        /// Child pid of the exact session incarnation that released it.
-        /// Session ids are reused across stage and recovery replacements.
-        #[serde(default)]
-        session_pid: u32,
     },
     SessionList {
         sessions: Vec<SessionInfo>,
@@ -629,18 +612,6 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     #[serde(default)]
     pub kind: SessionKind,
-    /// True while the daemon refuses `SubmitInput` for this session because
-    /// its inherited draft state is unknown and its composer is not provably
-    /// empty. A wedged session is otherwise indistinguishable from a healthy
-    /// idle one until something tries to deliver a message into it, which is
-    /// how one used to be discovered through an unrelated agent's failure.
-    /// Absent on a daemon that predates the field, which reports `false`.
-    #[serde(default)]
-    pub logical_input_blocked: bool,
-    /// Logical messages accepted but not yet fully submitted. Absent on an
-    /// older daemon, which reports zero.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_logical_input_count: Option<usize>,
     /// The text rendered on this session's composer line, when its frame draws
     /// a readable one. Reported as its own field — never folded into a status
     /// snippet — so a reader cannot mistake it for something the session said.
@@ -1217,8 +1188,6 @@ mod tests {
             idle_seconds: 30,
             status: SessionStatus::Idle,
             kind: SessionKind::Pty,
-            logical_input_blocked: false,
-            pending_logical_input_count: None,
             composer_text: None,
             composer_attestation: ComposerAttestation::NotTyped,
         };
@@ -1249,8 +1218,6 @@ mod tests {
                 idle_seconds: 10,
                 status: SessionStatus::Idle,
                 kind: SessionKind::Pty,
-                logical_input_blocked: true,
-                pending_logical_input_count: None,
                 composer_text: Some("half typed".to_string()),
                 composer_attestation: ComposerAttestation::Typed,
             }],
@@ -1261,14 +1228,14 @@ mod tests {
             Event::SessionList { sessions } => {
                 assert_eq!(sessions.len(), 1);
                 assert_eq!(sessions[0].session_id, "s1");
-                assert!(sessions[0].logical_input_blocked);
+                assert_eq!(sessions[0].composer_attestation, ComposerAttestation::Typed);
             }
             _ => panic!("wrong variant"),
         }
     }
 
     #[test]
-    fn session_list_from_a_daemon_without_the_field_reports_deliverable() {
+    fn session_list_from_a_daemon_without_the_composer_fields_reports_unknown() {
         let json = r#"{
             "type":"SessionList",
             "sessions":[{
@@ -1282,25 +1249,39 @@ mod tests {
         }"#;
 
         match serde_json::from_str::<Event>(json).unwrap() {
-            Event::SessionList { sessions } => assert!(!sessions[0].logical_input_blocked),
+            Event::SessionList { sessions } => {
+                assert_eq!(
+                    sessions[0].composer_attestation,
+                    ComposerAttestation::Unknown
+                );
+                assert_eq!(sessions[0].composer_text, None);
+            }
             other => panic!("wrong variant: {other:?}"),
         }
     }
 
+    /// A predecessor built before the input hold was removed may still be
+    /// holding an owner's message. Its payload has to keep decoding, because
+    /// the adopting daemon submits what it finds there rather than dropping
+    /// somebody's words on the upgrade that removed the hold.
     #[test]
-    fn input_blocked_changed_roundtrips() {
-        let evt = Event::InputBlockedChanged {
-            session_id: "s1".to_string(),
-            logical_input_blocked: true,
-        };
-        let json = serde_json::to_string(&evt).unwrap();
-        match serde_json::from_str::<Event>(&json).unwrap() {
-            Event::InputBlockedChanged {
-                session_id,
-                logical_input_blocked,
-            } => {
-                assert_eq!(session_id, "s1");
-                assert!(logical_input_blocked);
+    fn a_legacy_handoff_payload_still_carries_its_retained_messages() {
+        let json = r#"{
+            "type":"HandoffReady",
+            "sessions":[{
+                "session_id":"sess-1",
+                "pid":42,
+                "cwd":"/tmp",
+                "rows":24,
+                "cols":80,
+                "snapshot":null,
+                "pending_logical_inputs":[[104,105]]
+            }]
+        }"#;
+
+        match serde_json::from_str::<Event>(json).unwrap() {
+            Event::HandoffReady { sessions } => {
+                assert_eq!(sessions[0].pending_logical_inputs, [b"hi".to_vec()]);
             }
             other => panic!("wrong variant: {other:?}"),
         }

@@ -103,11 +103,6 @@ pub enum TaskEventKind {
     /// durable `task_input` row this event announces, readable through
     /// `GET /v1/tasks/{id}/inputs`.
     InputDelivered,
-    /// A logical input whose write outcome could not be proven was retired
-    /// when the exact PTY incarnation that owned it exited or was replaced.
-    /// No `task_input` row is created: the event makes the loss visible
-    /// without falsely claiming that the agent received the message.
-    InputDeliveryExpired,
     /// Discrete terminal keys or explicit bytes were written into the task's
     /// live PTY from outside its session — a call to
     /// `POST /v1/tasks/{id}/raw-input`. This is deliberately a separate kind
@@ -119,14 +114,6 @@ pub enum TaskEventKind {
     /// written; `payload.status` is the call's verdict and `payload.sessionPid`
     /// the PTY incarnation it was fenced to.
     RawInputDelivered,
-    /// The task's agent session started or stopped refusing messages
-    /// delivered into it from outside. `payload.inputBlocked` names the reason
-    /// while it is blocked (`inherited-draft-unknown`) and is null when it
-    /// clears. A blocked session is not a failed one and not a busy one: it is
-    /// running normally and silently dropping nothing — every delivery into it
-    /// is refused, including the pre-close merge handoff, until the composer it
-    /// inherited is resolved.
-    InputBlocked,
     /// A detached workspace teardown failed to start or exceeded its deadline.
     TeardownFailed,
     /// A durable lifecycle operation intent (an accepted post, or a stage
@@ -174,9 +161,7 @@ impl TaskEventKind {
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
             Self::InputDelivered => "task.input_delivered",
-            Self::InputDeliveryExpired => "task.input_delivery_expired",
             Self::RawInputDelivered => "task.raw_input_delivered",
-            Self::InputBlocked => "task.input_blocked",
             Self::TeardownFailed => "task.teardown_failed",
             Self::LifecycleOperationRetired => "task.lifecycle_operation_retired",
             Self::TransferFinalizing => "task.transfer_finalizing",
@@ -203,9 +188,7 @@ impl TaskEventKind {
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
         Self::InputDelivered,
-        Self::InputDeliveryExpired,
         Self::RawInputDelivered,
-        Self::InputBlocked,
         Self::TeardownFailed,
         Self::LifecycleOperationRetired,
         Self::TransferFinalizing,
@@ -829,64 +812,6 @@ impl Db {
         // is deliberately left alone — if managers were already told `exited`,
         // the next daemon verdict is what corrects them.
         Ok(rows_affected > 0)
-    }
-
-    /// Record whether messages delivered into this task's agent session are
-    /// being refused, and why. `None` clears it.
-    ///
-    /// Returns whether the stored value changed; each edge appends one
-    /// `task.input_blocked` event. Kept off `activity` and `runtime_status`
-    /// deliberately — a wedged session is `idle` and reads as perfectly
-    /// healthy through both, which is exactly why the wedge was invisible
-    /// until an unrelated agent's delivery failed against it.
-    pub fn update_pipeline_item_input_blocked(
-        &self,
-        task_id: &str,
-        input_blocked: Option<&str>,
-    ) -> Result<bool, rusqlite::Error> {
-        self.with_immediate_transaction(|db| {
-            let previous: Option<Option<String>> = db
-                .conn
-                .query_row(
-                    "SELECT input_blocked FROM pipeline_item WHERE id = ? AND closed_at IS NULL",
-                    [task_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(previous) = previous else {
-                return Ok(false);
-            };
-            if previous.as_deref() == input_blocked {
-                return Ok(false);
-            }
-            db.conn.execute(
-                "UPDATE pipeline_item
-                 SET input_blocked = ?, updated_at = datetime('now')
-                 WHERE id = ?",
-                (input_blocked, task_id),
-            )?;
-            db.append_task_event(
-                task_id,
-                TaskEventKind::InputBlocked,
-                json!({ "inputBlocked": input_blocked }),
-            )?;
-            Ok(true)
-        })
-    }
-
-    #[cfg(test)]
-    pub fn get_pipeline_item_input_blocked(
-        &self,
-        task_id: &str,
-    ) -> Result<Option<String>, rusqlite::Error> {
-        self.conn
-            .query_row(
-                "SELECT input_blocked FROM pipeline_item WHERE id = ?",
-                [task_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map(Option::flatten)
     }
 
     #[cfg(test)]

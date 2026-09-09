@@ -290,29 +290,6 @@ describe("TaskScreen photo attachments", () => {
     ).toContain("Your text is still here.");
   });
 
-  it("keeps the canonical no-resend guidance when input is queued", async () => {
-    const harness = createHarness();
-    harness.onSendInput.mockResolvedValue({
-      status: "queued",
-      reason: "input_held_by_draft",
-      message: "a human has an unsent line at that terminal",
-      queuedInputCount: 1
-    });
-    const tree = await renderScreen(harness);
-
-    await typeDraft(tree, "send this once the draft clears");
-    await sendComposer(tree);
-
-    const statusText = tree.root
-      .findByProps({ testID: MOBILE_E2E_IDS.taskInputStatus })
-      .findByType("Text" as unknown as React.ComponentType).props.children;
-    expect(statusText).toContain("submitted or cleared");
-    expect(statusText).toContain("don't send it again");
-    expect(
-      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInput }).props.value
-    ).toBe("");
-  });
-
   it("announces the desktop-accepted outcome through the native status element", async () => {
     const harness = createHarness();
     harness.onSendInput.mockResolvedValue({ status: "delivered" });

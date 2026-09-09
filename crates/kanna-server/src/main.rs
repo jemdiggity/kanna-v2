@@ -197,13 +197,6 @@ async fn main() {
         }
     });
 
-    match terminal_watcher::recover_interrupted_task_input_reservations(&config.db_path) {
-        Ok(0) => {}
-        Ok(count) => {
-            log::warn!("marked {count} interrupted task input reservation(s) delivery-uncertain")
-        }
-        Err(error) => log::warn!("could not recover interrupted task input reservations: {error}"),
-    }
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
     let session_replacements = http_state.session_replacements();
     let detached_terminals = http_state
