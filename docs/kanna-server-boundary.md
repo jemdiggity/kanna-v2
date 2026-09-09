@@ -11,6 +11,30 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - daemon: PTY and session ownership, terminal input and output, agent process lifecycle
 - SQLite DB: repo and task persistence, task metadata, query backing for server resources
 
+## Database opening authority
+
+`kanna-server` validates database access at configuration load, before legacy
+relocation touches either file, and immediately before every `Db::open` or
+`Db::open_migrated`. Test fixture deletion is guarded too. Task-transfer's
+independent companion SQLite opener uses the same runtime-defaults check.
+Path resolution, including canonical/legacy preference, does not grant access.
+
+Close-time worktree cleanup is a server-owned command appended after repository
+teardown. The teardown retains task isolation. Only the cleanup command restores
+`KANNA_TASK_ID` / `KANNA_WORKTREE` to the parent server's values and forwards its
+explicit desktop authorization, after checking database access in that parent.
+Other isolation signals remain intact, and the cleanup opener checks again.
+
+The real desktop database requires explicit `KANNA_DESKTOP_DB_ACCESS=desktop`,
+supplied by the desktop when it launches the server. Isolated/test/worktree
+processes cannot override the veto with that authorization. `kd` supplies
+`KANNA_DB_ISOLATED=1`; macOS's ignored `XDG_DATA_HOME` also vetoes production
+access. The guard protects the OS account's production paths independently of
+caller-controlled HOME, including aliases and not-yet-created databases.
+No schema, migration, filename or storage location changes. See
+[database access protection](dev/dev-workflow.md#database-access-protection)
+for the complete caller contract and rejected alternatives.
+
 ## KSP State Invalidation
 
 `StateChanged` remains a correctness invalidation, but task activity no longer

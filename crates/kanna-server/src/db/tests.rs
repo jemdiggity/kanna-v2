@@ -3887,3 +3887,49 @@ fn workflow_edit_audit_and_execution_supersession_survive_feed_pruning() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_type, "task.workflow_changed");
 }
+
+/// Exercise the opening layer without going through Config::load. The OS
+/// sandbox makes this regression safe even if one of these checks is removed:
+/// unguarded SQLite access/deletion is denied independently of product code.
+#[cfg(target_os = "macos")]
+#[test]
+fn production_access_is_refused_at_every_database_entry_point() {
+    const PROBE: &str = "KANNA_DB_GUARD_SANDBOX_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        let paths = kanna_runtime_defaults::database_access::production_database_paths().unwrap();
+        let production = paths[0].to_str().unwrap();
+        for error in [
+            Db::open(production).unwrap_err(),
+            Db::open_migrated(production).unwrap_err(),
+            Db::open_for_tests(production).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("REFUSED:"), "{error}");
+        }
+        let error = super::relocate_legacy_database_if_needed(&paths[1], &paths[0]).unwrap_err();
+        assert!(error.contains("REFUSED:"), "{error}");
+        return;
+    }
+
+    let profile = r#"(version 1)
+        (allow default)
+        (deny file-read-data file-write* (regex #".*\.(db|sqlite)(-wal|-shm|-journal)?$"))"#;
+    let output = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", profile])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "db::tests::production_access_is_refused_at_every_database_entry_point",
+            "--nocapture",
+        ])
+        .env(PROBE, "1")
+        .env("KANNA_DESKTOP_DB_ACCESS", "desktop")
+        .output()
+        .expect("macOS sandbox must launch the database probe");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}

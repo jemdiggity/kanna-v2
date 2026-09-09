@@ -330,6 +330,15 @@ impl RuntimeConfig {
             .transpose()?
             .unwrap_or(DiscoveryMode::Mdns);
 
+        let db_path = std::env::var("KANNA_DB_PATH")
+            .or_else(|_| std::env::var("KANNA_CLI_DB_PATH"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(kanna_runtime_defaults::preferred_desktop_db_path);
+        kanna_runtime_defaults::database_access::check(&db_path, cfg!(test))
+            .map_err(RuntimeError::InvalidConfig)?;
+
         Ok(Self {
             #[cfg(test)]
             mdns_fixture: None,
@@ -344,14 +353,7 @@ impl RuntimeConfig {
                     .map(PathBuf::from)
                     .unwrap_or_else(kanna_runtime_defaults::daemon_dir_for_current_runtime),
             ),
-            db_path: Some(
-                std::env::var("KANNA_DB_PATH")
-                    .or_else(|_| std::env::var("KANNA_CLI_DB_PATH"))
-                    .ok()
-                    .filter(|value| !value.trim().is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(kanna_runtime_defaults::preferred_desktop_db_path),
-            ),
+            db_path: Some(db_path),
             kanna_server_port: std::env::var("KANNA_MOBILE_SERVER_PORT")
                 .ok()
                 .filter(|value| !value.trim().is_empty())

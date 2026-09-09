@@ -724,6 +724,9 @@ dependencies = [
 [[package]]
 name = "kanna-runtime-defaults"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "kanna-tool-catalog"

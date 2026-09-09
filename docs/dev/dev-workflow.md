@@ -46,6 +46,66 @@ pre-created by any local user.
 
 `./kd env print` shows everything resolved for the current context.
 
+## Database access protection
+
+The database selection crosses several independently launched processes:
+
+| Caller | Selection and context available at access |
+| --- | --- |
+| `kd` | Knows the worktree and explicit `--db` override; exports `KANNA_DB_NAME` and `KANNA_DB_PATH`. Its reset/delete/seed helpers also touch SQLite directly. Dev startup already refuses the production name. |
+| Desktop | Reads `KANNA_DB_PATH`, then `KANNA_DB_NAME`, then its Tauri app-data directory and the default name; writes the selection into server configuration. It knows it is launching the desktop's server. |
+| `kanna-server` | Reads `server.toml`; an omitted `db_path` resolves through the platform data directory. Normalizes legacy selection, relocates legacy state, then calls `Db::open_migrated`; later connections use `Db::open`. A path or the build's `environment` label does not identify the caller's intent. |
+| Task-transfer | Reads `KANNA_DB_PATH` / `KANNA_CLI_DB_PATH`, otherwise prefers the canonical or legacy desktop path. The server supplies its selected path to the sidecar; companion workspace lookup independently opens SQLite. |
+| CLI / MCP | Call the server API; they do not need authorization to open SQLite themselves. |
+| Headless worker | The Phase 1 launcher selects a DB and supplies server configuration. A lost `--db-path`, including in an installed service unit, leaves the downstream server with a production fallback but no desktop authorization. The worker is developed separately from this checkout. |
+| Tests | Unit fixtures open temporary paths directly; relocation integration tests use canonical/legacy resolvers with temporary roots; process gates launch ordinary binaries. A dependency's `cfg(test)` does not identify an integration-test child, so launch context must travel to that child. |
+
+Close-time worktree cleanup is a server-owned command appended after repository
+teardown. The teardown retains task isolation. Only the cleanup command restores
+`KANNA_TASK_ID` / `KANNA_WORKTREE` to the parent server's values and forwards its
+explicit desktop authorization, after checking database access in that parent.
+Other isolation signals remain intact, and the cleanup opener checks again.
+
+Database naming is not permission to open the production database. The Rust
+SQLite opening and legacy-relocation boundaries enforce
+`kanna_runtime_defaults::database_access`: accessing the account's real
+`build.kanna/kanna-v2.db` or legacy `com.kanna.app/kanna-v2.db` requires
+`KANNA_DESKTOP_DB_ACCESS=desktop`. The desktop supplies this explicitly when
+spawning its server; CLI and MCP continue using that server over the API.
+A standalone server must deliberately supply that authorization to run the real
+desktop instance. An explicit production `db_path` alone does not authorize it.
+The path and database name are unchanged, including on a fresh install.
+
+This also covers an installed worker whose generated service unit drops
+`--db-path`: its canonical fallback is refused by the server unless the process
+explicitly declares desktop access. No test, worktree or XDG marker is needed
+for that refusal. Passing a fallback path in server configuration grants no
+authority either.
+
+Every `kd` context exports `KANNA_DB_ISOLATED=1`. This veto takes precedence
+over desktop authorization, as do test binaries, task/worktree context and
+WebDriver/E2E context. On macOS, setting `XDG_DATA_HOME` also vetoes production
+access: macOS ignores that variable for Application Support, so treating it as
+isolation must produce an error instead of opening production. Use an explicit
+isolated database path (`./kd dev up --db ...`, or `KANNA_DB_PATH` for launchers
+that consume it). An isolated process can still open a temporary fixture with
+the production basename outside the account's production directories.
+
+The guard obtains the account home from the operating system, independently of
+`HOME` and `XDG_DATA_HOME`, and protects its macOS Application Support and
+Linux `.local/share` production locations. It checks symlinks, existing file
+identity (including hard links), and existing ancestors of fresh paths before
+opening SQLite. Pure path resolvers remain usable by relocation fixtures;
+returning a path grants no access. `kd` additionally refuses production names
+at its direct SQLite reset, delete and seed boundaries.
+
+This is an accidental-access guard for Kanna's openers, not an OS sandbox for
+arbitrary programs running as the same user. New SQLite openers must call the
+shared check before touching files. A resolver-only guard was rejected because
+it misses explicit paths and relocation; worktree detection alone was rejected
+because it misses standalone launchers; an authorization flag alone was
+rejected because inherited authorization must never override a test lane.
+
 ## kd command reference
 
 Grouped highlights — run `./kd` for the full surface (task ids live in

@@ -1654,6 +1654,8 @@ pub(super) async fn append_owner_companion_event_rate_limited(
 }
 
 fn resolve_workspace(db_path: &Path, task_or_branch_id: &str) -> Result<PathBuf, CompanionError> {
+    kanna_runtime_defaults::database_access::check(db_path, cfg!(test))
+        .map_err(CompanionError::Internal)?;
     let db = rusqlite::Connection::open(db_path)
         .map_err(|_| CompanionError::Internal("failed to open Kanna database".into()))?;
     let exact: Option<String> = db
