@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 import {
   binary,
   freePort,
@@ -92,8 +93,12 @@ function runArgs(instance: Instance): string[] {
  */
 async function startSupervisor(
   instance: Instance,
-  options: { umask?: string; args?: string[] } = {},
-): Promise<{ pid: number; output: () => string }> {
+  options: { umask?: string; args?: string[]; expectReady?: boolean } = {},
+): Promise<{
+  pid: number;
+  output: () => string;
+  exited: () => Promise<number | null>;
+}> {
   const log: string[] = [];
   const command = [
     `umask ${options.umask ?? "022"}`,
@@ -113,11 +118,20 @@ async function startSupervisor(
     }
   });
 
-  await waitFor(
-    async () => (await listenersOnPort(instance.lanPort)).length === 1,
-    () => `kanna-worker never served port ${instance.lanPort}\n${log.join("")}`,
-  );
-  return { pid: child.pid ?? -1, output: () => log.join("") };
+  if (options.expectReady !== false) {
+    await waitFor(
+      async () => (await listenersOnPort(instance.lanPort)).length === 1,
+      () => `kanna-worker never served port ${instance.lanPort}\n${log.join("")}`,
+    );
+  }
+  return {
+    pid: child.pid ?? -1,
+    output: () => log.join(""),
+    exited: () => new Promise<number | null>((done) => {
+      if (child.exitCode !== null) return done(child.exitCode);
+      child.once("exit", (code) => done(code));
+    }),
+  };
 }
 
 /** Regular files the process has open, resolved through the platform's own view. */
@@ -131,6 +145,15 @@ async function openFiles(pid: number): Promise<string[]> {
     .split("\n")
     .filter((line) => line.startsWith("n/"))
     .map((line) => line.slice(1));
+}
+
+async function ownerStatusAnswers(port: number): Promise<unknown | null> {
+  try {
+    const response = await localProcessFetch(`http://127.0.0.1:${port}/v1/status`);
+    return response.ok ? await response.json() : null;
+  } catch {
+    return null;
+  }
 }
 
 describe("stop-daemon", () => {
@@ -197,6 +220,66 @@ describe("stop-daemon", () => {
       async () => !processIsAlive(supervisor.pid) && !processIsAlive(daemonPid),
       () =>
         `supervisor ${supervisor.pid} / daemon ${daemonPid} still running\n${supervisor.output()}`,
+    );
+  });
+});
+
+describe("a port another Kanna instance owns", () => {
+  /**
+   * `lan_port` defaults to 48120 — the production desktop's port — and the
+   * documented `kanna-worker run --data-dir ...` passes no `--lan-port`, so on
+   * any machine that also runs Kanna.app this is one command away. The worker
+   * used to SIGTERM and then SIGKILL whatever held the port, which would take
+   * the operator's desktop down in order to start a worker.
+   *
+   * The desktop's own launcher refuses a foreign `desktopId` rather than
+   * stopping it, and the two launchers share `crates/server-process` so they
+   * cannot disagree about who owns a port. This is the same rule, exercised
+   * where it is visible: which process gets signalled.
+   */
+  it("is refused, and its owner is left running", async () => {
+    const owner = await isolatedInstance();
+    const ownerSupervisor = await startSupervisor(owner);
+    const [ownerServerPid] = await listenersOnPort(owner.lanPort);
+    expect(ownerServerPid).toBeDefined();
+
+    // A second worker with its own data dir mints its own `worker-…`
+    // identity, so it sees the first one's server as foreign.
+    const intruder = await isolatedInstance();
+    const intruderOnOwnersPort = { ...intruder, lanPort: owner.lanPort };
+    const attempt = await startSupervisor(intruderOnOwnersPort, {
+      expectReady: false,
+    });
+
+    // Bounded, so a regression that goes back to stopping the owner fails
+    // here with the reason rather than by hanging: the old behaviour was for
+    // the intruder to kill the owner and serve happily.
+    const exitCode = await Promise.race([
+      attempt.exited(),
+      sleep(30_000).then(() => "still running" as const),
+    ]);
+    expect(
+      exitCode,
+      `the intruder must refuse the port, not take it\n${attempt.output()}`,
+    ).not.toBe("still running");
+    expect(exitCode, `the intruder should have failed\n${attempt.output()}`).not.toBe(0);
+    const message = attempt.output();
+    expect(message).toContain(String(owner.lanPort));
+    expect(message, "the refusal must name the port's owner").toMatch(
+      /already served by another Kanna instance/,
+    );
+    expect(message, "and the remedy").toContain("--lan-port");
+
+    // The owner is untouched: same listening pid, still answering.
+    expect(
+      processIsAlive(ownerServerPid!),
+      "the owner's server must survive",
+    ).toBe(true);
+    expect(await listenersOnPort(owner.lanPort)).toEqual([ownerServerPid]);
+    expect(processIsAlive(ownerSupervisor.pid)).toBe(true);
+    await waitFor(
+      async () => (await ownerStatusAnswers(owner.lanPort)) !== null,
+      "the owner's /v1/status must still answer",
     );
   });
 });

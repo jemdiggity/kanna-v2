@@ -41,6 +41,16 @@ neither is in code this phase touched, neither reproduced twice, and in those
 runs a target that normally takes 26 s took 89 s. These fixtures have
 sub-second expectations, and a machine at load 60 is not a quiet one.
 
+The pattern repeated in the second review round, at load 55–75: two `./kd test
+all` runs, each with **one** failure, in a *different* crate each time
+(`kanna-terminal-recovery`'s `write_output_does_not_emit_protocol_response_line`,
+a socket read that returned `WouldBlock`; then
+`kanna-visual-companion`'s `maximum_asset_event_validation_stays_below_payload_materialization_latency`,
+which is a latency assertion by name). Each passes 3 of 3 in isolation, and
+neither crate has a behavioural change on this branch — the visual-companion
+diff is a doc comment and a clippy `allow`. The green `./kd test all` recorded
+above was the same branch on a quieter machine.
+
 ## 2. What Phase 0 measured, and what the implementation had to add
 
 Phase 0's mapping table was accurate. Three things it could not have known came
@@ -260,6 +270,7 @@ database got opened, what mode a file was left in:
 | `stop-daemon` still works | a real supervisor and its daemon are both gone afterwards |
 | the generated unit | the `ExecStart` it prints is run for real, and the server it starts has the *selected* database open and no other, with the canonical path never created |
 | `server.toml` | 0600 when created under a 022 umask, and re-secured when an earlier run left it 0644 |
+| a port another instance owns | a second worker with its own identity on the same `--lan-port` fails with a message naming the owner, and the owner's server pid is untouched and still answering |
 
 ### Losing the supervisor
 
@@ -277,8 +288,13 @@ round.
 
 The supervisor now asks before it spawns, the way the desktop's
 `MobileServerManager::start` does: probe `/v1/status`, and if a server answers,
-adopt it when it reports this worker's own `desktopId` or stop it when it does
-not. Readiness for a server it *does* spawn is tied to that child — the child
+adopt it when it reports this worker's own `desktopId`, and **refuse the port**
+when it does not. A worker never stops a server it does not own: `--lan-port`
+defaults to 48120, the production desktop's port, so "stop whatever is there"
+would take an operator's desktop down to start a worker. The refusal names the
+port, its owner and the `--lan-port` remedy, and under `Restart=on-failure`
+that is a visible restart loop rather than a silent kill — which is what the
+desktop's launcher already does for a foreign `desktopId`. Readiness for a server it *does* spawn is tied to that child — the child
 exiting is a failure, and the answering process must be the one holding the
 listening socket — and any failure after a spawn kills and reaps the child.
 Both launchers now ask "who is listening" through one crate,

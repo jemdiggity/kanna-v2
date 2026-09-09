@@ -186,6 +186,7 @@ async fn supervise(
     let mut terminate = signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut server_backoff = Backoff::new();
+    let mut server_up_since = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -216,15 +217,20 @@ async fn supervise(
             }
             status = server.wait() => {
                 let status = status?;
-                let delay = server_backoff.next();
-                eprintln!("[worker] kanna-server exited ({status}); restarting in {delay:?}");
+                // How long it lasted, not whether the restart succeeded: a
+                // crash-looping server restarts successfully every time.
+                let uptime = server_up_since.elapsed();
+                let delay = server_backoff.next_after(uptime);
+                eprintln!(
+                    "[worker] kanna-server exited ({status}) after {uptime:?}; restarting in {delay:?}"
+                );
                 tokio::time::sleep(delay).await;
                 // Through `start_server`, not `spawn_server`: the port may
                 // still be held, and readiness must belong to whatever ends up
                 // actually serving.
                 *server = start_server(options, &identity, &server_bin).await?;
                 authorize_server(options, server.pid).await?;
-                server_backoff.reset();
+                server_up_since = tokio::time::Instant::now();
             }
             status = daemon.wait() => {
                 // A daemon that was replaced by a successor exits cleanly and
@@ -350,10 +356,10 @@ enum ExistingServer {
     /// It reports this worker's own desktop identity, so it is this worker's
     /// server, left behind by a supervisor that was killed. Adopt it.
     Adopt,
-    /// It belongs to another desktop, or will not say who it is. Stop it
-    /// before binding the port: a server this worker cannot identify must
-    /// never be authorized on this worker's daemon.
-    Replace,
+    /// It is somebody else's -- another desktop identity, or a server that
+    /// will not say who it is. Refuse the port; it is not this worker's to
+    /// take.
+    Foreign,
 }
 
 fn classify_existing_server(
@@ -362,8 +368,29 @@ fn classify_existing_server(
 ) -> ExistingServer {
     match status.get("desktopId").and_then(serde_json::Value::as_str) {
         Some(id) if id == expected_desktop_id => ExistingServer::Adopt,
-        _ => ExistingServer::Replace,
+        _ => ExistingServer::Foreign,
     }
+}
+
+/// How a foreign server on this worker's port is reported.
+///
+/// Named fields rather than a formatted string so the caller cannot omit the
+/// remedy: the port is almost always the whole problem.
+fn foreign_server_error(status: &serde_json::Value, port: u16) -> String {
+    let field = |name: &str| {
+        status
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    format!(
+        "port {port} is already served by another Kanna instance: {} ({}). \
+         This worker will not stop a server it does not own -- give it a port \
+         of its own with --lan-port.",
+        field("desktopName"),
+        field("desktopId"),
+    )
 }
 
 /// Bring this worker's server up, adopting one that is already serving.
@@ -406,12 +433,23 @@ async fn start_server(
                     pid,
                 });
             }
-            ExistingServer::Replace => {
-                eprintln!(
-                    "[worker] a kanna-server this worker does not own holds port {}; stopping it",
-                    options.lan_port()
-                );
-                kanna_server_process::stop_server_on_port(options.lan_port()).await?;
+            ExistingServer::Foreign => {
+                // Refuse, never stop. `lan_port` defaults to 48120 -- the
+                // production desktop's port -- and the documented
+                // `kanna-worker run --data-dir ...` passes no `--lan-port`, so
+                // on any machine that also runs Kanna.app this arm is one
+                // command away. Killing that server would take the operator's
+                // desktop down to start a worker.
+                //
+                // The desktop's `MobileServerManager::start` answers this the
+                // same way (`ensure_server_belongs_to_desktop` returns `Err`
+                // for a foreign `desktopId`; it only stops a server that is
+                // its *own* but stale), and the two launchers share
+                // `crates/server-process` precisely so they cannot disagree
+                // about who owns a port. Under `Restart=on-failure` this
+                // becomes a visible restart loop with this message in the
+                // journal, which is the intended outcome.
+                return Err(foreign_server_error(&status, options.lan_port()));
             }
         }
     }
@@ -808,25 +846,45 @@ fn sidecar(name: &str) -> Result<PathBuf, String> {
 
 /// Restart backoff for the server: immediate for the first failure, then
 /// doubling to a ceiling, so a server that cannot start does not spin.
+/// How long a restarted server must stay up before its restart counts as a
+/// recovery rather than as another crash.
+///
+/// This is what makes [`Backoff`]'s escalation reachable. Resetting on every
+/// successful *start* could never escalate, because a crash-looping server
+/// starts successfully every time -- it binds, is authorized, and then exits
+/// again, which is the one case the backoff exists for. Uptime is what
+/// separates "recovered" from "failing again", so that is what the reset is
+/// keyed on. A minute is comfortably longer than the 30 s a start is allowed
+/// to take and far shorter than any real session.
+const HEALTHY_SERVER_UPTIME: Duration = Duration::from_secs(60);
+
 struct Backoff {
     next: Duration,
 }
 
 impl Backoff {
+    const INITIAL: Duration = Duration::from_millis(200);
+    const CEILING: Duration = Duration::from_secs(30);
+
     fn new() -> Self {
         Self {
-            next: Duration::from_millis(200),
+            next: Self::INITIAL,
         }
     }
 
-    fn next(&mut self) -> Duration {
+    /// The delay before the next restart, given how long the server that just
+    /// exited had been up.
+    ///
+    /// A server that lasted [`HEALTHY_SERVER_UPTIME`] had recovered, so its
+    /// next failure starts from the bottom again. Anything shorter is the same
+    /// failure repeating, and escalates.
+    fn next_after(&mut self, uptime: Duration) -> Duration {
+        if uptime >= HEALTHY_SERVER_UPTIME {
+            self.next = Self::INITIAL;
+        }
         let delay = self.next;
-        self.next = std::cmp::min(self.next * 2, Duration::from_secs(30));
+        self.next = std::cmp::min(self.next * 2, Self::CEILING);
         delay
-    }
-
-    fn reset(&mut self) {
-        self.next = Duration::from_millis(200);
     }
 }
 
@@ -834,17 +892,42 @@ impl Backoff {
 mod tests {
     use super::*;
 
+    /// The escalation has to be reachable by the case it exists for: a server
+    /// that binds, is authorized, and exits again. Resetting on every
+    /// successful *start* never escalated, because a crash-looping server
+    /// starts successfully every time.
     #[test]
-    fn backoff_doubles_to_a_ceiling_and_resets() {
+    fn a_crash_looping_server_escalates_while_a_recovered_one_resets() {
         let mut backoff = Backoff::new();
-        assert_eq!(backoff.next(), Duration::from_millis(200));
-        assert_eq!(backoff.next(), Duration::from_millis(400));
-        for _ in 0..20 {
-            backoff.next();
+        let crashed = Duration::from_secs(1);
+
+        assert_eq!(backoff.next_after(crashed), Duration::from_millis(200));
+        assert_eq!(backoff.next_after(crashed), Duration::from_millis(400));
+        assert_eq!(backoff.next_after(crashed), Duration::from_millis(800));
+        for _ in 0..10 {
+            backoff.next_after(crashed);
         }
-        assert_eq!(backoff.next(), Duration::from_secs(30));
-        backoff.reset();
-        assert_eq!(backoff.next(), Duration::from_millis(200));
+        assert_eq!(
+            backoff.next_after(crashed),
+            Duration::from_secs(30),
+            "a run of short-lived servers must reach the ceiling"
+        );
+
+        // One that stayed up is a recovery, so the next failure starts over.
+        assert_eq!(
+            backoff.next_after(HEALTHY_SERVER_UPTIME),
+            Duration::from_millis(200)
+        );
+        assert_eq!(backoff.next_after(crashed), Duration::from_millis(400));
+
+        // Nothing below the threshold counts, so a server that died just short
+        // of it keeps escalating.
+        let mut edge = Backoff::new();
+        edge.next_after(crashed);
+        assert_eq!(
+            edge.next_after(HEALTHY_SERVER_UPTIME - Duration::from_millis(1)),
+            Duration::from_millis(400)
+        );
     }
 
     #[tokio::test]
@@ -977,15 +1060,12 @@ mod tests {
     /// The decision the crash-recovery path turns on: a server already on this
     /// worker's port is only adopted when it says it is *this* worker's.
     /// Anything else -- another desktop, or a server that will not identify
-    /// itself -- is stopped, because a pid this worker cannot attribute must
-    /// never be authorized on its daemon.
+    /// itself -- is foreign, and a foreign server is refused, never stopped.
     #[test]
     fn an_existing_server_is_adopted_only_when_it_reports_this_worker() {
-        let status = |value: serde_json::Value| value;
-
         assert_eq!(
             classify_existing_server(
-                &status(serde_json::json!({ "desktopId": "worker-abc" })),
+                &serde_json::json!({ "desktopId": "worker-abc" }),
                 "worker-abc"
             ),
             ExistingServer::Adopt
@@ -997,10 +1077,32 @@ mod tests {
             serde_json::json!({}),
         ] {
             assert_eq!(
-                classify_existing_server(&status(foreign.clone()), "worker-abc"),
-                ExistingServer::Replace,
+                classify_existing_server(&foreign, "worker-abc"),
+                ExistingServer::Foreign,
                 "{foreign} must not be adopted"
             );
         }
+    }
+
+    /// The refusal has to be actionable: the operator needs to know who holds
+    /// the port and what to do about it, because the default port is the
+    /// production desktop's.
+    #[test]
+    fn a_foreign_server_is_reported_with_its_owner_and_the_remedy() {
+        let message = foreign_server_error(
+            &serde_json::json!({ "desktopId": "desktop-1", "desktopName": "Studio Mac" }),
+            48_120,
+        );
+
+        assert!(message.contains("48120"), "{message}");
+        assert!(message.contains("Studio Mac"), "{message}");
+        assert!(message.contains("desktop-1"), "{message}");
+        assert!(message.contains("--lan-port"), "{message}");
+
+        // A server that answers but names nobody is still refused, and still
+        // says which port to change.
+        let anonymous = foreign_server_error(&serde_json::json!({}), 48_120);
+        assert!(anonymous.contains("48120"), "{anonymous}");
+        assert!(anonymous.contains("--lan-port"), "{anonymous}");
     }
 }
