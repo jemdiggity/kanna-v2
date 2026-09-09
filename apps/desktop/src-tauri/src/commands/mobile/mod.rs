@@ -278,6 +278,12 @@ impl MobileServerManager {
             }
         };
         let mut child = match Command::new(server_bin)
+            // The desktop explicitly authorizes its own database. An isolated
+            // test/dev context still vetoes this in the server at every open.
+            .env(
+                kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV,
+                "desktop",
+            )
             .env("KANNA_SERVER_CONFIG", &config_path)
             .env("KANNA_DESKTOP_EXECUTABLE", desktop_executable)
             .envs(transfer_identity_env)

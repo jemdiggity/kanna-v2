@@ -18,6 +18,8 @@ impl Db {
 
     #[cfg(test)]
     pub fn open_for_tests(path: &str) -> Result<Self, rusqlite::Error> {
+        kanna_runtime_defaults::database_access::check(std::path::Path::new(path), true)
+            .map_err(rusqlite::Error::InvalidParameterName)?;
         let path_buf = PathBuf::from(path);
         let _ = std::fs::remove_file(&path_buf);
         // Removing only the database leaves a previous run's WAL and shared

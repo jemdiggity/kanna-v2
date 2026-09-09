@@ -550,6 +550,8 @@ pub(crate) fn relocate_legacy_database_if_needed(
     legacy_path: &Path,
     canonical_path: &Path,
 ) -> Result<bool, String> {
+    kanna_runtime_defaults::database_access::check(legacy_path, cfg!(test))?;
+    kanna_runtime_defaults::database_access::check(canonical_path, cfg!(test))?;
     if !legacy_path.exists() {
         return Ok(false);
     }
@@ -2331,12 +2333,16 @@ impl Db {
     }
 
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
+        kanna_runtime_defaults::database_access::check(Path::new(path), cfg!(test))
+            .map_err(rusqlite::Error::InvalidParameterName)?;
         let conn = Connection::open_with_flags(path, database_open_flags())?;
         configure_shared_database_connection(&conn)?;
         Ok(Self { conn })
     }
 
     pub fn open_migrated(path: &str) -> Result<Self, rusqlite::Error> {
+        kanna_runtime_defaults::database_access::check(Path::new(path), cfg!(test))
+            .map_err(rusqlite::Error::InvalidParameterName)?;
         let conn = Connection::open_with_flags(path, database_open_flags())?;
         configure_shared_database_connection(&conn)?;
         run_schema_migrations(&conn)?;

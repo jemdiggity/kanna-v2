@@ -205,7 +205,9 @@ impl Config {
             Ok(p) => PathBuf::from(p),
             Err(_) => data_root.join("Kanna").join("server.toml"),
         };
-        load_from_path(&config_path, &data_root)
+        let config = load_from_path(&config_path, &data_root)?;
+        kanna_runtime_defaults::database_access::check(Path::new(&config.db_path), cfg!(test))?;
+        Ok(config)
     }
 }
 
