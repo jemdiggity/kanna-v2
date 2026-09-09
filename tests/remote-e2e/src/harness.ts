@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -70,10 +71,22 @@ export interface RemoteHarness {
   restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
   restartDaemon(): Promise<void>;
   startRelay(): Promise<void>;
+  startAdditionalDesktop(): Promise<RemoteDesktop>;
   startServer(): Promise<void>;
   stopRelay(): Promise<void>;
   stopServer(): Promise<void>;
   waitForDesktop(desktopId?: string): Promise<void>;
+  stop(): Promise<void>;
+}
+
+/** A second server/daemon pair sharing this harness's relay and Firebase account. */
+export interface RemoteDesktop {
+  client: RelayDesktopClient;
+  desktopId: string;
+  lanBaseUrl: string;
+  repoRoot: string;
+  paths: Pick<RemoteHarness["paths"], "dbPath" | "root">;
+  serverLogs(): string;
   stop(): Promise<void>;
 }
 
@@ -387,6 +400,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
             }
           : {}),
         KANNA_E2E_TEST_SQL: "1",
+        KANNA_E2E_SHORT_CURSOR_TTL_SECS: "1",
         HOME: zshStartupDir,
         PATH: serverProviderPath(fakeAgentBinDir, process.env.PATH),
         RUST_LOG: process.env.RUST_LOG ?? "info",
@@ -474,6 +488,76 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       `replacement daemon ${expectedPid} did not publish after daemon ${String(previous?.process.pid)}`
     );
   };
+
+  const startAdditionalDesktop = async (): Promise<RemoteDesktop> => {
+    const desktopRoot = join(root, `desktop-${randomUUID()}`);
+    const desktopId = `remote-e2e-${process.pid}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const desktopPorts = await allocatePorts();
+    const desktopDaemonDir = join(desktopRoot, "daemon");
+    const desktopDbPath = join(desktopRoot, "kanna.sqlite3");
+    const desktopConfigPath = join(desktopRoot, "server.toml");
+    let desktopServer: ManagedProcess | null = null;
+    let desktopDaemon: ManagedProcess | null = null;
+    await mkdir(desktopDaemonDir, { recursive: true });
+    await createHarnessDatabase(repoRoot, desktopDbPath);
+    await writeServerConfig({
+      configPath: desktopConfigPath,
+      daemonDir: desktopDaemonDir,
+      dbPath: desktopDbPath,
+      desktopId,
+      environment,
+      lanHost,
+      repoRoot,
+      stagingCredentials: staging?.credentials,
+      // The second desktop deliberately shares the first desktop's relay and
+      // Firebase emulators; only its server/transfer ports are independent.
+      ports: { ...desktopPorts, relay: ports.relay, auth: ports.auth, firestore: ports.firestore, functions: ports.functions, ui: ports.ui }
+    });
+    desktopDaemon = launchDaemonFor(desktopDaemonDir);
+    processes.push(desktopDaemon);
+    await waitForFile(join(desktopDaemonDir, "daemon.pid"), timeoutMs);
+    desktopServer = startServerFor(desktopConfigPath);
+    processes.push(desktopServer);
+    await waitForHttpOk(`http://127.0.0.1:${desktopPorts.server}/v1/status`, timeoutMs);
+    await waitForRelayDesktop({ client: client!, desktopId, timeoutMs });
+    return {
+      client: client!,
+      desktopId,
+      lanBaseUrl: `http://127.0.0.1:${desktopPorts.server}`,
+      repoRoot,
+      paths: { dbPath: desktopDbPath, root: desktopRoot },
+      serverLogs: () => desktopServer?.logs() ?? "",
+      stop: async () => {
+        for (const processHandle of [desktopServer, desktopDaemon]) {
+          if (!processHandle) continue;
+          const index = processes.indexOf(processHandle);
+          if (index >= 0) processes.splice(index, 1);
+          await processHandle.stop();
+        }
+        if (!options.keepArtifacts) await rm(desktopRoot, { recursive: true, force: true });
+      }
+    };
+  };
+
+  const launchDaemonFor = (targetDaemonDir: string): ManagedProcess => startManagedProcess(
+    "daemon",
+    join(repoRoot, ".build/debug/kanna-daemon"), [], {
+      cwd: repoRoot, inventoryRoot: repoRoot,
+      env: { ...process.env, KANNA_DAEMON_DIR: targetDaemonDir,
+        KANNA_SERVER_EXECUTABLE: join(repoRoot, ".build/debug/kanna-server"),
+        HOME: zshStartupDir, PATH: prependPath(fakeAgentBinDir, process.env.PATH), ZDOTDIR: zshStartupDir }
+    }
+  );
+
+  const startServerFor = (targetConfigPath: string): ManagedProcess => startManagedProcess(
+    "kanna-server", join(repoRoot, ".build/debug/kanna-server"), [], {
+      cwd: repoRoot, inventoryRoot: repoRoot,
+      env: { ...process.env, KANNA_SERVER_CONFIG: targetConfigPath,
+        ...(environment === "staging" ? { KANNA_CLOUD_ENV: "staging", KANNA_FIREBASE_PROJECT_ID: "kanna-staging", KANNA_RELAY_URL: "wss://relay-staging.kanna.build" } : {}),
+        KANNA_E2E_TEST_SQL: "1", KANNA_E2E_SHORT_CURSOR_TTL_SECS: "1", HOME: zshStartupDir,
+        PATH: serverProviderPath(fakeAgentBinDir, process.env.PATH), RUST_LOG: process.env.RUST_LOG ?? "info", ZDOTDIR: zshStartupDir }
+    }
+  );
 
   const stop = async () => {
     if (stopped) {
@@ -571,6 +655,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       restartServerWithIdentity,
       restartDaemon,
       startRelay,
+      startAdditionalDesktop,
       startServer,
       stopRelay,
       stopServer,

@@ -12,7 +12,7 @@ import {
   writeScriptedAgentBinary,
   type ScriptedAgentOptions,
 } from "./scriptedAgent";
-import type { RemoteHarness } from "./harness";
+import type { RemoteDesktop, RemoteHarness } from "./harness";
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
 
 const execFileAsync = promisify(execFile);
@@ -107,7 +107,7 @@ export async function connectRawRelayClient(harness: RemoteHarness): Promise<Raw
 }
 
 export async function createScriptedTask(
-  harness: RemoteHarness,
+  harness: Pick<RemoteHarness, "client" | "desktopId" | "repoRoot"> & Pick<RemoteDesktop, "paths">,
   options: {
     displayName: string;
     continuousOutput?: boolean;

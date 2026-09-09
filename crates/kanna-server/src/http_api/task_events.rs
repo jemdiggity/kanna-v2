@@ -74,6 +74,16 @@ const MAX_AGGREGATE_MACHINES: usize = 128;
 const MAX_SHORT_CURSOR_HANDLES: usize = 4_096;
 static SHORT_CURSOR_NONCE: AtomicU64 = AtomicU64::new(0);
 
+/// Remote E2E deliberately ages the process-local tier quickly. The durable
+/// SQLite checkpoint remains the production source of truth; this only proves
+/// a live `kh1` resumes after the cache lifetime that used to lose it.
+fn aggregate_wait_session_ttl() -> Duration {
+    if cfg!(debug_assertions) && std::env::var("KANNA_E2E_SHORT_CURSOR_TTL_SECS").is_ok() {
+        return Duration::from_secs(1);
+    }
+    AGGREGATE_WAIT_SESSION_TTL
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskEventsQuery {
@@ -195,7 +205,7 @@ impl AggregateWaitRegistry {
             .sessions
             .iter()
             .filter(|(_, session)| {
-                now.duration_since(session.last_touched) >= AGGREGATE_WAIT_SESSION_TTL
+                now.duration_since(session.last_touched) >= aggregate_wait_session_ttl()
             })
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
@@ -204,8 +214,9 @@ impl AggregateWaitRegistry {
                 Self::abort_session(session);
             }
         }
-        self.short_cursors
-            .retain(|_, entry| now.duration_since(entry.last_touched) < AGGREGATE_WAIT_SESSION_TTL);
+        self.short_cursors.retain(|_, entry| {
+            now.duration_since(entry.last_touched) < aggregate_wait_session_ttl()
+        });
     }
 
     fn resolve_short_cursor(&mut self, handle: &str) -> Option<String> {
