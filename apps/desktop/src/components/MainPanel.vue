@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, type Ref } from "vue";
+import {
+  computed,
+  nextTick,
+  ref,
+  watch,
+  type ComponentPublicInstance,
+  type Ref,
+} from "vue";
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import type { AgentProvider, BlockerDisplayItem } from "../types/kanna";
 import type { TaskUiSlot } from "../types/taskUi";
@@ -12,6 +19,19 @@ import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
+import MainTabBar from "./MainTabBar.vue";
+import DiffModal from "./DiffModal.vue";
+import FilePreviewModal from "./FilePreviewModal.vue";
+import ShellModal from "./ShellModal.vue";
+import TreeExplorerModal from "./TreeExplorerModal.vue";
+import CommitGraphModal from "./CommitGraphModal.vue";
+import AnalyticsModal from "./AnalyticsModal.vue";
+import ImageUrlPreviewModal from "./ImageUrlPreviewModal.vue";
+import PreferencesPanel from "./PreferencesPanel.vue";
+import { AGENT_TAB_ID, type MainTab } from "../composables/useMainTabs";
+import type { MainTabViewsController } from "./MainPanel.types";
+import type { BranchInclude, DiffScope, DiffScrollPositions } from "../composables/useAppModals";
+import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
 import CloudTerminalCache, {
   type CloudTerminalCacheEntry,
 } from "./CloudTerminalCache.vue";
@@ -32,6 +52,11 @@ const props = defineProps<{
     transport?: "cloud" | "lan";
   } | null;
   requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
+  /**
+   * Present in the app; absent in isolated tests, where the panel is just the
+   * agent session it has always been.
+   */
+  views?: MainTabViewsController;
 }>();
 
 const emit = defineEmits<{
@@ -41,6 +66,168 @@ const emit = defineEmits<{
 const isMobile = __KANNA_MOBILE__;
 const COMMAND_HINT_STORAGE_KEY = "kanna:hide-command-hint";
 const item = computed(() => props.uiSlot?.task ?? null);
+
+const tabs = computed<MainTab[]>(() => props.views?.tabs.tabs.value ?? []);
+const activeTabId = computed(() => props.views?.tabs.activeTabId.value ?? AGENT_TAB_ID);
+const agentTabActive = computed(() => activeTabId.value === AGENT_TAB_ID);
+const openViewTabs = computed(() => tabs.value.filter((tab) => tab.kind !== "agent"));
+/**
+ * The panel's own empty state — "no task selected", or the agent-install help
+ * when there are no repositories — belongs to a main area with nothing in it.
+ * A repository scope with tabs open is not empty.
+ */
+const showEmptyState = computed(() => !props.uiSlot && tabs.value.length === 0);
+const scopeRepoId = computed(() =>
+  item.value?.repo_id ?? props.views?.store.selectedRepoId ?? null
+);
+const scopeRepoPath = computed(() =>
+  props.repoPath ?? props.views?.store.selectedRepo?.path ?? ""
+);
+const taskWorktreePath = computed(() =>
+  item.value?.branch ? `${props.repoPath}/.kanna-worktrees/${item.value.branch}` : undefined
+);
+
+function selectTab(id: string) {
+  props.views?.tabs.activateTab(id);
+}
+
+function closeTab(id: string) {
+  props.views?.tabs.closeTab(id);
+}
+
+/**
+ * Consequences of a tab closing that belong to the panel. Wired into the tab
+ * store by App.vue so they run however the tab was closed.
+ */
+function onTabClosed(tab: MainTab) {
+  // The shell is how an operator installs an agent CLI before they have any
+  // repositories, so closing it is the moment to look again.
+  if (tab.kind === "shell" && !props.hasRepos) void checkAllClis();
+}
+
+/**
+ * A tab id is only unique inside its task's tab set, and the same file path
+ * can be open in two tasks. Keying the rendered view by scope as well makes a
+ * task switch remount it against the new worktree instead of leaving the
+ * previous task's content in a reused node.
+ */
+function tabKey(tab: MainTab): string {
+  return `${props.views?.tabs.scopeKey.value ?? ""}:${tab.id}`;
+}
+
+const diffViewProps = computed(() => {
+  const modals = props.views?.modals;
+  if (!modals) return null;
+  const state = modals.currentDiffViewState.value;
+  const route = modals.activeRemoteTaskRoute.value;
+  return {
+    repoPath: modals.activeRepoPath.value || props.repoPath || "",
+    worktreePath: modals.activeDiffWorktreePath.value,
+    initialScope: state?.scope,
+    initialScrollPositions: state?.scrollPositions,
+    initialBranchInclude: state?.branchInclude,
+    baseRef: item.value?.base_ref ?? undefined,
+    viewKey: modals.currentDiffViewKey.value,
+    remoteDiffLoader: modals.activeTaskViewIsRemote.value ? modals.readRemoteTaskDiff : undefined,
+    remoteDesktopId: route?.desktopId,
+    remoteTaskId: route?.taskId,
+    remoteTransport: route?.transport,
+  };
+});
+
+function fileViewProps(tab: MainTab) {
+  const modals = props.views?.modals;
+  return {
+    filePath: tab.filePath ?? "",
+    worktreePath: modals?.activeWorktreePath.value ?? taskWorktreePath.value ?? "",
+    remoteContent: tab.remoteContent ?? null,
+    remoteContentLoader: modals?.activeTaskViewIsRemote.value
+      ? modals.readRemoteTaskFile
+      : undefined,
+    ideCommand: props.views?.store.ideCommand,
+    initialLine: tab.initialLine,
+    initialMarkdownMode: modals?.currentPreviewMarkdownMode.value,
+  };
+}
+
+function shellSessionId(tab: MainTab): string {
+  if (tab.shellScope === "repo") {
+    const repoId = scopeRepoId.value;
+    return repoId ? `shell-repo-${repoId}` : "shell-home";
+  }
+  return item.value ? `shell-wt-${item.value.id}` : "";
+}
+
+function shellCwd(tab: MainTab): string {
+  if (tab.shellScope === "repo") {
+    return scopeRepoPath.value || (props.views?.modals.homePath.value ?? "");
+  }
+  return taskWorktreePath.value ?? scopeRepoPath.value;
+}
+
+function treeViewProps() {
+  const modals = props.views?.modals;
+  const route = modals?.activeRemoteTaskRoute.value;
+  return {
+    worktreePath: modals?.treeExplorerRoot.value ?? taskWorktreePath.value ?? scopeRepoPath.value,
+    repoRoot: scopeRepoPath.value || (modals?.treeExplorerRoot.value ?? ""),
+    homePath: modals?.homePath.value,
+    remoteDirectoryLoader: modals?.activeTaskViewIsRemote.value
+      ? modals.listRemoteTaskDirectory
+      : undefined,
+    remoteDesktopId: route?.desktopId,
+    remoteTaskId: route?.taskId,
+    remoteTransport: route?.transport,
+  };
+}
+
+function onDiffScopeChange(scope: DiffScope) {
+  props.views?.modals.updateCurrentDiffViewState({ scope });
+}
+
+function onDiffScrollStateChange(scrollPositions: DiffScrollPositions) {
+  props.views?.modals.updateCurrentDiffViewState({ scrollPositions });
+}
+
+function onDiffBranchIncludeChange(branchInclude: BranchInclude) {
+  props.views?.modals.updateCurrentDiffViewState({ branchInclude });
+}
+
+function onMarkdownModeChange(mode: MarkdownPreviewMode) {
+  props.views?.modals.updateCurrentPreviewMarkdownMode(mode);
+}
+
+interface DismissableView {
+  dismiss?: () => boolean;
+}
+
+const viewRefs = new Map<string, DismissableView>();
+
+function setViewRef(id: string, component: Element | ComponentPublicInstance | null) {
+  if (component) {
+    viewRefs.set(id, component as unknown as DismissableView);
+  } else {
+    viewRefs.delete(id);
+  }
+}
+
+/**
+ * Escape's share of the tab surface. The centralized dismiss handler calls
+ * this once every open modal has declined, because a modal is always above the
+ * tabs. Returns true when the key was consumed.
+ */
+function dismissActiveTab(): boolean {
+  const controller = props.views?.tabs;
+  const tab = controller?.activeTab.value;
+  if (!controller || !tab || tab.kind === "agent") return false;
+  // A shell tab is a live terminal; Escape belongs to whatever runs in it.
+  if (tab.kind === "shell") return false;
+  // A view with its own layered dismiss — a file's search, the tree's filter,
+  // the graph's detail pane — gets to close that first.
+  if (viewRefs.get(tab.id)?.dismiss?.() === false) return true;
+  controller.closeTab(tab.id);
+  return true;
+}
 const headerItem = computed(() => {
   const slot = props.uiSlot;
   if (!slot) return null;
@@ -336,7 +523,20 @@ watch(() => props.hasRepos, (has) => {
   if (!has) checkAllClis();
 }, { immediate: true });
 
-defineExpose({ recheckClis: checkAllClis });
+/** ⇧⌘[ / ⇧⌘] reach the Preferences tab's own sections while it is in front. */
+function cyclePreferencesSection(direction: -1 | 1) {
+  const tab = props.views?.tabs.activeTab.value;
+  if (tab?.kind !== "preferences") return;
+  (viewRefs.get(tab.id) as { cycleTab?: (direction: -1 | 1) => void } | undefined)
+    ?.cycleTab?.(direction);
+}
+
+defineExpose({
+  recheckClis: checkAllClis,
+  dismissActiveTab,
+  cyclePreferencesSection,
+  onTabClosed,
+});
 
 async function copyCommand(agent: AgentProvider) {
   const cmd = AGENT_CARD_METADATA[agent].installCommand;
@@ -393,58 +593,160 @@ function dismissCommandHint() {
           {{ $t('mainPanel.revise') }}
         </button>
       </section>
-      <CloudTerminalCache
-        :active-terminal="activeCloudTerminal"
-        :discard-key="discardedCloudTerminalKey"
-      />
-      <template v-if="uiSlot.state !== 'ready' || !item">
-        <div class="setup-placeholder">
-          <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
-        </div>
-      </template>
-      <template v-else-if="isBlocked">
-        <div class="blocked-placeholder">
-          <p class="blocked-title">{{ $t('mainPanel.taskBlocked') }}</p>
-          <p class="blocked-hint">{{ $t('mainPanel.taskBlockedHint') }}</p>
-          <div v-if="blockers && blockers.length > 0" class="blocked-by">
-            <p class="blocked-by-label">{{ $t('mainPanel.waitingOn') }}</p>
-            <div v-for="b in blockers" :key="b.id" class="blocker-item">
-              <span
-                class="blocker-status"
-                :style="{ color: b.closed_at != null ? 'var(--kn-text-muted)' : 'var(--kn-accent)' }"
-              >{{ b.closed_at != null ? $t('mainPanel.blockerDone') : $t('mainPanel.blockerActive') }}</span>
-              <span class="blocker-name">{{
-                b.display_name
-                  || b.issue_title
-                  || (b.prompt ? b.prompt.slice(0, 60) : null)
-                  || (b.fallback_task_id
-                    ? $t('tasks.taskId', { id: b.fallback_task_id })
-                    : $t('tasks.untitled'))
-              }}</span>
+    </template>
+    <!--
+      One bar for every scope, above every panel including the agent session's.
+      It belongs to the main area rather than to whichever view is in front, so
+      it sits below a task's header and above the panels — placed after the
+      agent panel it rendered underneath it, at the bottom of the window. The
+      task-slot block is split around it rather than the bar being repeated,
+      because a repository scope has no header to sit under but still has tabs.
+    -->
+    <MainTabBar
+      v-if="views && tabs.length > 0"
+      :tabs="tabs"
+      :active-tab-id="activeTabId"
+      @select="selectTab"
+      @close="closeTab"
+    />
+    <template v-if="uiSlot">
+      <div v-show="agentTabActive" class="main-tab-panel" data-testid="main-tab-panel-agent">
+        <CloudTerminalCache
+          :active-terminal="activeCloudTerminal"
+          :discard-key="discardedCloudTerminalKey"
+        />
+        <template v-if="uiSlot.state !== 'ready' || !item">
+          <div class="setup-placeholder">
+            <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
+          </div>
+        </template>
+        <template v-else-if="isBlocked">
+          <div class="blocked-placeholder">
+            <p class="blocked-title">{{ $t('mainPanel.taskBlocked') }}</p>
+            <p class="blocked-hint">{{ $t('mainPanel.taskBlockedHint') }}</p>
+            <div v-if="blockers && blockers.length > 0" class="blocked-by">
+              <p class="blocked-by-label">{{ $t('mainPanel.waitingOn') }}</p>
+              <div v-for="b in blockers" :key="b.id" class="blocker-item">
+                <span
+                  class="blocker-status"
+                  :style="{ color: b.closed_at != null ? 'var(--kn-text-muted)' : 'var(--kn-accent)' }"
+                >{{ b.closed_at != null ? $t('mainPanel.blockerDone') : $t('mainPanel.blockerActive') }}</span>
+                <span class="blocker-name">{{
+                  b.display_name
+                    || b.issue_title
+                    || (b.prompt ? b.prompt.slice(0, 60) : null)
+                    || (b.fallback_task_id
+                      ? $t('tasks.taskId', { id: b.fallback_task_id })
+                      : $t('tasks.untitled'))
+                }}</span>
+              </div>
             </div>
           </div>
-        </div>
-      </template>
-      <template v-else-if="cloudTask">
-        <div v-if="!cloudTerminalRef" class="cloud-task-placeholder">
-          <p class="cloud-task-title">Task is running on another machine</p>
-          <p class="cloud-task-hint">Cloud sync is showing the task here, but terminal routing information is unavailable.</p>
-        </div>
-      </template>
-      <template v-else>
-        <TerminalTabs
-          :session-id="item.id"
-          :agent-type="item.agent_type || 'pty'"
-          :agent-provider="item.agent_provider"
-          :repo-path="repoPath"
-          :worktree-path="item.branch ? `${repoPath}/.kanna-worktrees/${item.branch}` : undefined"
-          :prompt="item.prompt || ''"
-          :spawn-pty-session="spawnPtySession"
-          :recover-task-session="recoverTaskSession"
+        </template>
+        <template v-else-if="cloudTask">
+          <div v-if="!cloudTerminalRef" class="cloud-task-placeholder">
+            <p class="cloud-task-title">Task is running on another machine</p>
+            <p class="cloud-task-hint">Cloud sync is showing the task here, but terminal routing information is unavailable.</p>
+          </div>
+        </template>
+        <template v-else>
+          <TerminalTabs
+            :session-id="item.id"
+            :active="agentTabActive"
+            :agent-type="item.agent_type || 'pty'"
+            :agent-provider="item.agent_provider"
+            :repo-path="repoPath"
+            :worktree-path="taskWorktreePath"
+            :prompt="item.prompt || ''"
+            :spawn-pty-session="spawnPtySession"
+            :recover-task-session="recoverTaskSession"
+          />
+        </template>
+      </div>
+    </template>
+    <template v-if="views">
+      <template v-for="tab in openViewTabs" :key="tabKey(tab)">
+        <DiffModal
+          v-if="tab.kind === 'diff' && diffViewProps"
+          v-show="activeTabId === tab.id"
+          v-bind="diffViewProps"
+          embedded
+          :active="activeTabId === tab.id"
+          @scope-change="onDiffScopeChange"
+          @scroll-state-change="onDiffScrollStateChange"
+          @branch-include-change="onDiffBranchIncludeChange"
+          @close="closeTab(tab.id)"
+        />
+        <FilePreviewModal
+          v-else-if="tab.kind === 'file'"
+          :ref="(component) => setViewRef(tab.id, component)"
+          v-show="activeTabId === tab.id"
+          v-bind="fileViewProps(tab)"
+          embedded
+          :active="activeTabId === tab.id"
+          @update-markdown-mode="onMarkdownModeChange"
+          @close="closeTab(tab.id)"
+        />
+        <ShellModal
+          v-else-if="tab.kind === 'shell' && shellSessionId(tab)"
+          v-show="activeTabId === tab.id"
+          :session-id="shellSessionId(tab)"
+          :cwd="shellCwd(tab)"
+          :fallback-cwd="tab.shellScope === 'repo' ? undefined : scopeRepoPath"
+          :port-env="tab.shellScope === 'repo' ? undefined : item?.port_env"
+          embedded
+          :active="activeTabId === tab.id"
+          @close="closeTab(tab.id)"
+        />
+        <TreeExplorerModal
+          v-else-if="tab.kind === 'tree'"
+          :ref="(component) => setViewRef(tab.id, component)"
+          v-show="activeTabId === tab.id"
+          v-bind="treeViewProps()"
+          embedded
+          :active="activeTabId === tab.id"
+          @open-file="(filePath: string) => views?.modals.openFilePreview(filePath)"
+          @close="closeTab(tab.id)"
+        />
+        <CommitGraphModal
+          v-else-if="tab.kind === 'graph' && scopeRepoPath"
+          :ref="(component) => setViewRef(tab.id, component)"
+          v-show="activeTabId === tab.id"
+          :repo-path="scopeRepoPath"
+          :worktree-path="taskWorktreePath"
+          embedded
+          :active="activeTabId === tab.id"
+          @close="closeTab(tab.id)"
+        />
+        <AnalyticsModal
+          v-else-if="tab.kind === 'analytics'"
+          v-show="activeTabId === tab.id"
+          :repo-id="scopeRepoId"
+          embedded
+          :active="activeTabId === tab.id"
+          @close="closeTab(tab.id)"
+        />
+        <ImageUrlPreviewModal
+          v-else-if="tab.kind === 'image'"
+          v-show="activeTabId === tab.id"
+          :image-url="tab.imageUrl ?? ''"
+          embedded
+          :active="activeTabId === tab.id"
+          @close="closeTab(tab.id)"
+        />
+        <PreferencesPanel
+          v-else-if="tab.kind === 'preferences' && views"
+          :ref="(component) => setViewRef(tab.id, component)"
+          v-show="activeTabId === tab.id"
+          :preferences="views.preferences.preferences"
+          embedded
+          :active="activeTabId === tab.id"
+          @update="views.preferences.handlePreferenceUpdate"
+          @close="closeTab(tab.id)"
         />
       </template>
     </template>
-    <div v-else class="empty-state">
+    <div v-if="showEmptyState" class="empty-state">
       <template v-if="!hasRepos">
         <div class="agent-setup">
           <p class="setup-title">{{ $t('mainPanel.agentSetupTitle') }}</p>
@@ -559,6 +861,13 @@ function dismissCommandHint() {
   min-width: 0;
   min-height: 0;
   background: var(--kn-bg-app);
+}
+
+.main-tab-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .input-blocked {

@@ -140,7 +140,13 @@ impl TransferEventLog {
     /// events shared this log — dropping one lost a transfer step — but those
     /// go to the durable work queue instead, so an absent window costs at most
     /// a pairing prompt it was never there to answer.
-    fn append(&self, event: Value) {
+    ///
+    /// Public because this bounded log is the shape of every advisory lane the
+    /// desktop long-polls, not only the sidecar's: `desktop_view_commands` is
+    /// a third instance, filled by an HTTP route rather than by sidecar
+    /// stdout. Anything appended here is advisory — a window that is not
+    /// listening loses it.
+    pub fn append(&self, event: Value) {
         let bytes = serde_json::to_vec(&event).map(|raw| raw.len()).unwrap_or(0);
         let mut inner = self.lock();
         while inner.entries.len() >= MAX_TRANSFER_EVENT_ENTRIES

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
+import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { resetDatabase } from "../helpers/reset";
 import { WebDriverClient } from "../helpers/webdriver";
 
@@ -60,7 +60,7 @@ describe("native window theme", () => {
     // getter after driving the preferences flow in the running desktop app.
     await expect(currentNativeWindowTheme(client)).resolves.toBe("light");
 
-    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
   });
 });

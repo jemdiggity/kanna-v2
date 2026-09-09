@@ -113,7 +113,8 @@
     "oldestUnreadAllRepos": "Oldest Unread Task Across Repos",
     "oldestRead": "Oldest Read Task",
     "oldestReadAllRepos": "Oldest Read Task Across Repos",
-    "focusSearch": "Search"
+    "focusSearch": "Search",
+    "closeTab": "Close Tab"
   },
   "shortcutContexts": {
     "main": "Main Shortcuts",
@@ -378,6 +379,17 @@
     "setupRepoDesc": "Configure .kanna workflow and agent flavors",
     "createConfig": "Create Config",
     "createConfigDesc": "Create or update .kanna/config.json"
+  },
+  "mainTabs": {
+    "agent": "Agent",
+    "diff": "Diff",
+    "shell": "Shell",
+    "repoShell": "Repo shell",
+    "files": "Files",
+    "graph": "Commits",
+    "analytics": "Analytics",
+    "preferences": "Preferences",
+    "image": "Image"
   },
   "terminalTabs": {
     "noSession": "No agent session active"

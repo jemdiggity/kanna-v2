@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { tauriInvoke } from "../helpers/vue";
+import { tauriInvoke, setPreferencesOpen } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
 interface MobileServerStatus {
@@ -33,16 +33,6 @@ function requireEnv(name: string): string {
     throw new Error(`${name} is required for mobile pairing UI E2E`);
   }
   return value;
-}
-
-async function setSetupState(key: string, value: unknown): Promise<void> {
-  await client.executeSync(`
-    const ctx = window.__KANNA_E2E__.setupState;
-    const key = ${JSON.stringify(key)};
-    const value = ${JSON.stringify(value)};
-    if (ctx[key]?.__v_isRef) ctx[key].value = value;
-    else ctx[key] = value;
-  `);
 }
 
 interface AuthSession {
@@ -325,7 +315,7 @@ describe("mobile pairing UI", () => {
   });
 
   it("starts pairing and registers this desktop online with the relay", async () => {
-    await setSetupState("showPreferencesPanel", true);
+    await setPreferencesOpen(client, true);
     await client.waitForElement(".prefs-panel");
     await client.click(await client.waitForElement('[data-testid="preferences-mobile-tab"]'));
 

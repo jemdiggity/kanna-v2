@@ -17,6 +17,13 @@ const { t } = useI18n();
 const props = defineProps<{
   repoPath: string;
   worktreePath?: string;
+  /**
+   * Whether this view is the one in front. `useLessScroll` binds window-level
+   * keys, and a tab stays mounted behind another one, so without this a
+   * background graph answered `q` and closed itself. Absent means in front,
+   * which is what a modal always is while it is open.
+   */
+  isForeground?: () => boolean;
 }>();
 
 const emit = defineEmits<{
@@ -278,6 +285,7 @@ watch(isSearching, (searching) => {
 defineExpose({ dismiss });
 
 useLessScroll(scrollRef, {
+  isActive: () => props.isForeground?.() ?? true,
   extraHandler: (e: KeyboardEvent) => {
     const noMods = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
     const meta = e.metaKey || e.ctrlKey;

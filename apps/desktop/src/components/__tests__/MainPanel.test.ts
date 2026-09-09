@@ -9,6 +9,9 @@ import ja from "../../i18n/locales/ja.json";
 import ko from "../../i18n/locales/ko.json";
 import type { PipelineItem } from "../../types/kanna";
 import type { TaskUiSlot } from "../../types/taskUi";
+import { computed } from "vue";
+import { useMainTabs } from "../../composables/useMainTabs";
+import type { MainTabViewsController } from "../MainPanel.types";
 
 const invokeMock = vi.fn();
 const fetchTaskDetailMock = vi.fn();
@@ -110,6 +113,55 @@ describe("MainPanel", () => {
     });
     vi.stubGlobal("__KANNA_MOBILE__", false);
     localStorage.clear();
+  });
+
+
+  it("puts the tab bar above every panel, the agent session included", async () => {
+    const scopeKey = computed<string | null>(() => "item:task-a");
+    // The agent session alone is enough: it is the tab the bar rendered
+    // underneath.
+    const tabs = useMainTabs({ scopeKey });
+
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask()),
+        repoPath: "/tmp/repo",
+        hasRepos: true,
+        views: {
+          tabs,
+          modals: {
+            finishTransferredModal: vi.fn(),
+            homePath: computed(() => "/home/tester"),
+          },
+          preferences: {},
+          store: {},
+        } as unknown as MainTabViewsController,
+      },
+      attachTo: document.body,
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: true,
+          TerminalTabs: true,
+          // Stubbed for its position, not its contents: what regressed was
+          // where the template puts the bar, not what it draws.
+          MainTabBar: {
+            name: "MainTabBar",
+            template: '<div data-testid="main-tab-bar"></div>',
+          },
+        },
+      },
+    });
+    await flushPromises();
+
+    const bar = wrapper.get('[data-testid="main-tab-bar"]').element;
+    const agentPanel = wrapper.get('[data-testid="main-tab-panel-agent"]').element;
+    // Rendered after the agent panel, the bar sat underneath it at the bottom
+    // of the window whenever the agent session was the tab in front.
+    expect(bar.compareDocumentPosition(agentPanel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    wrapper.unmount();
   });
 
   it("keeps terminal state across task-detail refresh failures", async () => {
@@ -331,6 +383,75 @@ describe("MainPanel", () => {
 
     expect(openCodeCard()?.find(".installed").exists()).toBe(true);
     expect(openCodeCard()?.text()).toContain("Version 1.2.3");
+  });
+
+  it("rechecks agent CLIs when the setup shell tab closes", async () => {
+    let opencodeInstalled = false;
+    invokeMock.mockImplementation((command: string, args?: { name?: string }) => {
+      if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
+      if (command === "which_binary" && args?.name === "opencode" && opencodeInstalled) {
+        return Promise.resolve("/Users/tester/.opencode/bin/opencode");
+      }
+      if (command === "which_binary") return Promise.reject(new Error(`missing ${args?.name ?? "agent"}`));
+      if (command === "run_script") return Promise.resolve("opencode 1.2.3\n");
+      return Promise.resolve("");
+    });
+
+    const scopeKey = computed<string | null>(() => "app");
+    let panel: { onTabClosed?: (tab: { kind: string }) => void } | null = null;
+    const tabs = useMainTabs({
+      scopeKey,
+      onTabClosed: (tab) => panel?.onTabClosed?.(tab),
+    });
+
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: null,
+        hasRepos: false,
+        views: {
+          tabs,
+          modals: {
+            finishTransferredModal: vi.fn(),
+            homePath: computed(() => "/home/tester"),
+          },
+          preferences: {},
+          store: {},
+        } as unknown as MainTabViewsController,
+      },
+      global: {
+        mocks: {
+          $t: (key: string, values?: Record<string, string>) =>
+            key === "mainPanel.agentVersion"
+              ? `Version ${values?.version ?? "?"}`
+              : key === "mainPanel.agentOpenCodeName"
+                ? "OpenCode"
+                : key,
+        },
+        stubs: {
+          TaskHeader: true,
+          TerminalTabs: true,
+          MainTabBar: true,
+          ShellModal: true,
+        },
+      },
+    });
+    await flushPromises();
+    panel = wrapper.vm as unknown as { onTabClosed?: (tab: { kind: string }) => void };
+
+    const openCodeCard = () => wrapper.findAll(".agent-card")
+      .find(card => card.text().includes("OpenCode"));
+    expect(openCodeCard()?.find(".not-installed").exists()).toBe(true);
+
+    // The shell is how an agent CLI gets installed before there are repos, so
+    // closing that tab is the moment to look again.
+    const shellTabId = tabs.openTab({ kind: "shell", shellScope: "repo" });
+    await flushPromises();
+    opencodeInstalled = true;
+    tabs.closeTab(shellTabId!);
+    await flushPromises();
+
+    expect(openCodeCard()?.find(".installed").exists()).toBe(true);
   });
 
   it("shows the Antigravity install command when agy is missing", async () => {

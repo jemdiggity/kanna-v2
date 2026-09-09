@@ -95,6 +95,7 @@ describe("getShortcutGroups", () => {
 
     expect(groupMap["shortcuts.groupWorkspace"]).toEqual([
       "shortcuts.newWindow",
+      "shortcuts.closeTab",
       "shortcuts.closeWindow",
       "shortcuts.toggleSidebar",
       "shortcuts.maximize",

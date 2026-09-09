@@ -6487,6 +6487,126 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
     let _ = std::fs::remove_file(pairing_path);
 }
 
+#[tokio::test]
+async fn opening_a_desktop_view_queues_the_resolved_path_for_the_windows() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/v1/desktop/views/open")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "taskId": "task-file",
+                        "path": "./src/main.rs",
+                        "line": 12,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    // Requested, never shown: no window is known to have honoured it.
+    assert_eq!(body["requested"], serde_json::json!(true));
+    assert_eq!(body["path"], serde_json::json!("src/main.rs"));
+
+    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+    assert_eq!(batch.events.len(), 1);
+    let command = &batch.events[0]["event"];
+    assert_eq!(command["type"], serde_json::json!("desktop_view_open"));
+    assert_eq!(command["view"], serde_json::json!("file"));
+    assert_eq!(command["taskId"], serde_json::json!("task-file"));
+    // The path the desktop opens is the resolved one, not what was typed.
+    assert_eq!(command["path"], serde_json::json!("src/main.rs"));
+    assert_eq!(command["line"], serde_json::json!(12));
+}
+
+#[tokio::test]
+async fn a_desktop_view_for_an_unreachable_file_queues_nothing() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+
+    for (path, expected) in [
+        ("../outside.rs", StatusCode::BAD_REQUEST),
+        ("src/missing.rs", StatusCode::NOT_FOUND),
+    ] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/v1/desktop/views/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "taskId": "task-file", "path": path }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "path {path}");
+    }
+
+    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+    assert!(
+        batch.events.is_empty(),
+        "a refused open must not reach a window: {:?}",
+        batch.events
+    );
+}
+
+#[tokio::test]
+async fn the_desktop_drains_view_commands_through_its_loopback_lane() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+    fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/v1/desktop/views/open")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "taskId": "task-file", "path": "src/main.rs" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut request = Request::get("/v1/desktop/view-commands?timeoutSecs=1")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["waitOutcome"], serde_json::json!("events"));
+    assert_eq!(
+        body["events"][0]["event"]["path"],
+        serde_json::json!("src/main.rs")
+    );
+}
+
 const LAN_AUTH_REFUSAL: &str =
     "privileged control requires desktop loopback, a paired LAN device, or an authenticated relay";
 

@@ -41,14 +41,15 @@ describe("KeyboardShortcutsModal", () => {
       wrapper.get(`.shortcut-entry[data-column="${column}"][data-row="${row}"]`).text();
 
     expect(entryAt("1", "1")).toBe("shortcuts.groupCreateOrganize");
-    expect(entryAt("1", "10")).toBe("shortcuts.groupWorkspace");
-    expect(entryAt("1", "15")).toBe("shortcuts.groupAppHelp");
+    expect(entryAt("1", "9")).toBe("shortcuts.groupWorkspace");
+    expect(entryAt("1", "16")).toBe("shortcuts.groupAppHelp");
     expect(entryAt("2", "1")).toBe("shortcuts.groupMoveAround");
     expect(entryAt("3", "1")).toBe("shortcuts.groupOpenInspect");
-    expect(entryAt("1", "11")).toBe("shortcuts.newWindow⌘N");
-    expect(entryAt("1", "12")).toBe("shortcuts.closeWindow⌘W");
+    expect(entryAt("1", "10")).toBe("shortcuts.newWindow⌘N");
+    expect(entryAt("1", "11")).toBe("shortcuts.closeTab⌘W");
+    expect(entryAt("1", "12")).toBe("shortcuts.closeWindow⇧⌘W");
     expect(entryAt("1", "13")).toBe("shortcuts.toggleSidebar⌘B");
-    expect(entryAt("1", "16")).toBe("shortcuts.preferences⌘,");
+    expect(entryAt("1", "17")).toBe("shortcuts.preferences⌘,");
     expect(entryAt("2", "9")).toBe("shortcuts.oldestUnreadAllRepos⇧⌘U");
     expect(entryAt("2", "10")).toBe("shortcuts.oldestRead⌘R");
     expect(entryAt("2", "11")).toBe("shortcuts.oldestReadAllRepos⇧⌘R");

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
-import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb, tauriInvoke, setPreferencesOpen } from "../helpers/vue";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { pressShiftEnterInActiveTerminal } from "../helpers/terminalInput";
 import { localProcessFetch } from "@kanna/local-process-fetch";
@@ -32,13 +32,13 @@ async function setSetupState(client: typeof primary, key: string, value: unknown
 }
 
 async function signIn(client: typeof primary): Promise<string> {
-  await setSetupState(client, "showPreferencesPanel", true);
+  await setPreferencesOpen(client, true);
   await client.click(await client.waitForElement('[data-testid="preferences-account-tab"]'));
   await client.sendKeys(await client.waitForElement('[data-testid="account-email"]'), "upvote.sieve.7t@icloud.com");
   await client.sendKeys(await client.waitForElement('[data-testid="account-password"]'), "password123");
   await client.click(await client.waitForElement('[data-testid="account-sign-in"] .primary-button'));
   await client.waitForText(".prefs-panel", "upvote.sieve.7t@icloud.com", 15_000);
-  await setSetupState(client, "showPreferencesPanel", false);
+  await setPreferencesOpen(client, false);
   await setSetupState(client, "maximized", false);
   await setSetupState(client, "sidebarHidden", false);
   return await client.executeSync<string>(`

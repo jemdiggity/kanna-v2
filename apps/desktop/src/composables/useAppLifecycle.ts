@@ -42,7 +42,7 @@ type AppUpdateController = ReturnType<typeof useAppUpdate>;
 type NativeKeyboardActions = Pick<
   KeyboardActions,
   | "newWindow"
-  | "closeWindow"
+  | "closeTabOrWindow"
   | "navigateUp"
   | "navigateDown"
   | "navigateRepoUp"
@@ -59,16 +59,16 @@ interface UseAppLifecycleOptions {
   homePath: Ref<string>;
   initializeDesktopCloudAuth: () => Promise<void>;
   initializeDesktopLanTaskSync: () => void;
-  openFilePreview: (
-    filePath: string,
-    initialLine: number | undefined,
-    fromPicker: boolean,
-    fromTree?: boolean,
-    remoteContent?: string,
-  ) => void;
+  openFilePreview: (filePath: string, initialLine?: number, remoteContent?: string) => void;
   openImageUrlPreview: (imageUrl: string) => void;
+  /**
+   * Honour a `kanna_open_file` request from an agent: put the file in the
+   * named task's own tab set. It never changes what this window has selected.
+   */
+  openTaskFileView: (taskId: string, filePath: string, line?: number) => void;
   preferences: AppPreferences;
   remoteTaskDiagnostics: Ref<unknown>;
+  restoreMainTabs: () => Promise<void>;
   restoreSidebarWidth: () => Promise<void>;
   restoreTransferredModal: () => void;
   shortcutsStartFull: Ref<boolean>;
@@ -84,6 +84,29 @@ interface UseAppLifecycleOptions {
 
 function eventPayload(event: unknown): unknown {
   return (event as { payload?: unknown })?.payload ?? event;
+}
+
+interface DesktopViewOpenCommand {
+  taskId: string;
+  path: string;
+  line?: number;
+}
+
+function parseDesktopViewOpenEvent(payload: unknown): DesktopViewOpenCommand {
+  const command = payload as Partial<DesktopViewOpenCommand> & { view?: string } | null;
+  if (
+    !command
+    || typeof command.taskId !== "string"
+    || typeof command.path !== "string"
+    || (command.view !== undefined && command.view !== "file")
+  ) {
+    throw new Error("malformed desktop view open command");
+  }
+  return {
+    taskId: command.taskId,
+    path: command.path,
+    line: typeof command.line === "number" ? command.line : undefined,
+  };
 }
 
 function focusAgentTerminal() {
@@ -105,8 +128,10 @@ export function useAppLifecycle({
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
+  openTaskFileView,
   preferences,
   remoteTaskDiagnostics,
+  restoreMainTabs,
   restoreSidebarWidth,
   restoreTransferredModal,
   shortcutsStartFull,
@@ -213,7 +238,7 @@ export function useAppLifecycle({
         const content = await invoke<string>("read_text_file", {
           path: detail.localAbsolutePath,
         });
-        openFilePreview(detail.path, detail.line, false, false, content);
+        openFilePreview(detail.path, detail.line, content);
       } catch (error: unknown) {
         console.warn("[App] local mentioned file is not text-renderable; opening with the OS:", error);
         try {
@@ -227,7 +252,7 @@ export function useAppLifecycle({
       }
       return;
     }
-    openFilePreview(detail.path, detail.line, false, false, detail.remoteContent);
+    openFilePreview(detail.path, detail.line, detail.remoteContent);
   }
   const handleFileLinkActivateEvent = (event: Event) => {
     void handleFileLinkActivate(event);
@@ -315,6 +340,10 @@ export function useAppLifecycle({
 
     await restoreSidebarWidth();
     await store.init(db);
+    // After the store holds this desktop's tasks and repositories, so a stored
+    // tab set whose subject was closed while the app was shut down is left
+    // behind rather than restored into a window with nothing to show it for.
+    await restoreMainTabs();
     restoreTransferredModal();
     preferences.appTheme = normalizeAppThemePreference(store.appTheme);
     preferences.codeTheme = normalizeCodeThemePreference(store.codeTheme);
@@ -338,7 +367,7 @@ export function useAppLifecycle({
 
     try {
       const unlistenNativeCloseWindow = await listenCurrentWebviewWindow(WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT, async () => {
-        await getKeyboardActions().closeWindow();
+        await getKeyboardActions().closeTabOrWindow();
       });
       appUnlisteners.push(unlistenNativeCloseWindow);
     } catch (e: unknown) {
@@ -365,6 +394,20 @@ export function useAppLifecycle({
       getKeyboardActions().navigateRepoDown,
       "navigate-repo-down",
     );
+
+    try {
+      const unlistenDesktopViewOpen = await listen("desktop-view-open", (event: unknown) => {
+        try {
+          const command = parseDesktopViewOpenEvent(eventPayload(event));
+          openTaskFileView(command.taskId, command.path, command.line);
+        } catch (e: unknown) {
+          console.error("[App] failed to handle desktop view open command:", e);
+        }
+      });
+      appUnlisteners.push(unlistenDesktopViewOpen);
+    } catch (e: unknown) {
+      console.error("[App] desktop-view-open listener registration failed:", e);
+    }
 
     try {
       const unlistenPairingStarted = await listen("pairing-started", async (event: unknown) => {

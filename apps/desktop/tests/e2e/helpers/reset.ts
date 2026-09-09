@@ -30,24 +30,17 @@ const IMPORT_REPO_INPUT_SELECTOR = ".modal-overlay .text-input";
 const IMPORT_REPO_READY_SELECTOR = ".modal-overlay .resolved-url";
 const IMPORT_REPO_NAME_CHANGE_SELECTOR = ".modal-overlay .repo-name-change";
 const IMPORT_REPO_SUBMIT_SELECTOR = ".modal-overlay .btn-primary:not(:disabled)";
+// Only dialogs are modals now; the views a test may have left open live in
+// the main content area's tabs and are cleared separately below.
 const TRANSIENT_MODAL_REFS = [
   "showCommandPalette",
   "showShortcutsModal",
   "showPeerPicker",
   "showFilePickerModal",
   "filePickerHidden",
-  "showFilePreviewModal",
-  "previewHidden",
-  "showShellModal",
-  "showDiffModal",
-  "showAnalyticsModal",
-  "showCommitGraphModal",
-  "showTreeExplorer",
   "showNewTaskModal",
   "showAddRepoModal",
   "showBlockerSelect",
-  "showPreferencesPanel",
-  "showImageUrlPreviewModal",
 ] as const;
 
 function isVueCallError(result: unknown): result is { __error: string } {
@@ -141,6 +134,12 @@ async function importRepoThroughUi(
        else if (owner && key in owner) owner[key] = false;
      };
      for (const key of ${JSON.stringify(TRANSIENT_MODAL_REFS)}) close(key);
+     // Content views are tabs, not modal flags, so they are closed through
+     // the tab controller rather than by clearing a ref.
+     const tabs = ctx?.mainTabs;
+     if (tabs) {
+       for (const tab of [...(tabs.tabs?.value ?? [])]) tabs.closeTab(tab.id);
+     }
      const maximizedOwner = holder("maximizedModal");
      const maximized = maximizedOwner?.maximizedModal;
      if (maximized?.__v_isRef) maximized.value = null;

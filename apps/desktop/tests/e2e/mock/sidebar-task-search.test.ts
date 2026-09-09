@@ -126,8 +126,7 @@ describe("sidebar task search", () => {
         "2026-04-13T10:00:00.000Z",
       ],
     );
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
+    await client.reload();
     await client.waitForText(".sidebar", "Sidebar visibility fix");
     await client.waitForText(".sidebar", "Merge queue polish");
   });

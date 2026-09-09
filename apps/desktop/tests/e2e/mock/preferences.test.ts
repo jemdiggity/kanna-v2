@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
+import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase } from "../helpers/reset";
 import { tauriInvoke } from "../helpers/vue";
@@ -7,6 +7,14 @@ import { tauriInvoke } from "../helpers/vue";
 async function activeTabLabel(client: WebDriverClient): Promise<string> {
   return client.executeSync<string>(
     `return document.querySelector(".prefs-panel .tab.active")?.textContent?.trim() ?? "";`
+  );
+}
+
+async function preferencesTabCount(client: WebDriverClient): Promise<number> {
+  return client.executeSync<number>(
+    `const tabs = window.__KANNA_E2E__?.setupState?.mainTabs;
+     if (!tabs) throw new Error("main tabs are unavailable on setupState");
+     return (tabs.tabs?.value ?? []).filter((tab) => tab.kind === "preferences").length;`
   );
 }
 
@@ -48,17 +56,26 @@ describe("preferences", () => {
   });
 
   it("closes preferences panel", async () => {
-    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
   });
 
-  it("toggles the preferences panel closed from the keyboard shortcut", async () => {
+  // Preferences is a tab now, so its shortcut opens rather than toggles: a
+  // second press brings the same tab forward instead of closing the one the
+  // owner just asked for. Escape is what closes it.
+  it("keeps one preferences tab open when the shortcut is pressed again", async () => {
     await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
     const panel = await client.waitForElement(".prefs-panel", 2_000);
     expect(panel).toBeTruthy();
 
     await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
+    await client.waitForElement(".prefs-panel", 2_000);
+    expect(await client.findElements(".prefs-panel")).toHaveLength(1);
+    expect(await preferencesTabCount(client)).toBe(1);
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
+    expect(await preferencesTabCount(client)).toBe(0);
   });
 
   it("shows default settings in the UI", async () => {
@@ -75,7 +92,7 @@ describe("preferences", () => {
   });
 
   it("shows the current desktop ID on the Account tab", async () => {
-    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
 
     const status = await tauriInvoke(client, "mobile_server_status") as { desktopId?: string };
@@ -93,7 +110,7 @@ describe("preferences", () => {
   });
 
   it("shows the mobile access pairing panel on the Mobile tab", async () => {
-    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
 
     await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
@@ -121,7 +138,7 @@ describe("preferences", () => {
   });
 
   it("persists app and terminal code theme preferences", async () => {
-    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
 
     await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
@@ -149,7 +166,7 @@ describe("preferences", () => {
     `);
     expect(attrs).toEqual({ theme: "light", codeTheme: "dark" });
 
-    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
     await client.waitForNoElement(".prefs-panel", 2_000);
     await client.deleteSession();
     await client.createSession();

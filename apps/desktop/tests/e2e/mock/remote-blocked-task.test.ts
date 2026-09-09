@@ -124,8 +124,7 @@ describe("remote blocked task journey", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
+    await client.reload();
   });
 
   afterAll(async () => {

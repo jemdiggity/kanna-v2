@@ -120,12 +120,12 @@ async function shellModalDiagnostics(
 }
 
 async function closeShellModal(client: WebDriverClient): Promise<void> {
-  await client.executeAsync(
-    `const cb = arguments[arguments.length - 1];
-     const ctx = window.__KANNA_E2E__?.setupState;
-     Promise.resolve(ctx?.onShellClose?.())
-       .then(() => cb("ok"))
-       .catch((error) => cb("err:" + String(error?.message ?? error)));`,
+  await client.executeSync(
+    `const tabs = window.__KANNA_E2E__?.setupState?.mainTabs;
+     for (const tab of [...(tabs?.tabs?.value ?? [])]) {
+       if (tab.kind === "shell") tabs.closeTab(tab.id);
+     }
+     return true;`,
   ).catch(() => undefined);
 }
 

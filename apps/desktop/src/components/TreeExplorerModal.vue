@@ -5,12 +5,14 @@ import {
   type RemoteDirectoryLoader,
   type TreeNode,
 } from "../composables/useTreeExplorer";
-import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
-import { useModalZIndex } from "../composables/useModalZIndex";
+import { registerContextShortcuts } from "../composables/useShortcutContext";
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
 import { useModalTearOff } from "../composables/useModalTearOff";
 import type { RemoteTaskViewTransport } from "../modalTearOff";
 
-useShortcutContext("tree");
 registerContextShortcuts("tree", [
   { label: "Filter", display: "/", groupKey: "shortcuts.groupSearch" },
   { label: "Clear filter", display: "Esc", groupKey: "shortcuts.groupSearch" },
@@ -23,8 +25,6 @@ registerContextShortcuts("tree", [
   { label: "Close", display: "Esc", groupKey: "shortcuts.groupActions" },
 ]);
 
-const { zIndex, bringToFront } = useModalZIndex();
-
 function dismiss(): boolean {
   if (filtering.value || filterText.value) {
     filterText.value = "";
@@ -34,9 +34,7 @@ function dismiss(): boolean {
   return true;
 }
 
-defineExpose({ zIndex, bringToFront, dismiss });
-
-const props = defineProps<{
+const props = defineProps<EmbeddableViewProps & {
   worktreePath: string;
   repoRoot: string;
   homePath?: string;
@@ -48,6 +46,16 @@ const props = defineProps<{
   remoteTaskId?: string;
   remoteTransport?: RemoteTaskViewTransport;
 }>();
+
+const {
+  zIndex,
+  bringToFront,
+  overlayClass,
+  overlayStyle,
+  dismissOnScrimClick,
+  focusWhenBrought,
+} = useEmbeddableView(props, { context: "tree" });
+defineExpose({ zIndex, bringToFront, dismiss });
 
 const rootLabel = computed(() => {
   if (props.homePath && props.worktreePath === props.homePath) return "~";
@@ -61,6 +69,7 @@ const emit = defineEmits<{
 }>();
 
 const modalRef = ref<HTMLElement | null>(null);
+focusWhenBrought(modalRef);
 const currentColRef = ref<HTMLElement | null>(null);
 
 const tearOff = useModalTearOff({
@@ -219,10 +228,9 @@ function isDimmed(entry: TreeNode): boolean {
 <template>
   <div
     v-show="!suspended"
-    class="modal-overlay"
-    :class="{ maximized, standalone }"
-    :style="{ zIndex }"
-    @click.self="emit('close')"
+    :class="[{ maximized, standalone }, overlayClass]"
+    :style="overlayStyle"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
   >
     <div
       ref="modalRef"
@@ -386,6 +394,14 @@ function isDimmed(entry: TreeNode): boolean {
   box-shadow: none;
 }
 
+.embedded .tree-modal {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .modal-overlay.standalone {
   background: none;
   align-items: stretch;
@@ -464,6 +480,17 @@ function isDimmed(entry: TreeNode): boolean {
   position: relative;
   display: flex;
   flex-direction: column;
+}
+
+/*
+ * As a tab the explorer is far wider than the 780px box it was drawn for, and
+ * three equal columns stretched a directory listing across the whole panel.
+ * Hold the browsing columns at a readable width — the way a column browser
+ * does — and let the preview take the slack.
+ */
+.embedded .col-parent,
+.embedded .col-current {
+  flex: 0 0 clamp(220px, 22vw, 340px);
 }
 
 .miller-col + .miller-col {

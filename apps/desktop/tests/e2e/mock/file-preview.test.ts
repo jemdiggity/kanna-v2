@@ -6,7 +6,7 @@ import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
-import { callVueMethod, execDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, tauriInvoke, closeMainTabsScript } from "../helpers/vue";
 
 describe("file preview", () => {
   const client = new WebDriverClient();
@@ -72,21 +72,43 @@ describe("file preview", () => {
     }));
   }
 
+  // Several files can be open at once now, so these read the view that is in
+  // front rather than the first one in the DOM.
+  const VISIBLE_PREVIEW = `(
+    Array.from(document.querySelectorAll(".preview-modal")).find((view) => {
+      const rect = view.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    })
+  )`;
+
   async function previewedFilePath(): Promise<string> {
-    const element = await client.waitForElement(".preview-modal .file-path", 5000);
-    return await client.getText(element);
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const path = await client.executeSync<string>(
+        `const overlay = ${VISIBLE_PREVIEW};
+         return overlay?.querySelector(".file-path")?.textContent?.trim() ?? "";`,
+      );
+      if (path) return path;
+      await sleep(150);
+    }
+    const diagnostic = await client.executeSync<string>(
+      `return JSON.stringify({
+         previews: Array.from(document.querySelectorAll(".preview-modal")).map((view) => {
+           const rect = view.getBoundingClientRect();
+           return { w: rect.width, h: rect.height, path: view.querySelector(".file-path")?.textContent };
+         }),
+         tabs: Array.from(document.querySelectorAll('[data-testid^="main-tab-"]'))
+           .map((tab) => tab.getAttribute("data-testid")),
+         panel: (() => { const p = document.querySelector(".main-panel")?.getBoundingClientRect();
+           return p ? { w: p.width, h: p.height } : null; })(),
+       });`,
+    );
+    throw new Error(`no file preview is in front: ${diagnostic}`);
   }
 
   async function isPreviewVisible(): Promise<boolean> {
     return await client.executeSync<boolean>(
-      `const modal = document.querySelector(".preview-modal");
-       if (!modal) return false;
-       const rect = modal.getBoundingClientRect();
-       const style = getComputedStyle(modal);
-       return style.display !== "none" &&
-         style.visibility !== "hidden" &&
-         rect.width > 0 &&
-         rect.height > 0;`,
+      `return Boolean(${VISIBLE_PREVIEW});`,
     );
   }
 
@@ -157,6 +179,47 @@ describe("file preview", () => {
     );
   }
 
+  async function filterPickerTo(query: string): Promise<void> {
+    await client.executeSync(
+      `const input = document.querySelector(".picker-input");
+       if (!(input instanceof HTMLInputElement)) throw new Error("picker input missing");
+       input.value = ${JSON.stringify(query)};
+       input.dispatchEvent(new Event("input", { bubbles: true }));
+       return true;`,
+    );
+  }
+
+  async function openFileTabPaths(): Promise<string[]> {
+    return await client.executeSync<string[]>(
+      `return Array.from(document.querySelectorAll('[data-testid^="main-tab-file:"]'))
+        .map((tab) => (tab.getAttribute("data-testid") || "").replace(/^main-tab-file:/, ""));`
+    );
+  }
+
+  async function clickMainTab(id: string): Promise<void> {
+    await client.executeSync(
+      `document.querySelector('[data-testid="main-tab-' + ${JSON.stringify(id)} + '"]')?.click();
+       return true;`,
+    );
+  }
+
+  async function frontModeBadgeText(): Promise<string> {
+    return await client.executeSync<string>(
+      `const overlay = ${VISIBLE_PREVIEW};
+       return overlay?.querySelector(".mode-badge")?.textContent?.trim() ?? "";`,
+    );
+  }
+
+  async function clickFrontModeBadge(): Promise<void> {
+    await client.executeSync(
+      `const overlay = ${VISIBLE_PREVIEW};
+       const badge = overlay?.querySelector(".mode-badge");
+       if (!(badge instanceof HTMLElement)) throw new Error("no mode badge in the front preview");
+       badge.click();
+       return true;`,
+    );
+  }
+
   async function waitForRenderedMarkdown(): Promise<void> {
     await client.waitForElement(".preview-content.markdown-rendered h1", 5000);
   }
@@ -210,9 +273,15 @@ describe("file preview", () => {
     throw new Error(`timed out selecting ${taskId}; selected task was ${JSON.stringify(selectedTaskId)}`);
   }
 
-  // The picker renders at most 100 entries for an empty query, so a miss has to
-  // report what it actually listed before it can be told from a slow load.
+  /**
+   * The picker lists only its first 100 paths until it is filtered, and the
+   * scroll fixtures push most of the repo past that cut, so narrow to the
+   * wanted file rather than scanning an arbitrary window — and when it still
+   * misses, report what the picker actually listed so a genuine absence can
+   * be told from a slow load.
+   */
   async function pickFileFromPicker(path: string): Promise<void> {
+    await filterPickerTo(path);
     const element = await client.waitForText(".file-item", path, 15000)
       .catch(async (error: unknown) => {
         const listed = await client.executeSync<{
@@ -247,58 +316,59 @@ describe("file preview", () => {
     await client.click(element);
   }
 
-  it("opens the picker from preview, selects another file, and recalls it with Option+Command+P", async () => {
+  it("opens each picked file as its own tab and recalls one with Option+Command+P", async () => {
     await pressKey("p", { meta: true });
     await client.waitForElement(".picker-modal", 5000);
 
     await pickFileFromPicker("src/index.txt");
-
     expect(await previewedFilePath()).toBe("src/index.txt");
-
-    await pressKey("p", { meta: true });
-    await client.waitForElement(".picker-modal", 5000);
-
-    await pickFileFromPicker("README.md");
-
-    expect(await previewedFilePath()).toBe("README.md");
+    // The picker hands the file over and leaves: it is a launcher for the
+    // view, not a layer under it.
     await waitForPickerHidden();
 
     await pressKey("p", { meta: true });
     await waitForPickerVisible();
-
-    await pressKey("Escape");
-    await client.waitForNoElement(".picker-modal", 5000);
+    await pickFileFromPicker("README.md");
     expect(await previewedFilePath()).toBe("README.md");
+    await waitForPickerHidden();
 
-    await pressKey("Escape");
-    await client.waitForNoElement(".preview-modal", 5000);
-    await client.waitForNoElement(".picker-modal", 5000);
-
-    await pressKey("π", { meta: true, alt: true, code: "KeyP" });
-    expect(await previewedFilePath()).toBe("README.md");
+    // Both files are open at once, which the single preview modal could not do.
+    expect(await openFileTabPaths()).toEqual(["src/index.txt", "README.md"]);
 
     // Markdown previews open rendered (`DEFAULT_MARKDOWN_PREVIEW_MODE`), so
     // toggle away and back to leave the badge on a mode the user chose.
-    const modeBadge = await client.waitForElement(".preview-modal .mode-badge", 5000);
     await waitForRenderedMarkdown();
-    expect(await client.getText(modeBadge)).toBe("Rendered");
-    await client.click(modeBadge);
+    expect(await frontModeBadgeText()).toBe("Rendered");
+    await clickFrontModeBadge();
     await client.waitForNoElement(".preview-content.markdown-rendered", 5000);
-    expect(await client.getText(modeBadge)).toBe("Raw");
-    await client.click(modeBadge);
+    expect(await frontModeBadgeText()).toBe("Raw");
+    await clickFrontModeBadge();
     await waitForRenderedMarkdown();
-    expect(await client.getText(modeBadge)).toBe("Rendered");
+    expect(await frontModeBadgeText()).toBe("Rendered");
 
-    await pressKey("π", { meta: true, alt: true, code: "KeyP" });
-    await waitForPreviewHidden();
-
-    await pressKey("π", { meta: true, alt: true, code: "KeyP" });
-    await waitForPreviewVisible();
+    // Bringing another tab forward and coming back is what hiding and
+    // reshowing the one modal used to be: the view keeps the chosen mode.
+    await clickMainTab("file:src/index.txt");
+    expect(await previewedFilePath()).toBe("src/index.txt");
+    await clickMainTab("file:README.md");
     expect(await previewedFilePath()).toBe("README.md");
-    const restoredModeBadge = await client.waitForElement(".preview-modal .mode-badge", 5000);
-    expect(await client.getText(restoredModeBadge)).toBe("Rendered");
+    expect(await frontModeBadgeText()).toBe("Rendered");
     await waitForRenderedMarkdown();
+
+    // ⌥⌘P brings a file forward; it never closes one.
+    await pressKey("d", { meta: true });
+    await waitForPreviewHidden();
+    await pressKey("π", { meta: true, alt: true, code: "KeyP" });
+    expect(await openFileTabPaths()).toEqual(["src/index.txt", "README.md"]);
+    await waitForPreviewVisible();
+
+    // Recall with nothing open is the next test's subject, which states its
+    // selection explicitly; this one just leaves a clean tab set behind.
+    await client.executeSync(closeMainTabsScript(["file", "diff"]));
+    await sleep(300);
+    expect(await openFileTabPaths()).toEqual([]);
   });
+
   it("keeps file preview recall scoped to the selected task", async () => {
     await pressKey("Escape");
     await client.waitForNoElement(".picker-modal", 5000);
@@ -363,7 +433,10 @@ describe("file preview", () => {
     expect(await previewedFilePath()).toBe("README.md");
   });
 
-  it("preserves picker scroll position while preview hides and resumes it", async () => {
+  it("keeps a file tab's scroll position while another tab is in front", async () => {
+    // Earlier tests leave their own file tabs open — that is the point of
+    // tabs — so this one starts from a clean tab set.
+    await client.executeSync(closeMainTabsScript(["file", "diff"]));
     await pressKey("p", { meta: true });
     await waitForPickerVisible();
 
@@ -381,22 +454,26 @@ describe("file preview", () => {
     await waitForPreviewVisible();
     await waitForPickerHidden();
 
-    await client.executeSync(
-      `const overlay = document.querySelector(".preview-modal")?.parentElement;
-       if (!(overlay instanceof HTMLElement)) {
-         throw new Error("preview overlay was not rendered");
-       }
-       overlay.dispatchEvent(new MouseEvent("click", {
-         bubbles: true,
-         cancelable: true,
-         view: window,
-       }));`,
+    const scrolled = await client.executeSync<number>(
+      `const content = ${VISIBLE_PREVIEW}?.querySelector(".preview-content");
+       if (!(content instanceof HTMLElement)) return -1;
+       content.scrollTop = 64;
+       return content.scrollTop;`,
     );
+
+    await pressKey("d", { meta: true });
     await waitForPreviewHidden();
-    await waitForPickerVisible();
-    expect(await pickerScrollTop()).toBe(320);
+    await clickMainTab("file:docs/scroll/entry-30.md");
+    await waitForPreviewVisible();
+
+    // The view was hidden, never rebuilt, so the reader comes back to where
+    // they were rather than to the top of the file.
+    expect(await client.executeSync<number>(
+      `const content = ${VISIBLE_PREVIEW}?.querySelector(".preview-content");
+       return content instanceof HTMLElement ? content.scrollTop : -1;`,
+    )).toBe(scrolled);
 
     await pressKey("Escape");
-    await client.waitForNoElement(".picker-modal", 5000);
+    await client.waitForNoElement('[data-testid="main-tab-file:docs/scroll/entry-30.md"]', 5000);
   });
 });

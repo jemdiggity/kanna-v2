@@ -300,14 +300,10 @@ describe("keyboard shortcuts", () => {
        ${CTX_SCRIPT}.showAddRepoModal = false;
        ${CTX_SCRIPT}.showShortcutsModal = false;
        ${CTX_SCRIPT}.showFilePickerModal = false;
-       ${CTX_SCRIPT}.showFilePreviewModal = false;
-       ${CTX_SCRIPT}.showDiffModal = false;
-       ${CTX_SCRIPT}.showTreeExplorer = false;
-       ${CTX_SCRIPT}.showShellModal = false;
-       ${CTX_SCRIPT}.showAnalyticsModal = false;
+       for (const tab of [...(${CTX_SCRIPT}.mainTabs?.tabs?.value ?? [])]) {
+         ${CTX_SCRIPT}.mainTabs.closeTab(tab.id);
+       }
        ${CTX_SCRIPT}.showBlockerSelect = false;
-       ${CTX_SCRIPT}.showPreferencesPanel = false;
-       ${CTX_SCRIPT}.showCommitGraphModal = false;
        ${CTX_SCRIPT}.showPeerPicker = false;`,
     );
 
@@ -1256,7 +1252,9 @@ describe("keyboard shortcuts", () => {
     await client.executeSync(
       `${CTX_SCRIPT}.showShortcutsModal = false;
        ${CTX_SCRIPT}.showFilePickerModal = false;
-       ${CTX_SCRIPT}.showFilePreviewModal = false;`,
+       for (const tab of [...(${CTX_SCRIPT}.mainTabs?.tabs?.value ?? [])]) {
+         if (tab.kind === "file") ${CTX_SCRIPT}.mainTabs.closeTab(tab.id);
+       }`,
     );
 
     await pressKey("p", { meta: true });
@@ -1309,29 +1307,34 @@ describe("keyboard shortcuts", () => {
     await client.waitForNoElement(".palette-modal", 2000);
   });
 
-  it("Shift+Cmd+Enter maximizes the tree explorer", async () => {
+  it("Shift+Cmd+Enter maximizes the main area around the tree explorer tab", async () => {
     await ensureRepoImported();
 
     await pressKey("E", { meta: true, shift: true });
     await client.waitForElement(".tree-modal", 2000);
     await sleep(300);
 
-    const maximizedBefore = await client.executeSync<boolean>(
-      `const modal = document.querySelector(".tree-modal");
-       return modal?.parentElement?.classList.contains("maximized") ?? false;`
+    // Maximizing gives the whole main area to the active tab by standing the
+    // sidebar down; the view itself is not resized into an overlay.
+    const sidebarVisible = () => client.executeSync<boolean>(
+      `return Boolean(document.querySelector('[data-testid="sidebar-shell"]'));`
     );
-    expect(maximizedBefore).toBe(false);
+    expect(await sidebarVisible()).toBe(true);
 
     await pressKey("Enter", { meta: true, shift: true });
     await sleep(300);
 
-    const maximizedAfter = await client.executeSync<boolean>(
-      `const modal = document.querySelector(".tree-modal");
-       return modal?.parentElement?.classList.contains("maximized") ?? false;`
-    );
-    expect(maximizedAfter).toBe(true);
+    expect(await sidebarVisible()).toBe(false);
+    expect(await client.executeSync<boolean>(
+      `return Boolean(document.querySelector(".tree-modal"));`
+    )).toBe(true);
 
-    await client.executeSync(`${CTX_SCRIPT}.showTreeExplorer = false; ${CTX_SCRIPT}.maximizedModal = null;`);
+    await client.executeSync(
+      `for (const tab of [...(${CTX_SCRIPT}.mainTabs?.tabs?.value ?? [])]) {
+         if (tab.kind === "tree") ${CTX_SCRIPT}.mainTabs.closeTab(tab.id);
+       }
+       ${CTX_SCRIPT}.maximizedModal = null;`,
+    );
     await client.waitForNoElement(".tree-modal", 2000);
   });
 });

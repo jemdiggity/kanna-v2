@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, toRef, type Ref } from "vue";
+import { computed, inject, toRef, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { type BlockerDisplayItem, type DbHandle } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
@@ -7,6 +7,7 @@ import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import AppModalLayer from "./components/AppModalLayer.vue";
 import type { AppModalLayerController } from "./components/AppModalLayer.types";
+import type { MainTabViewsController } from "./components/MainPanel.types";
 import { type KeyboardActions } from "./composables/useKeyboardShortcuts";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
 import { useRepoCommands } from "./composables/useRepoCommands";
@@ -15,6 +16,13 @@ import { useAppUpdate } from "./composables/useAppUpdate";
 import { useAppCloudWorkspace } from "./composables/useAppCloudWorkspace";
 import { useAppLifecycle } from "./composables/useAppLifecycle";
 import { useAppModals } from "./composables/useAppModals";
+import {
+  mainTabScopeKeyForApp,
+  mainTabScopeKeyForRepo,
+  mainTabScopeKeyForTask,
+  useMainTabs,
+} from "./composables/useMainTabs";
+import { useMainTabPersistence } from "./composables/useMainTabPersistence";
 import { useAppPreferences } from "./composables/useAppPreferences";
 import { useAppTaskTransfer } from "./composables/useAppTaskTransfer";
 import { useTransferFailureToasts } from "./composables/useTransferFailureToasts";
@@ -160,7 +168,84 @@ defineExpose({
   refreshLanTasks,
 });
 
-const appModals = useAppModals({ isMobile, store, windowWorkspace, selectedWorkspaceTask });
+// Tabs belong to the task the main panel is actually showing — the same slot
+// that decides what the agent tab renders — so the tab bar and the views its
+// shortcuts open can never disagree about which task they belong to. With no
+// task on screen the repository owns the tab set instead: a commit graph or a
+// repo-root shell is the repository's, not whichever task happened to be
+// selected when it was opened.
+const mainTabScopeKey = computed(() => {
+  const task = mainPanelUiSlot.value?.task;
+  if (task) return mainTabScopeKeyForTask(task.id);
+  const repoId = selectedCloudRepoId.value ?? store.selectedRepoId;
+  return repoId ? mainTabScopeKeyForRepo(repoId) : mainTabScopeKeyForApp();
+});
+
+/**
+ * An agent asked this desktop to show a file. It lands in that task's own tab
+ * set, whether or not this window is currently on that task: the operator's
+ * selection is theirs, and the tab is simply waiting when they look.
+ */
+function openTaskFileView(taskId: string, filePath: string, line?: number): void {
+  mainTabs.openTabInScope(mainTabScopeKeyForTask(taskId), {
+    kind: "file",
+    filePath,
+    initialLine: line,
+  });
+}
+const mainTabs = useMainTabs({
+  scopeKey: mainTabScopeKey,
+  onTabClosed: (tab) => {
+    // A torn-off window restored its view from a tear-off context; closing
+    // that view is what tells the window it came from to stop counting it.
+    if (tab.kind === "tree" || tab.kind === "diff") {
+      appModals.finishTransferredModal(tab.kind);
+    }
+    mainPanelRef.value?.onTabClosed?.(tab);
+  },
+});
+/**
+ * Tab sets outlive the app the way the reader expects them to: reopen the app
+ * and a task is showing the views it was showing. A scope whose task or
+ * repository is gone is left behind at startup, when the snapshot can be read
+ * as the whole picture — nothing drops a scope while the app runs, because
+ * `store.items` is replaced whole by every refresh and a task missing from one
+ * of them has not necessarily gone anywhere.
+ *
+ * This is window-local UI state, so it is kept in the window's own storage
+ * rather than in a desktop setting. A settings write publishes a state change
+ * to every window and every client of the server, which is the wrong weight
+ * for something that changes on each keystroke — and it was observable, not
+ * just wasteful: the reload it triggers reconciles selection, so opening a tab
+ * could pull a deselected task back onto the screen. Keying by window also
+ * keeps a tear-off, which opens on the view it was torn off with, from
+ * inheriting the main window's tabs.
+ */
+const mainTabsStorageKey = `kanna.mainTabs.${windowWorkspace.bootstrap.windowId}`;
+const mainTabPersistence = useMainTabPersistence({
+  tabs: mainTabs,
+  openTaskIds: computed(() => store.items.map((item) => item.id)),
+  openRepoIds: computed(() => store.repos.map((repo) => repo.id)),
+  readStorage: (key) => {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (error: unknown) {
+      console.warn("[main-tabs] window storage is unavailable:", error);
+      return null;
+    }
+  },
+  writeStorage: async (key, value) => {
+    window.localStorage.setItem(key, value);
+  },
+  storageKey: mainTabsStorageKey,
+});
+const appModals = useAppModals({
+  isMobile,
+  store,
+  windowWorkspace,
+  selectedWorkspaceTask,
+  mainTabs,
+});
 const {
   showNewTaskModal,
   availableWorkflows,
@@ -174,35 +259,16 @@ const {
   shortcutsStartFull,
   shortcutsContext,
   showFilePickerModal,
-  filePickerHidden,
-  showFilePreviewModal,
-  previewHidden,
-  previewFromPicker,
-  previewFromTree,
-  showDiffModal,
-  showTreeExplorer,
   homePath,
-  showShellModal,
-  shellRepoRoot,
   showCommandPalette,
-  showAnalyticsModal,
   showBlockerSelect,
   blockerSelectMode,
   showPeerPicker,
-  showPreferencesPanel,
   sidebarHidden,
   maximizedModal,
   maximized,
   sidebarRef,
   mainPanelRef,
-  shellModalRef,
-  diffModalRef,
-  showCommitGraphModal,
-  commitGraphModalRef,
-  treeExplorerRef,
-  filePickerRef,
-  filePreviewRef,
-  preferencesRef,
   sidebarShellStyle,
   canResizeSidebar,
   stopSidebarResize,
@@ -210,16 +276,22 @@ const {
   restoreSidebarWidth,
   restoreTransferredModal,
   currentShortcutContext,
-  onShellClose,
-  closeDiffModal,
-  closeTreeExplorer,
-  closeFileFlow,
   closeFilePicker,
   showFilePickerOnTop,
   openFilePreview,
   openImageUrlPreview,
   getCurrentPreviewRecall,
 } = appModals;
+// Maximizing is a property of the main content area, so it cannot outlive
+// having something in it: closing the last tab of a scope with no agent
+// session would otherwise leave a hidden sidebar over an empty panel.
+watch(
+  () => mainTabs.activeTabId.value,
+  (activeTabId) => {
+    if (!activeTabId) maximizedModal.value = null;
+  },
+);
+
 // A transfer that fails is server-side news now, so the window learns about it
 // from the snapshot rather than from a call that threw.
 useTransferFailureToasts(
@@ -356,6 +428,13 @@ const mainPanelTaskIsBlocked = computed(() =>
     : currentTaskIsBlocked.value,
 );
 
+const mainTabViews: MainTabViewsController = {
+  tabs: mainTabs,
+  modals: appModals,
+  preferences: appPreferences,
+  store,
+};
+
 let keyboardActions = {} as KeyboardActions;
 const {
   fatalInitializationError,
@@ -373,8 +452,10 @@ const {
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
+  openTaskFileView,
   preferences,
   remoteTaskDiagnostics,
+  restoreMainTabs: mainTabPersistence.hydrate,
   restoreSidebarWidth,
   restoreTransferredModal,
   shortcutsStartFull,
@@ -396,6 +477,8 @@ const appKeyboardActions = useAppKeyboardActions({
   selectedWorkspaceTask,
   selectedWorkspaceTaskBlocked: selectedRemoteTaskIsBlocked,
   currentShortcutContext,
+  mainTabs,
+  mainPanelRef,
   showNewTaskModal,
   showAddRepoModal,
   addRepoInitialTab,
@@ -403,37 +486,16 @@ const appKeyboardActions = useAppKeyboardActions({
   shortcutsStartFull,
   shortcutsContext,
   showFilePickerModal,
-  filePickerHidden,
-  showFilePreviewModal,
-  previewHidden,
-  previewFromPicker,
-  previewFromTree,
-  showDiffModal,
-  showTreeExplorer,
-  showShellModal,
-  shellRepoRoot,
   showCommandPalette,
-  showAnalyticsModal,
-  showCommitGraphModal,
   showPeerPicker,
-  showPreferencesPanel,
   maximizedModal,
   sidebarHidden,
   sidebarRef,
-  shellModalRef,
-  diffModalRef,
-  commitGraphModalRef,
-  treeExplorerRef,
-  filePickerRef,
-  filePreviewRef,
-  preferencesRef,
   openNewTaskModal,
   requestCloseCurrentWindow,
   showFilePickerOnTop,
   getCurrentPreviewRecall,
   openFilePreview,
-  closeTreeExplorer,
-  closeDiffModal,
   advanceSelectedRemoteWorkspaceTask,
   closeSelectedWorkspaceTask,
   navigateItems,
@@ -444,8 +506,6 @@ const appKeyboardActions = useAppKeyboardActions({
   navigateRepos,
   closePeerPicker,
   closeFilePicker,
-  closeFileFlow,
-  onShellClose,
   scanRepoCommands,
   handleBlockTask,
   handleEditBlockedTask,
@@ -519,6 +579,7 @@ const modalLayerController = {
       <MainPanel
         ref="mainPanelRef"
         :ui-slot="mainPanelUiSlot"
+        :views="mainTabViews"
         :repo-path="mainPanelRepo?.path"
         :spawn-pty-session="store.spawnPtySession"
         :recover-task-session="store.recoverTaskSession"

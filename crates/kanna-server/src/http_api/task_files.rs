@@ -102,7 +102,7 @@ fn open_db(state: &AppState) -> Result<Db, (StatusCode, String)> {
     })
 }
 
-fn map_task_file_error(error: TaskFileError) -> (StatusCode, String) {
+pub(super) fn map_task_file_error(error: TaskFileError) -> (StatusCode, String) {
     let status = match &error {
         TaskFileError::InvalidPath(_) => StatusCode::BAD_REQUEST,
         TaskFileError::TaskNotFound | TaskFileError::FileNotFound => StatusCode::NOT_FOUND,

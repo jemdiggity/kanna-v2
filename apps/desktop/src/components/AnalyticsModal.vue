@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, toRef, onMounted, nextTick } from "vue";
-import { useModalZIndex } from "../composables/useModalZIndex";
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
 import { useI18n } from "vue-i18n";
 import { Line } from "vue-chartjs";
 import {
@@ -20,11 +23,13 @@ import { useThemeRuntime } from "../theme/runtime";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
-const { zIndex } = useModalZIndex();
-
-const props = defineProps<{
+const props = defineProps<EmbeddableViewProps & {
   repoId: string | null;
 }>();
+
+const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick } =
+  useEmbeddableView(props);
+defineExpose({ zIndex, bringToFront });
 const emit = defineEmits<{ (e: "close"): void }>();
 
 const { t } = useI18n();
@@ -94,7 +99,14 @@ const lineChartOptions = computed(() => ({
 </script>
 
 <template>
-  <div ref="overlayRef" class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')" @keydown="handleKeydown" tabindex="0">
+  <div
+    ref="overlayRef"
+    :class="overlayClass"
+    :style="overlayStyle"
+    tabindex="0"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
+    @keydown="handleKeydown"
+  >
     <div class="analytics-modal">
       <div class="modal-header">
         <h2>{{ viewNames[activeView] }}</h2>
@@ -235,6 +247,14 @@ const lineChartOptions = computed(() => ({
 </template>
 
 <style scoped>
+.embedded .analytics-modal {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;

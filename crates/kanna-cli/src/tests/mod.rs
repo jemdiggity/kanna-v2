@@ -253,6 +253,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_open_file",
+            TypedToolSurface {
+                command_path: &["task", "open-file"],
+                param_args: &[("task_id", "task_id"), ("path", "path"), ("line", "line")],
+            },
+        ),
+        (
             "kanna_search_tasks",
             TypedToolSurface {
                 command_path: &["task", "search"],

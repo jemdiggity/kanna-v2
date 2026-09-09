@@ -15,7 +15,7 @@ import {
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
-import { execDb, tauriInvoke } from "../helpers/vue";
+import { execDb, tauriInvoke, setPreferencesOpen } from "../helpers/vue";
 import { localProcessFetch } from "@kanna/local-process-fetch";
 
 const { primary } = createPrimaryAndSecondaryClients();
@@ -31,18 +31,8 @@ let mobileFirebaseApp: FirebaseApp | null = null;
 let mobileTaskIndex: CloudTaskIndex | null = null;
 let mobileUid = "";
 
-async function setSetupState(key: string, value: unknown): Promise<void> {
-  await primary.executeSync(`
-    const ctx = window.__KANNA_E2E__.setupState;
-    const target = ctx[${JSON.stringify(key)}];
-    const value = ${JSON.stringify(value)};
-    if (target?.__v_isRef) target.value = value;
-    else ctx[${JSON.stringify(key)}] = value;
-  `);
-}
-
 async function signInDesktopRenderer(): Promise<void> {
-  await setSetupState("showPreferencesPanel", true);
+  await setPreferencesOpen(primary, true);
   await primary.click(await primary.waitForElement('[data-testid="preferences-account-tab"]'));
   const email = await primary.waitForElement('[data-testid="account-email"]');
   const password = await primary.waitForElement('[data-testid="account-password"]');
@@ -50,7 +40,7 @@ async function signInDesktopRenderer(): Promise<void> {
   await primary.sendKeys(password, "password123");
   await primary.click(await primary.waitForElement('[data-testid="account-sign-in"] .primary-button'));
   await primary.waitForText(".prefs-panel", "upvote.sieve.7t@icloud.com", 15_000);
-  await setSetupState("showPreferencesPanel", false);
+  await setPreferencesOpen(primary, false);
 }
 
 async function waitForRunningServer(): Promise<{ desktopId: string; lanPort: number }> {

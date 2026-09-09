@@ -1,20 +1,20 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, nextTick } from "vue";
 import DiffView from "./DiffView.vue";
-import { useShortcutContext } from "../composables/useShortcutContext";
-import { useModalZIndex } from "../composables/useModalZIndex";
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
 import { useModalTearOff } from "../composables/useModalTearOff";
 import type { RemoteTaskViewTransport } from "../modalTearOff";
 import type {
   RemoteTaskDiffContent,
   RemoteTaskDiffRequest,
 } from "../services/desktopRemoteTaskClient";
-useShortcutContext("diff");
-const { zIndex, bringToFront } = useModalZIndex();
 
 const modalRef = ref<HTMLElement | null>(null);
 
-const props = defineProps<{
+const props = defineProps<EmbeddableViewProps & {
   repoPath: string;
   worktreePath?: string;
   initialScope?: "branch" | "working";
@@ -29,6 +29,17 @@ const props = defineProps<{
   remoteTaskId?: string;
   remoteTransport?: RemoteTaskViewTransport;
 }>();
+
+const {
+  zIndex,
+  bringToFront,
+  overlayClass,
+  overlayStyle,
+  dismissOnScrimClick,
+  focusWhenBrought,
+  isForeground,
+} = useEmbeddableView(props, { context: "diff" });
+focusWhenBrought(modalRef);
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -67,7 +78,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized, standalone }" :style="{ zIndex }" @click.self="emit('close')">
+  <div
+    :class="[{ maximized, standalone }, overlayClass]"
+    :style="overlayStyle"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
+  >
     <div
       ref="modalRef"
       class="diff-modal"
@@ -86,6 +101,7 @@ onMounted(() => {
         :base-ref="baseRef"
         :view-key="viewKey"
         :remote-diff-loader="remoteDiffLoader"
+        :is-foreground="isForeground"
         @scope-change="emit('scope-change', $event)"
         @scroll-state-change="emit('scroll-state-change', $event)"
         @branch-include-change="emit('branch-include-change', $event)"
@@ -121,7 +137,8 @@ onMounted(() => {
   background: none;
 }
 
-.standalone .diff-modal {
+.standalone .diff-modal,
+.embedded .diff-modal {
   width: 100%;
   height: 100%;
   border: none;

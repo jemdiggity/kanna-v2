@@ -149,8 +149,9 @@ async function sendInputToShellSession(
 async function closeShellModal(client: WebDriverClient): Promise<void> {
   await client.executeSync(
     `const ctx = window.__KANNA_E2E__.setupState;
-     if (ctx.showShellModal?.value || ctx.showShellModal) {
-       ctx.onShellClose();
+     const shellTabs = (ctx.mainTabs?.tabs?.value ?? []).filter((tab) => tab.kind === "shell");
+     if (shellTabs.length > 0) {
+       for (const tab of shellTabs) ctx.mainTabs.closeTab(tab.id);
      }`,
   );
 }

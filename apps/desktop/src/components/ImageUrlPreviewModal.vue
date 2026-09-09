@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { invoke } from "../invoke";
-import { useModalZIndex } from "../composables/useModalZIndex";
+import {
+  useEmbeddableView,
+  type EmbeddableViewProps,
+} from "../composables/useEmbeddableView";
 
-const props = defineProps<{
+const props = defineProps<EmbeddableViewProps & {
   imageUrl: string;
 }>();
 
@@ -11,7 +14,8 @@ const emit = defineEmits<{
   (e: "close"): void;
 }>();
 
-const { zIndex, bringToFront } = useModalZIndex();
+const { bringToFront, overlayClass, overlayStyle, dismissOnScrimClick } =
+  useEmbeddableView(props);
 const loadedLocalImageSrc = ref<string | null>(null);
 const loadError = ref<string | null>(null);
 const isLocalImage = computed(() => props.imageUrl.startsWith("/"));
@@ -35,7 +39,11 @@ defineExpose({ bringToFront });
 </script>
 
 <template>
-  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')">
+  <div
+    :class="overlayClass"
+    :style="overlayStyle"
+    @click.self="dismissOnScrimClick(() => emit('close'))"
+  >
     <div class="image-preview-modal">
       <header class="image-preview-header">
         <a class="image-source" :href="imageSrc || undefined">{{ props.imageUrl }}</a>
@@ -62,6 +70,16 @@ defineExpose({ bringToFront });
   justify-content: center;
   padding: 28px;
   background: var(--kn-overlay-scrim);
+}
+
+.embedded .image-preview-modal {
+  width: 100%;
+  max-width: none;
+  max-height: none;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .image-preview-modal {

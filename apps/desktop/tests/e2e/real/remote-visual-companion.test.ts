@@ -20,7 +20,7 @@ import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/rese
 import { resolveAppKannaServer } from "../helpers/kannaServer";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
-import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb, tauriInvoke, setPreferencesOpen } from "../helpers/vue";
 import type { WebDriverClient } from "../helpers/webdriver";
 import { localProcessFetch } from "@kanna/local-process-fetch";
 
@@ -126,7 +126,7 @@ async function setSetupState(
 }
 
 async function signIn(client: WebDriverClient): Promise<void> {
-  await setSetupState(client, "showPreferencesPanel", true);
+  await setPreferencesOpen(client, true);
   await client.click(await client.waitForElement(
     '[data-testid="preferences-account-tab"]',
   ));
@@ -147,7 +147,7 @@ async function signIn(client: WebDriverClient): Promise<void> {
     15_000,
   );
   await callVueMethod(client, "associateDesktopCloudCredential");
-  await setSetupState(client, "showPreferencesPanel", false);
+  await setPreferencesOpen(client, false);
   await setSetupState(client, "maximized", false);
   await setSetupState(client, "sidebarHidden", false);
 }
@@ -159,7 +159,7 @@ async function signOut(client: WebDriverClient): Promise<void> {
     return session?.getState?.().status !== "signedIn";
   `);
   if (alreadySignedOut) return;
-  await setSetupState(client, "showPreferencesPanel", true);
+  await setPreferencesOpen(client, true);
   await client.click(await client.waitForElement(
     '[data-testid="preferences-account-tab"]',
   ));
@@ -169,7 +169,7 @@ async function signOut(client: WebDriverClient): Promise<void> {
     10_000,
   ));
   await client.waitForElement('[data-testid="account-sign-in"]', 15_000);
-  await setSetupState(client, "showPreferencesPanel", false);
+  await setPreferencesOpen(client, false);
 }
 
 async function ensureLanPair(): Promise<void> {

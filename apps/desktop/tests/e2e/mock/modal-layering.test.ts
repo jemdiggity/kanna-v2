@@ -6,7 +6,18 @@ import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-r
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { getVueState, tauriInvoke } from "../helpers/vue";
 
-type ModalKind = "diff" | "shell" | "tree" | "graph" | "picker" | "preview";
+/**
+ * The task's own views — diff, file, shell — are tabs in the main content
+ * area now, not overlays. What is left stacking is the modals that are still
+ * modals: the tree explorer, the commit graph and the file picker. They must
+ * keep layering above each other, and above the tabs.
+ */
+/**
+ * Only dialogs are modals now — things that ask a question rather than show a
+ * view. Everything the main content area shows is a tab, so what is left to
+ * prove is that the dialogs still stack above each other, and above the tabs.
+ */
+type ModalKind = "picker" | "palette" | "shortcuts";
 
 interface ModalStackEntry {
   kind: ModalKind;
@@ -24,12 +35,9 @@ function modalStackScript(): string {
       })
       .map((overlay) => {
         const kind =
-          overlay.querySelector(".diff-modal") ? "diff" :
-          overlay.querySelector(".shell-modal") ? "shell" :
-          overlay.querySelector(".tree-modal") ? "tree" :
-          overlay.querySelector(".graph-modal") ? "graph" :
           overlay.querySelector(".picker-modal") ? "picker" :
-          overlay.querySelector(".preview-modal") ? "preview" :
+          overlay.querySelector(".command-palette") ? "palette" :
+          overlay.querySelector(".shortcuts-modal") ? "shortcuts" :
           null;
         return kind ? { kind, zIndex: Number(getComputedStyle(overlay).zIndex) || 0 } : null;
       })
@@ -43,23 +51,6 @@ async function modalStack(client: WebDriverClient): Promise<ModalStackEntry[]> {
   return await client.executeSync<ModalStackEntry[]>(modalStackScript());
 }
 
-async function waitForTopModal(
-  client: WebDriverClient,
-  kind: ModalKind,
-  timeoutMs = 8000,
-): Promise<ModalStackEntry[]> {
-  const deadline = Date.now() + timeoutMs;
-  let latest: ModalStackEntry[] = [];
-
-  while (Date.now() < deadline) {
-    latest = await modalStack(client);
-    if (latest[0]?.kind === kind) return latest;
-    await sleep(200);
-  }
-
-  throw new Error(`expected top modal ${kind}, got stack ${JSON.stringify(latest)}`);
-}
-
 async function pressShortcut(
   client: WebDriverClient,
   options: { key: string; meta?: boolean; shift?: boolean },
@@ -67,12 +58,26 @@ async function pressShortcut(
   await client.executeSync(buildGlobalKeydownScript(options));
 }
 
-async function openPreviewFromCurrentContext(client: WebDriverClient): Promise<void> {
-  await pressShortcut(client, { key: "p", meta: true });
-  await waitForTopModal(client, "picker");
-  const file = await client.waitForElement(".picker-modal .file-item", 5000);
-  await client.click(file);
-  await waitForTopModal(client, "preview");
+async function openTabIds(client: WebDriverClient): Promise<string[]> {
+  return await client.executeSync<string[]>(
+    `return Array.from(document.querySelectorAll('[data-testid="main-tab-bar"] [role="tab"]'))
+      .map((tab) => (tab.getAttribute("data-testid") || "").replace(/^main-tab-/, ""));`
+  );
+}
+
+async function waitForOpenTab(
+  client: WebDriverClient,
+  id: string,
+  timeoutMs = 8000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: string[] = [];
+  while (Date.now() < deadline) {
+    latest = await openTabIds(client);
+    if (latest.includes(id)) return;
+    await sleep(200);
+  }
+  throw new Error(`expected an open ${id} tab, got ${JSON.stringify(latest)}`);
 }
 
 describe("modal layering", () => {
@@ -126,47 +131,41 @@ describe("modal layering", () => {
     await client.deleteSession();
   });
 
-  it("opens preview modals from other preview modal contexts and stacks each new modal on top", async () => {
+  it("opens every view as a tab and keeps the dialogs stacked above them", async () => {
+    // Views that used to be modals now go to the tab bar and leave the modal
+    // stack empty.
     await pressShortcut(client, { key: "d", meta: true });
-    let stack = await waitForTopModal(client, "diff");
-    expect(stack.map((entry) => entry.kind)).toEqual(["diff"]);
-
+    await waitForOpenTab(client, "diff");
     await pressShortcut(client, { key: "j", meta: true });
-    stack = await waitForTopModal(client, "shell");
-    expect(stack.map((entry) => entry.kind).slice(0, 2)).toEqual(["shell", "diff"]);
-
+    await waitForOpenTab(client, "shell");
     await pressShortcut(client, { key: "E", meta: true, shift: true });
-    stack = await waitForTopModal(client, "tree");
-    expect(stack.map((entry) => entry.kind).slice(0, 3)).toEqual(["tree", "shell", "diff"]);
-
+    await waitForOpenTab(client, "tree");
     await pressShortcut(client, { key: "g", meta: true });
-    stack = await waitForTopModal(client, "graph");
-    expect(stack.map((entry) => entry.kind).slice(0, 4)).toEqual(["graph", "tree", "shell", "diff"]);
+    await waitForOpenTab(client, "graph");
+    await pressShortcut(client, { key: "A", meta: true, shift: true });
+    await waitForOpenTab(client, "analytics");
+    await pressShortcut(client, { key: ",", meta: true });
+    await waitForOpenTab(client, "preferences");
 
-    await openPreviewFromCurrentContext(client);
+    expect(await modalStack(client)).toEqual([]);
+
+    // Dialogs — things that ask rather than show — still stack, above the tabs.
+    await pressShortcut(client, { key: "p", meta: true });
+    let stack = await modalStack(client);
+    expect(stack.map((entry) => entry.kind)).toEqual(["picker"]);
+
+    // Picking a file hands it to the tab bar and takes the picker away.
+    const file = await client.waitForElement(".picker-modal .file-item", 5000);
+    await client.click(file);
+    await waitForOpenTab(client, "diff");
     stack = await modalStack(client);
-    expect(stack[0]?.kind).toBe("preview");
-    expect(stack.map((entry) => entry.kind)).toContain("graph");
-    expect(stack.map((entry) => entry.kind)).toContain("shell");
+    expect(stack).toEqual([]);
+    expect((await openTabIds(client)).some((id) => id.startsWith("file:"))).toBe(true);
 
-    await pressShortcut(client, { key: "d", meta: true });
-    stack = await waitForTopModal(client, "diff");
-    expect(stack[0]?.kind).toBe("diff");
-
-    await pressShortcut(client, { key: "j", meta: true });
-    stack = await waitForTopModal(client, "shell");
-    expect(stack[0]?.kind).toBe("shell");
-
-    await pressShortcut(client, { key: "E", meta: true, shift: true });
-    stack = await waitForTopModal(client, "tree");
-    expect(stack[0]?.kind).toBe("tree");
-
-    await pressShortcut(client, { key: "g", meta: true });
-    stack = await waitForTopModal(client, "graph");
-    expect(stack[0]?.kind).toBe("graph");
-
-    await openPreviewFromCurrentContext(client);
-    stack = await waitForTopModal(client, "preview");
-    expect(stack[0]?.kind).toBe("preview");
+    // Escape reaches the tabs only once no dialog wants it.
+    const beforeEscape = await openTabIds(client);
+    await pressShortcut(client, { key: "Escape" });
+    await sleep(400);
+    expect((await openTabIds(client)).length).toBe(beforeEscape.length - 1);
   });
 });

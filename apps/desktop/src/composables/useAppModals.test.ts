@@ -7,6 +7,11 @@ import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
 import type { ModalTearOffContext } from "../modalTearOff";
 import type { WorkspaceTask } from "../workspace/types";
 import { useAppModals } from "./useAppModals";
+import {
+  mainTabScopeKeyForApp,
+  mainTabScopeKeyForTask,
+  useMainTabs,
+} from "./useMainTabs";
 
 const taskViewMocks = vi.hoisted(() => ({
   relayFactory: vi.fn(),
@@ -53,8 +58,16 @@ function mountMarkdownModalHarness(options: {
   const clearTearOffContext = vi.fn(async () => {});
   const TestHarness = defineComponent({
     setup() {
+      const mainTabs = useMainTabs({
+        scopeKey: computed(() =>
+          store.currentItem
+            ? mainTabScopeKeyForTask(store.currentItem.id)
+            : mainTabScopeKeyForApp()
+        ),
+      });
       const modals = useAppModals({
         isMobile: false,
+        mainTabs,
         store: store as unknown as Parameters<typeof useAppModals>[0]["store"],
         windowWorkspace: {
           bootstrap: {
@@ -71,14 +84,21 @@ function mountMarkdownModalHarness(options: {
         } as unknown as Parameters<typeof useAppModals>[0]["windowWorkspace"],
         selectedWorkspaceTask: computed(() => options.selectedWorkspaceTask ?? null),
       });
-      return { modals };
+      return { modals, mainTabs };
     },
     render() {
       return h("div");
     },
   });
   const wrapper = mount(TestHarness);
-  return { clearTearOffContext, modals: wrapper.vm.modals, savePreference, store, wrapper };
+  return {
+    clearTearOffContext,
+    modals: wrapper.vm.modals,
+    mainTabs: wrapper.vm.mainTabs,
+    savePreference,
+    store,
+    wrapper,
+  };
 }
 
 describe("useAppModals", () => {
@@ -214,7 +234,7 @@ describe("useAppModals", () => {
     harness.wrapper.unmount();
   });
 
-  it("restores a transferred tree as a normal maximized modal and clears only its transfer state", async () => {
+  it("restores a transferred tree into a maximized tab and clears only its transfer state", async () => {
     const harness = mountMarkdownModalHarness({
       selectedRepo: { id: "repo-current", path: "/current-repo" },
       currentItem: { id: "task-current", branch: "task-current" },
@@ -226,7 +246,7 @@ describe("useAppModals", () => {
     });
 
     harness.modals.restoreTransferredModal();
-    expect(harness.modals.showTreeExplorer.value).toBe(true);
+    expect(harness.mainTabs.activeTab.value?.kind).toBe("tree");
     expect(harness.modals.maximizedModal.value).toBe("tree");
     expect(harness.modals.treeExplorerRoot.value).toBe(
       "/current-repo/.kanna-worktrees/task-current",
@@ -236,9 +256,8 @@ describe("useAppModals", () => {
       "/current-repo/.kanna-worktrees/task-current",
     );
 
-    harness.modals.closeTreeExplorer();
-    expect(harness.modals.showTreeExplorer.value).toBe(false);
-    expect(harness.modals.maximizedModal.value).toBe(null);
+    // Closing the tab it restored into is what releases the tear-off context.
+    harness.modals.finishTransferredModal("tree");
     expect(harness.clearTearOffContext).toHaveBeenCalledOnce();
     await nextTick();
     harness.wrapper.unmount();
@@ -265,7 +284,7 @@ describe("useAppModals", () => {
     harness.wrapper.unmount();
   });
 
-  it("restores transferred diff view state in the ordinary maximized modal", () => {
+  it("restores transferred diff view state into a maximized tab", () => {
     const harness = mountMarkdownModalHarness({
       selectedRepo: { id: "repo-current", path: "/current-repo" },
       currentItem: { id: "task-current", branch: "task-current" },
@@ -282,7 +301,7 @@ describe("useAppModals", () => {
     });
 
     harness.modals.restoreTransferredModal();
-    expect(harness.modals.showDiffModal.value).toBe(true);
+    expect(harness.mainTabs.activeTab.value?.kind).toBe("diff");
     expect(harness.modals.maximizedModal.value).toBe("diff");
     expect(harness.modals.currentDiffViewKey.value).toBe("item:task-current");
     expect(harness.modals.activeRepoPath.value).toBe("/current-repo");
@@ -295,28 +314,12 @@ describe("useAppModals", () => {
       branchInclude: "all",
     });
 
-    harness.modals.closeDiffModal();
+    harness.modals.finishTransferredModal("diff");
     expect(harness.clearTearOffContext).toHaveBeenCalledOnce();
     harness.wrapper.unmount();
   });
 
-  it("rechecks agent CLIs when the setup shell closes", () => {
-    const { modals, wrapper } = mountMarkdownModalHarness();
-    const recheckClis = vi.fn(async () => {});
-    modals.mainPanelRef.value = {
-      recheckClis,
-    } as unknown as NonNullable<typeof modals.mainPanelRef.value>;
-    modals.showShellModal.value = true;
-    modals.maximizedModal.value = "shell";
-
-    modals.onShellClose();
-
-    expect(modals.showShellModal.value).toBe(false);
-    expect(modals.maximizedModal.value).toBe(null);
-    expect(recheckClis).toHaveBeenCalledOnce();
-    wrapper.unmount();
-  });
-
+  
   it("uses and persists one Markdown mode across task preview flows", async () => {
     const { modals, savePreference, store, wrapper } = mountMarkdownModalHarness();
 
@@ -421,32 +424,18 @@ describe("useAppModals", () => {
     }
   });
 
-  it("opens and closes remote image URL previews", async () => {
-    const TestHarness = defineComponent({
-      setup() {
-        const modals = useAppModals({
-          isMobile: false,
-          store: {} as Parameters<typeof useAppModals>[0]["store"],
-          windowWorkspace: {
-            bootstrap: { windowId: "main" },
-            loadSnapshot: vi.fn(),
-            persistSidebarWidth: vi.fn(),
-          } as unknown as Parameters<typeof useAppModals>[0]["windowWorkspace"],
-        });
-        return { modals };
-      },
-      render() {
-        return h("div");
-      },
-    });
+  it("opens a remote image URL as its own tab", () => {
+    const harness = mountMarkdownModalHarness();
 
-    const wrapper = mount(TestHarness);
+    harness.modals.openImageUrlPreview("https://example.invalid/shot.png");
 
-    wrapper.vm.modals.openImageUrlPreview("https://example.com/screenshot.png");
-    expect(wrapper.vm.modals.showImageUrlPreviewModal.value).toBe(true);
-    expect(wrapper.vm.modals.previewImageUrl.value).toBe("https://example.com/screenshot.png");
+    const tab = harness.mainTabs.activeTab.value;
+    expect(tab?.kind).toBe("image");
+    expect(tab?.imageUrl).toBe("https://example.invalid/shot.png");
 
-    wrapper.vm.modals.closeImageUrlPreview();
-    expect(wrapper.vm.modals.showImageUrlPreviewModal.value).toBe(false);
+    harness.mainTabs.closeTab(tab!.id);
+    expect(harness.mainTabs.tabs.value.some((entry) => entry.kind === "image")).toBe(false);
+
+    harness.wrapper.unmount();
   });
 });

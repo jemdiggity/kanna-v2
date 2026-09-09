@@ -2092,6 +2092,34 @@ and a target whose resolved path leaves the worktree root is rejected, including
 symlink escapes. The surface is read-only: there are no write, delete, download,
 git, or search-in-files operations.
 
+## Desktop View Commands
+
+`POST /v1/desktop/views/open` (`kanna_open_file`) asks whichever desktop windows
+are running to open one of a task's files in that task's main content area, as a
+tab beside its agent session. It exists because an agent could already *read* a
+task's files but had no way to put one in front of the person watching that
+task, short of pasting it into the terminal.
+
+The path is resolved through the same task-workspace resolution
+`/v1/tasks/{task_id}/files/content` uses, before anything is queued: a path
+outside the task's workspace, a missing file, one over 1 MiB, or one that is not
+UTF-8 text is refused with that reason, so a mistyped path is an error the
+caller can act on rather than a window that quietly opens nothing. The content
+read on the way is discarded — the desktop opens the file from the worktree
+itself.
+
+**A requested view is not a shown view.** The response says `requested: true`,
+never that a window displayed anything, and the command is advisory in the same
+way a pairing prompt is: it is appended to a bounded in-memory lane, not to a
+durable table, because nothing about the task depends on it and a request nobody
+saw is correctly forgotten. It writes no `task_input` row — this is not an
+instruction to the agent, and the durable instruction history must not read as
+though it were. The desktop long-polls `GET /v1/desktop/view-commands`
+(loopback-only, single-consumer, same `cursor`/`streamId` contract as the
+transfer advisory lanes) and opens the file in that task's own tab set. It never
+changes which task the operator has selected: the tab is simply there when they
+look at that task.
+
 ## Mobile Notification Delivery
 
 `POST /v1/mobile/notifications` hands every validated notification to the

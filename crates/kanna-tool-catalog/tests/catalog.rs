@@ -37,6 +37,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_notify_mobile",
             "kanna_set_task_workflow",
             "kanna_replace_task_workflow",
+            "kanna_open_file",
             "kanna_task_logs",
             "kanna_task_inputs",
             "kanna_task_transfers",

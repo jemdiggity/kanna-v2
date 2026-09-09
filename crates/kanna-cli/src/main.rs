@@ -302,6 +302,34 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Ask the Kanna desktop to open one of a task's files as a tab beside
+    /// that task's agent session
+    ///
+    /// Delivery is advisory: the answer says the file was requested, never
+    /// that it was shown. A window that is closed or not running loses the
+    /// request rather than queuing it, and the operator's own selection is
+    /// never changed — the tab is simply there when they look at that task.
+    OpenFile {
+        /// The task ID, or one of the task's branch names
+        #[arg(long)]
+        task_id: String,
+
+        /// Path of the file to open, relative to the task's workspace root
+        #[arg(long)]
+        path: String,
+
+        /// 1-based line to scroll to when the file opens
+        #[arg(long)]
+        line: Option<i64>,
+
+        /// Machine whose desktop should open the file. Omit for this machine.
+        #[arg(long)]
+        machine_id: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Print recent task logs
     Logs {
         /// The task ID

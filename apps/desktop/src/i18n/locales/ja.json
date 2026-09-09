@@ -101,7 +101,7 @@
     "createRepo": "リポジトリ作成",
     "importClone": "インポート / クローン",
     "newWindow": "新しいウィンドウ",
-    "closeWindow": "ウィンドウを閉じる",
+    "closeWindow": "ウインドウを閉じる",
     "goBack": "戻る",
     "goForward": "進む",
     "allShortcuts": "すべてのショートカット",
@@ -113,7 +113,8 @@
     "oldestUnreadAllRepos": "全リポジトリで最も古い未読タスク",
     "oldestRead": "最も古い既読タスク",
     "oldestReadAllRepos": "全リポジトリで最も古い既読タスク",
-    "focusSearch": "検索"
+    "focusSearch": "検索",
+    "closeTab": "タブを閉じる"
   },
   "shortcutContexts": {
     "main": "メインショートカット",
@@ -375,6 +376,17 @@
     "setupRepoDesc": ".kanna のワークフローとエージェントフレーバーを構成",
     "createConfig": "設定を作成",
     "createConfigDesc": ".kanna/config.json を作成または更新"
+  },
+  "mainTabs": {
+    "agent": "エージェント",
+    "diff": "差分",
+    "shell": "シェル",
+    "repoShell": "リポジトリシェル",
+    "files": "ファイル",
+    "graph": "コミット",
+    "analytics": "分析",
+    "preferences": "設定",
+    "image": "画像"
   },
   "terminalTabs": {
     "noSession": "アクティブなエージェントセッションがありません"

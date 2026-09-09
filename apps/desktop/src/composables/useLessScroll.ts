@@ -23,15 +23,20 @@ function noMods(e: KeyboardEvent): boolean {
  * @param extraHandler - Optional handler for component-specific keys.
  *   Called first; return true to indicate the key was handled (skips scroll logic).
  * @param onClose - Called when `q` is pressed.
+ * @param isActive - Optional gate. These are window-level bindings, so a view
+ *   that stays mounted while hidden — a main-area tab behind another tab —
+ *   must say when it is the one the keys belong to.
  */
 export function useLessScroll(
   scrollRef: Ref<HTMLElement | null>,
   options: {
     extraHandler?: (e: KeyboardEvent) => boolean;
     onClose?: () => void;
+    isActive?: () => boolean;
   } = {}
 ) {
   function onKeydown(e: KeyboardEvent) {
+    if (options.isActive?.() === false) return;
     if (isInputTarget(e)) return;
 
     // Let the component handle its own keys first

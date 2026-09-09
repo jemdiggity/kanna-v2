@@ -3,6 +3,7 @@ use super::backup::create_backup;
 use super::cloud_desktops::{invoke_cloud_desktop, list_cloud_desktops};
 use super::cloud_relay::reconnect_cloud_relay;
 use super::desktop::list_desktops;
+use super::desktop_views::{open_desktop_view, wait_desktop_view_commands};
 #[cfg(debug_assertions)]
 use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine_controls};
 #[cfg(debug_assertions)]
@@ -116,6 +117,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(legacy_ksp_stream))
         .route("/v2/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
+        .route("/v1/desktop/views/open", post(open_desktop_view))
+        .route("/v1/desktop/view-commands", get(wait_desktop_view_commands))
         .route("/v1/repos", get(list_repos).post(add_repo))
         .route("/v1/repo-checkouts", post(start_repo_checkout))
         .route("/v1/repo-checkouts/{operation_id}", get(get_repo_checkout))
