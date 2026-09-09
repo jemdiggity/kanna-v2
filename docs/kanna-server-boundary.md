@@ -788,12 +788,14 @@ new peers from retained history. A server that has no relay route keeps the
 native cursor shape and, for an account-wide-authorized caller, adds a
 relay-unavailable `machineErrors` warning.
 Agent-facing catalog calls set `shortCursor=true`. The server then retains the
-full native or `ks1.` checkpoint behind an immutable `kh1.` plus eight-hex-digit
-handle for ten minutes after its last use. A fresh handle is issued for every
-response, so concurrent resumes cannot rewind one another. Handles are
-process-local by design: an expired, evicted, corrupt, or post-restart handle
-fails with an instruction to omit the cursor and safely replay retained
-history. Callers that omit `shortCursor` keep receiving the deployed stateless
+full native or `ks1.` checkpoint behind a durable `kh1.` plus eight-hex-digit
+handle. Each successful resume advances that same handle, so a busy watcher
+does not accumulate abandoned entries or evict its live checkpoint. The
+mapping is stored in the server database and survives server and relay
+restarts; abandoned mappings are pruned with the 14-day event-retention
+window. An unknown or corrupt handle is a handle-resolution failure, distinct
+from a native cursor whose event position predates retained history. Callers
+that omit `shortCursor` keep receiving the deployed stateless
 cursor shapes, and numeric, `p1.`, `p3.`, `kc1.`, and `ks1.` inputs remain
 accepted; resuming one with short cursors enabled upgrades the response.
 `localOnly=true` is the explicit compatibility escape hatch used by adapters

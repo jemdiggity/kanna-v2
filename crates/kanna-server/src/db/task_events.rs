@@ -397,6 +397,53 @@ impl TaskEventFilters {
 }
 
 impl Db {
+    pub(crate) fn resolve_task_event_cursor_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        let cursor = self
+            .conn
+            .query_row(
+                "SELECT cursor FROM task_event_cursor_handle WHERE handle = ?1",
+                [handle],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if cursor.is_some() {
+            self.conn.execute(
+                "UPDATE task_event_cursor_handle SET last_touched = datetime('now') WHERE handle = ?1",
+                [handle],
+            )?;
+        }
+        Ok(cursor)
+    }
+
+    pub(crate) fn store_task_event_cursor_handle(
+        &self,
+        handle: &str,
+        cursor: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO task_event_cursor_handle (handle, cursor, last_touched)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(handle) DO UPDATE SET cursor = excluded.cursor, last_touched = excluded.last_touched",
+            rusqlite::params![handle, cursor],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete_task_event_cursor_handle_for_test(
+        &self,
+        handle: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM task_event_cursor_handle WHERE handle = ?1",
+            [handle],
+        )?;
+        Ok(())
+    }
+
     pub fn list_non_busy_task_runtime_states(
         &self,
         scope: &TaskEventScope,

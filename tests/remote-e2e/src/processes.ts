@@ -7,6 +7,7 @@ import { localProcessFetch } from "@kanna/local-process-fetch";
 export interface ManagedProcess {
   readonly name: string;
   readonly process: ChildProcessWithoutNullStreams;
+  logs(): string;
   stop(): Promise<void>;
 }
 
@@ -130,14 +131,19 @@ export function startManagedProcess(
     stdio: "pipe"
   });
   const inventoryPath = processInventoryPath(options.inventoryRoot ?? options.cwd);
+  let logs = "";
   if (child.pid) {
     recordInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: name });
   }
   child.stdout.on("data", (chunk: Buffer) => {
-    process.stderr.write(`[${name}] ${chunk.toString()}`);
+    const output = chunk.toString();
+    logs += output;
+    process.stderr.write(`[${name}] ${output}`);
   });
   child.stderr.on("data", (chunk: Buffer) => {
-    process.stderr.write(`[${name}] ${chunk.toString()}`);
+    const output = chunk.toString();
+    logs += output;
+    process.stderr.write(`[${name}] ${output}`);
   });
   child.once("exit", (code, signal) => {
     if (child.pid) {
@@ -152,6 +158,7 @@ export function startManagedProcess(
   return {
     name,
     process: child,
+    logs: () => logs,
     stop: async () => {
       if (child.exitCode !== null || child.signalCode !== null) {
         if (child.pid) removeInventoryResource(inventoryPath, { kind: "process", pid: child.pid, label: name });

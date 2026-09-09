@@ -1424,7 +1424,81 @@ async fn short_cursor_upgrades_legacy_state_and_preserves_call_to_call_continuit
         event_pairs(&resumed),
         vec![("child-a".to_string(), "stage.changed".to_string())]
     );
-    assert!(cursor_of(&resumed).starts_with("kh1."));
+    assert_eq!(cursor_of(&resumed), handle);
+}
+
+#[tokio::test]
+async fn short_cursor_does_not_skip_an_event_when_durable_checkpoint_update_fails() {
+    let (app, db_path) = events_router();
+    let armed = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&from=now&timeoutSecs=0",
+    )
+    .await;
+    let handle = cursor_of(&armed);
+
+    let db = Db::open(&db_path).expect("open db");
+    db.update_pipeline_item_stage("child-a", "review")
+        .expect("append event");
+    db.connection_for_e2e_tests()
+        .execute_batch(
+            "CREATE TRIGGER reject_cursor_checkpoint_update
+             BEFORE UPDATE ON task_event_cursor_handle
+             BEGIN SELECT RAISE(ABORT, 'forced cursor checkpoint failure'); END;",
+        )
+        .expect("install failure trigger");
+
+    let uri = format!(
+        "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={handle}&timeoutSecs=0"
+    );
+    let failed = app
+        .clone()
+        .oneshot(Request::get(&uri).body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    db.connection_for_e2e_tests()
+        .execute_batch("DROP TRIGGER reject_cursor_checkpoint_update;")
+        .expect("remove failure trigger");
+    let retried = get_json_body(&app, &uri).await;
+    assert_eq!(cursor_of(&retried), handle);
+    assert_eq!(
+        event_pairs(&retried),
+        vec![("child-a".to_string(), "stage.changed".to_string())],
+        "the failed response must not advance this handle in memory"
+    );
+}
+
+#[tokio::test]
+async fn short_cursor_survives_server_state_replacement_without_losing_events() {
+    let state = test_state_with_seed("desktop-task-events", "Task Events", seed_orchestration);
+    let config = state.config().clone();
+    let app = router(state);
+    let armed = get_json_body(
+        &app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&from=now&timeoutSecs=0",
+    )
+    .await;
+    let handle = cursor_of(&armed);
+
+    let db = Db::open(&config.db_path).expect("open db after first server stopped");
+    db.update_pipeline_item_stage("child-a", "review")
+        .expect("append event while watcher is disconnected");
+
+    let restarted = router(Arc::new(AppState::new(config)));
+    let resumed = get_json_body(
+        &restarted,
+        &format!(
+            "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={handle}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(cursor_of(&resumed), handle);
+    assert_eq!(
+        event_pairs(&resumed),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
 }
 
 #[tokio::test]

@@ -328,6 +328,127 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(getString(asRecord(catalogNext), "cursor").length).toBeLessThan(128);
   }, 120_000);
 
+  it("keeps one durable aggregate cursor and remote outage shape across a relay drop", async () => {
+    // The watcher lives on this desktop; the task and all writes live on a
+    // separate desktop reached only through the account-wide relay fan-in.
+    // A LAN-only watch can never exercise either the aggregate cursor or a
+    // remote machine's stale state.
+    const remote = await harness.startAdditionalDesktop();
+    const task = await createScriptedTask(remote, { displayName: "Durable relay watcher" });
+    const armed = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&from=now&timeoutSecs=0`,
+      null
+    ));
+    let cursor = getString(armed, "cursor");
+    const seen: string[] = [];
+
+    // This used to evict a watcher from the bounded short-handle map because
+    // every resume minted another handle. The watcher is armed through the
+    // relay, then resumes its one handle well past that former cap and
+    // requires each checkpoint to return exactly its new event.
+    for (let index = 0; index < 4_100; index += 1) {
+      const type = `task.cursor_busy_${index}`;
+      await invokeLanJson(remote, "POST", "/v1/e2e/sql", {
+        query: false,
+        sql: "INSERT INTO task_event (task_id, type, payload) VALUES (?1, ?2, '{}')",
+        params: [task.taskId, type]
+      });
+      const response = asRecord(await invokeLanJson(
+        harness,
+        "GET",
+        `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
+        null
+      ));
+      expect(eventTypes(response)).toEqual([type]);
+      cursor = getString(response, "cursor");
+      seen.push(...eventTypes(response));
+    }
+    expect(new Set(seen).size).toBe(4_100);
+
+    // The harness shortens the deployed ten-minute process-cache lifetime to
+    // one second. The same kh1 must resume from its durable checkpoint after
+    // that cache entry is reaped, rather than treating cache expiry as reset.
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const afterCacheExpiry = asRecord(await invokeDesktop(
+      harness, "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
+      null
+    ));
+    expect(getString(afterCacheExpiry, "cursor")).toBe(cursor);
+    expect(eventTypes(afterCacheExpiry)).toEqual([]);
+
+    const serverLogOffset = harness.serverLogs().length;
+    await harness.stopRelay();
+    try {
+      // The remote desktop writes while its relay connection is down. Its
+      // native cursor must be retained by the local aggregate checkpoint.
+      await invokeLanJson(remote, "POST", "/v1/e2e/sql", {
+        query: false,
+        sql: "INSERT INTO task_event (task_id, type, payload) VALUES (?1, ?2, '{}')",
+        params: [task.taskId, "task.awaiting_input"]
+      });
+      let unreachableSince: string | null = null;
+      for (let poll = 0; poll < 3; poll += 1) {
+        const duringDrop = asRecord(await invokeLanJson(
+          harness,
+          "GET",
+          `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
+          null
+        ));
+        expect(getString(duringDrop, "cursor")).toBe(cursor);
+        expect(eventTypes(duringDrop)).toEqual([]);
+        const machineErrors = asRecord(duringDrop).machineErrors;
+        expect(Array.isArray(machineErrors)).toBe(true);
+        expect(machineErrors).toHaveLength(1);
+        const error = asRecord((machineErrors as unknown[])[0]);
+        expect(error).toMatchObject({
+          machineId: remote.desktopId,
+          error: expect.stringMatching(/^machine unreachable since unix:\d+$/),
+          stale: true
+        });
+        const currentSince = getString(error, "error");
+        expect(unreachableSince ?? currentSince).toBe(currentSince);
+        unreachableSince = currentSince;
+      }
+
+      // Keep the socket down long enough to exercise the first reconnect and
+      // its exponential successor. The server's own delay announcements are
+      // the deployed boundary's evidence that it does not retry in a tight
+      // loop; the unit test covers the lower-level timing separately.
+      await new Promise((resolve) => setTimeout(resolve, 13_000));
+      const outageLogs = harness.serverLogs().slice(serverLogOffset);
+      const reconnectDelays = [...outageLogs.matchAll(
+        /(?:Disconnected from relay\. Reconnecting in|Relay reconnect attempt backed off for) (\d+\.\d)s/g
+      )].map((match) => Number(match[1]));
+      expect(reconnectDelays).toHaveLength(2);
+      expect(reconnectDelays[0]).toBeGreaterThanOrEqual(4);
+      expect(reconnectDelays[0]).toBeLessThanOrEqual(6);
+      expect(reconnectDelays[1]).toBeGreaterThanOrEqual(8);
+      expect(reconnectDelays[1]).toBeLessThanOrEqual(12);
+      expect(outageLogs.match(/Connecting to relay at/g) ?? []).toHaveLength(1);
+    } finally {
+      await harness.startRelay();
+      await harness.waitForDesktop();
+      await harness.waitForDesktop(remote.desktopId);
+    }
+    // The event inserted during the partition is delivered exactly once when
+    // the original kh1 watcher resumes; a new event proves it keeps watching.
+    await appendTaskEvent(remote, task.taskId, "task.revision_requested");
+    const resumed = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(cursor)}&timeoutSecs=0`,
+      null
+    ));
+    expect(getString(resumed, "cursor")).toBe(cursor);
+    expect(eventTypes(resumed)).toEqual(["task.awaiting_input", "task.revision_requested"]);
+    seen.push(...eventTypes(resumed));
+    expect(seen).toHaveLength(4_102);
+    expect(new Set(seen).size).toBe(4_102);
+    await remote.stop();
+  }, 360_000);
 
   it("launches, reuses, and honestly refuses a repository singleton command over the LAN route", async () => {
     // The route the phone's More tab uses. Its 503 was not a transport
@@ -723,7 +844,7 @@ async function invokeDesktop(
 }
 
 async function invokeLanJson(
-  harness: RemoteHarness,
+  harness: Pick<RemoteHarness, "lanBaseUrl">,
   method: "GET" | "POST",
   path: string,
   body: unknown,
@@ -794,11 +915,11 @@ function eventTypes(value: unknown): string[] {
 }
 
 async function appendTaskEvent(
-  harness: RemoteHarness,
+  harness: Pick<RemoteHarness, "lanBaseUrl">,
   taskId: string,
   eventType: string
 ): Promise<void> {
-  const rowsAffected = await executeSql(
+  const rowsAffected = await executeLanSql(
     harness,
     "INSERT INTO task_event (task_id, type, payload) VALUES (?1, ?2, '{}')",
     [taskId, eventType]
@@ -813,6 +934,19 @@ async function querySql(harness: RemoteHarness, sql: string, params: SqlParam[] 
     params
   }));
   return response.rows;
+}
+
+async function executeLanSql(
+  harness: Pick<RemoteHarness, "lanBaseUrl">,
+  sql: string,
+  params: SqlParam[] = []
+): Promise<number> {
+  const response = asSqlResponse(await invokeLanJson(harness, "POST", "/v1/e2e/sql", {
+    query: false,
+    sql,
+    params
+  }));
+  return response.rowsAffected;
 }
 
 async function executeSql(harness: RemoteHarness, sql: string, params: SqlParam[] = []): Promise<number> {

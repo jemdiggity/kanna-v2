@@ -135,6 +135,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "063_lifecycle_operation_intent",
     "064_blocked_state_events",
     "065_stage_run_provider_override",
+    "066_durable_task_event_cursor_handles",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1999,6 +2000,20 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "stage_run", "provider_override", "TEXT")
     })?;
 
+    run_migration(conn, "066_durable_task_event_cursor_handles", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_event_cursor_handle (
+                handle TEXT PRIMARY KEY,
+                cursor TEXT NOT NULL,
+                last_touched TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_event_cursor_handle_touched
+            ON task_event_cursor_handle(last_touched);
+            "#,
+        )
+    })?;
+
     Ok(())
 }
 
@@ -2212,6 +2227,10 @@ const TASK_EVENT_RETENTION_DAYS: u32 = 14;
 fn prune_task_events(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "DELETE FROM task_event WHERE created_at < datetime('now', ?1)",
+        [format!("-{TASK_EVENT_RETENTION_DAYS} days")],
+    )?;
+    conn.execute(
+        "DELETE FROM task_event_cursor_handle WHERE last_touched < datetime('now', ?1)",
         [format!("-{TASK_EVENT_RETENTION_DAYS} days")],
     )?;
     Ok(())
