@@ -153,6 +153,34 @@ export async function waitForLocalAppiumServer(port: number): Promise<void> {
   );
 }
 
+const WDA_RUNNER_BUNDLE_ID = "com.facebook.WebDriverAgentRunner.xctrunner";
+
+export async function stopSimulatorWebDriverAgent(deviceUdid: string): Promise<void> {
+  const { stdout } = await execFileAsync("ps", ["-axo", "pid=,command="]);
+  const builds = stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) =>
+      line.includes("WebDriverAgent.xcodeproj") &&
+      line.includes(`-destination id=${deviceUdid}`)
+    )
+    .map((line) => Number.parseInt(line, 10))
+    .filter(Number.isInteger);
+
+  for (const pid of builds) {
+    // Appium starts each WDA build as its own process group. Target that exact
+    // group so a cancelled relay lane cannot strand its build or helpers.
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
+    }
+  }
+  await execFileAsync("xcrun", [
+    "simctl", "terminate", deviceUdid, WDA_RUNNER_BUNDLE_ID
+  ]).catch(() => undefined);
+}
+
 async function main() {
   const command = process.argv[2];
   if (command === "install-xcuitest") {

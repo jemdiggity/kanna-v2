@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDisableExpoDevMenuFabArgs,
   buildExpoDevelopmentClientUrl,
+  buildSimulatorDevelopmentClientLaunchArgs,
   selectSimulatorDevice,
   type AvailableSimulatorDevice
 } from "./simulator";
@@ -50,6 +51,23 @@ describe("selectSimulatorDevice", () => {
     ).toBe(
       "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8679&disableOnboarding=1"
     );
+  });
+
+  it("launches the development client with Expo's initial-url argument", () => {
+    expect(buildSimulatorDevelopmentClientLaunchArgs({
+      appScheme: "exp+kanna-mobile",
+      bundleId: "build.kanna.app.dev",
+      deviceUdid: "simulator-udid",
+      metroPort: 8679
+    })).toEqual([
+      "simctl",
+      "launch",
+      "simulator-udid",
+      "build.kanna.app.dev",
+      "--args",
+      "--initialUrl",
+      "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8679&disableOnboarding=1"
+    ]);
   });
 
   it("builds the simulator command that disables Expo's overlapping dev-menu FAB", () => {

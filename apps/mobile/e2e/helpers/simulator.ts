@@ -116,20 +116,38 @@ export function buildExpoDevelopmentClientUrl(
   return `${appScheme}://expo-development-client/?url=${encodeURIComponent(metroUrl)}&disableOnboarding=1`;
 }
 
-export async function openSimulatorDevelopmentClient(input: {
+export function buildSimulatorDevelopmentClientLaunchArgs(input: {
   appScheme: string;
-  device: AvailableSimulatorDevice;
+  bundleId: string;
+  deviceUdid: string;
   metroPort: number;
-}): Promise<void> {
-  await execFileAsync("xcrun", [
+}): string[] {
+  return [
     "simctl",
-    "openurl",
-    input.device.udid,
+    "launch",
+    input.deviceUdid,
+    input.bundleId,
+    "--args",
+    "--initialUrl",
     buildExpoDevelopmentClientUrl(
       input.appScheme,
       `http://127.0.0.1:${input.metroPort}`
     )
-  ]);
+  ];
+}
+
+export async function openSimulatorDevelopmentClient(input: {
+  appScheme: string;
+  bundleId: string;
+  device: AvailableSimulatorDevice;
+  metroPort: number;
+}): Promise<void> {
+  await execFileAsync("xcrun", buildSimulatorDevelopmentClientLaunchArgs({
+    appScheme: input.appScheme,
+    bundleId: input.bundleId,
+    deviceUdid: input.device.udid,
+    metroPort: input.metroPort
+  }));
 }
 
 export function buildDisableExpoDevMenuFabArgs(

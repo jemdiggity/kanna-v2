@@ -44,6 +44,7 @@ describe("mobile Appium config", () => {
       "appium:automationName": "XCUITest",
       "appium:deviceName": "iPhone 15",
       "appium:bundleId": "build.kanna.app",
+      "appium:autoLaunch": false,
       "appium:wdaLocalPort": 4724,
       "appium:wdaLaunchTimeout": 180_000,
       "appium:noReset": false,
