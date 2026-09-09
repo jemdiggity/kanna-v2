@@ -301,9 +301,7 @@ function createRelayQuickReplyPersistenceJourney(
 ): RelayQuickReplyPersistenceJourney {
   const openEditor = async () => {
     await openRelayProfileSheet(ui);
-    const quickRepliesButton = await driver.$(
-      selectors.accountQuickRepliesButton,
-    );
+    const quickRepliesButton = await driver.$("~Open Quick Replies");
     await quickRepliesButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await ui.waitUntil(
       async () => await quickRepliesButton.isEnabled().catch(() => false),
@@ -1330,17 +1328,38 @@ async function verifyMentionedFileMenuFlow(
     }
   }
   await closeTaskFilePreview(driver);
+  // The native preview closes before React has completed the modal unmount.
+  // Let that transition settle before opening another action sheet; otherwise
+  // its stale close callback can clear the second mentioned-files request.
+  await driver.pause(350);
 
   const taskMore = await driver.$(selectors.taskMoreButton);
+  await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await taskMore.click();
+  const taskActionMenu = await driver.$(`~${TASK_ACTION_MENU_TITLE}`);
+  await taskActionMenu.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   const mentionedFilesAction = await driver.$(
-    `~Mentioned Files (${fixture.mentionedCount})`
+    '-ios predicate string:label BEGINSWITH "Mentioned Files ("'
   );
+  await mentionedFilesAction.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const mentionedFilesLabel = await mentionedFilesAction.getAttribute("label");
+  const expectedMentionedFilesLabel = `Mentioned Files (${fixture.mentionedCount})`;
+  if (mentionedFilesLabel !== expectedMentionedFilesLabel) {
+    throw new Error(
+      `Expected ${expectedMentionedFilesLabel} before reopening mentioned files, got ${JSON.stringify(mentionedFilesLabel)}`
+    );
+  }
   await mentionedFilesAction.click();
-  const markdownRow = await driver.$(
-    taskMentionedFilesRowSelector(fixture.path)
-  );
+  const markdownRow = await driver.$(`~Open file ${fixture.path}`);
   await markdownRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const markdownRowEnabled = await markdownRow.getAttribute("enabled");
+  const markdownRowLabel = await markdownRow.getAttribute("label");
+  if (markdownRowEnabled !== "true") {
+    throw new Error(
+      `Expected resolved mentioned file ${fixture.path} to be selectable; ` +
+        `native enabled=${JSON.stringify(markdownRowEnabled)}, label=${JSON.stringify(markdownRowLabel)}`
+    );
+  }
   await markdownRow.click();
   await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.path);
   await expectNativeText(driver, selectors.taskFilePreviewMode, "Rendered Markdown");
@@ -1724,7 +1743,19 @@ async function signInToRelay(
   const signOutButton = await ui.getAccountSignOutButton();
   if (await signOutButton.isExisting().catch(() => false)) {
     await signOutButton.click();
-    await ui.pause(1_000);
+    // Auth persistence updates asynchronously. Do not let the old Sign Out
+    // control satisfy the subsequent sign-in readiness check.
+    await ui.waitUntil(
+      async () =>
+        !(await ui.getAccountSignOutButton())
+          .isExisting()
+          .catch(() => false),
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected the prior relay account to finish signing out"
+      }
+    );
   }
 
   const emailInput = await ui.getAccountEmailInput();

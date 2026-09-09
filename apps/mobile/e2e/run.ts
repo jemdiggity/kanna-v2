@@ -11,6 +11,7 @@ import {
   assertXcuitestDriverInstalled,
   listXcuitestConnectedDeviceUdids,
   startLocalAppiumServer,
+  stopSimulatorWebDriverAgent,
   waitForLocalAppiumServer
 } from "./helpers/appium";
 import {
@@ -108,12 +109,19 @@ async function isDisplayed(driver: Browser, selector: string): Promise<boolean> 
   return element.isDisplayed().catch(() => false);
 }
 
-async function dismissExpoStartupOverlay(driver: Browser): Promise<void> {
+async function handleStartupSystemAlert(driver: Browser): Promise<void> {
   const alertText = await driver.getAlertText().catch(() => null);
-  if (alertText && isBonjourPermissionAlert(alertText)) {
+  if (alertText) {
+    if (!isBonjourPermissionAlert(alertText)) {
+      throw new Error(
+        `Mobile startup is blocked by a system alert: ${JSON.stringify(alertText)}`
+      );
+    }
     await driver.acceptAlert();
   }
+}
 
+async function dismissExpoStartupOverlay(driver: Browser): Promise<void> {
   const continueButton = await driver.$("~Continue");
   if (await continueButton.isDisplayed().catch(() => false)) {
     await continueButton.click();
@@ -134,6 +142,11 @@ export async function waitForExpoAppReady(
   driver: Browser,
   readySelector: string = selectors.appShell
 ): Promise<void> {
+  // XCUITest answers a missing alert with a WebDriver error. Do this once at
+  // launch rather than on every readiness poll: a real iOS launch gate is
+  // reported immediately, while the normal no-alert case cannot flood the
+  // Appium log or turn into an unbounded alert probe loop.
+  await handleStartupSystemAlert(driver);
   let consecutiveReadyPolls = 0;
   await driver.waitUntil(
     async () => {
@@ -215,6 +228,17 @@ async function main(): Promise<void> {
   let expoServer: Awaited<ReturnType<typeof ensureExpoServer>> | null = null;
   let relayHarness: Awaited<ReturnType<typeof startMobileRelayHarness>> | null = null;
   let simulatorDevice: AvailableSimulatorDevice | null = null;
+  let shuttingDown = false;
+  const stopWda = async () => {
+    if (!simulatorDevice || shuttingDown) return;
+    shuttingDown = true;
+    await stopSimulatorWebDriverAgent(simulatorDevice.udid);
+  };
+  const handleTermination = () => {
+    void stopWda().finally(() => process.exit(1));
+  };
+  process.once("SIGINT", handleTermination);
+  process.once("SIGTERM", handleTermination);
 
   try {
     await waitForLocalAppiumServer(env.appiumPort);
@@ -306,6 +330,7 @@ async function main(): Promise<void> {
     if (simulatorDevice) {
       await openSimulatorDevelopmentClient({
         appScheme: env.appScheme,
+        bundleId: env.bundleId,
         device: simulatorDevice,
         metroPort: env.metroPort
       });
@@ -337,6 +362,7 @@ async function main(): Promise<void> {
           }
           await openSimulatorDevelopmentClient({
             appScheme: env.appScheme,
+            bundleId: env.bundleId,
             device: simulatorDevice,
             metroPort: env.metroPort
           });
@@ -443,6 +469,9 @@ async function main(): Promise<void> {
     }
     await expoServer?.stop();
     await relayHarness?.stop();
+    await stopWda();
+    process.removeListener("SIGINT", handleTermination);
+    process.removeListener("SIGTERM", handleTermination);
   }
 }
 

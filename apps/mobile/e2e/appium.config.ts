@@ -47,6 +47,9 @@ export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
   return {
     platformName: "iOS",
     "appium:automationName": "XCUITest",
+    // Expo reads --initialUrl only when its development client starts. The
+    // relay runner owns that first launch after WebDriverAgent is attached.
+    "appium:autoLaunch": false,
     "appium:deviceName": input.deviceName,
     "appium:bundleId": input.bundleId,
     "appium:wdaLocalPort": deriveWdaLocalPort(

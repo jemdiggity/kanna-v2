@@ -135,6 +135,25 @@ describe("mobile smoke runner", () => {
     expect(devMenuDismissed).toBe(true);
   });
 
+  it("fails immediately with the unexpected startup alert text", async () => {
+    const driver = {
+      $: async () => ({
+        click: async () => undefined,
+        isDisplayed: async () => false,
+        isExisting: async () => false
+      }),
+      getAlertText: async () => "Open in Kanna?",
+      waitUntil: async (condition: () => Promise<boolean>) => {
+        await condition();
+        throw new Error("condition did not become ready");
+      }
+    } as unknown as Browser;
+
+    await expect(waitForExpoAppReady(driver)).rejects.toThrow(
+      'Mobile startup is blocked by a system alert: "Open in Kanna?"'
+    );
+  });
+
   it("accepts a dynamic relaunch selector while handling Expo overlays", async () => {
     let poll = 0;
     const readySelector: string = "~mobile.toolbar.tab.recent";
