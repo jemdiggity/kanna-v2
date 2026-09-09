@@ -35,7 +35,7 @@ export function binary(name: string): string {
   return path;
 }
 
-async function freePort(): Promise<number> {
+export async function freePort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
     const server = createServer();
     server.on("error", reject);
@@ -70,15 +70,30 @@ export async function run(
   });
 }
 
+/** Everything needed to launch a supervisor again for the same instance. */
+export interface WorkerLaunch {
+  root: string;
+  dataDir: string;
+  dbPath: string;
+  lanPort: number;
+  transferPort: number;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+}
+
 export class Worker {
+  private child: ChildProcess;
+
   private constructor(
-    private readonly child: ChildProcess,
-    private readonly root: string,
+    child: ChildProcess,
+    readonly launch: WorkerLaunch,
     readonly dataDir: string,
     readonly baseUrl: string,
     readonly env: NodeJS.ProcessEnv,
     private readonly log: string[],
-  ) {}
+  ) {
+    this.child = child;
+  }
 
   static async start(providerBinDir: string): Promise<Worker> {
     const root = await mkdtemp(join(tmpdir(), "kanna-headless-"));
@@ -107,32 +122,37 @@ export class Worker {
     // The gate asserts durable rows, never terminal scrapings.
     env.KANNA_E2E_TEST_SQL = "1";
 
-    const log: string[] = [];
-    const child = spawn(
-      binary("kanna-worker"),
-      [
-        "run",
-        "--data-dir",
-        dataDir,
-        // An explicit database, always. macOS resolves application data from
-        // `~/Library/Application Support` and ignores XDG entirely, so without
-        // this the lane would open (and write to) the developer's real Kanna
-        // database.
-        "--db-path",
-        join(root, "kanna-gate.db"),
-        "--lan-port",
-        String(lanPort),
-        "--transfer-port",
-        String(transferPort),
-      ],
-      { env, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    child.stdout?.on("data", (chunk) => log.push(String(chunk)));
-    child.stderr?.on("data", (chunk) => log.push(String(chunk)));
+    const dbPath = join(root, "kanna-gate.db");
+    const args = [
+      "run",
+      "--data-dir",
+      dataDir,
+      // An explicit database, always. macOS resolves application data from
+      // `~/Library/Application Support` and ignores XDG entirely, so without
+      // this the lane would open (and write to) the developer's real Kanna
+      // database.
+      "--db-path",
+      dbPath,
+      "--lan-port",
+      String(lanPort),
+      "--transfer-port",
+      String(transferPort),
+    ];
+    const launch: WorkerLaunch = {
+      root,
+      dataDir,
+      dbPath,
+      lanPort,
+      transferPort,
+      args,
+      env,
+    };
 
+    const log: string[] = [];
+    const child = spawnSupervisor(launch, log);
     const worker = new Worker(
       child,
-      root,
+      launch,
       dataDir,
       `http://127.0.0.1:${lanPort}`,
       env,
@@ -147,6 +167,34 @@ export class Worker {
 
   output(): string {
     return this.log.join("");
+  }
+
+  /** The supervisor's own pid. */
+  get supervisorPid(): number {
+    return this.child.pid ?? -1;
+  }
+
+  /**
+   * Kill the supervisor outright, the way a crash or an OOM kill does.
+   *
+   * The daemon and the server survive, reparented to init — which is exactly
+   * the state the next supervisor has to cope with.
+   */
+  async killSupervisor(): Promise<void> {
+    const pid = this.child.pid;
+    if (pid === undefined) return;
+    const exited = new Promise<void>((done) => this.child.once("exit", () => done()));
+    process.kill(pid, "SIGKILL");
+    await exited;
+  }
+
+  /** Start another supervisor for this same instance: same dirs, db and ports. */
+  async relaunch(): Promise<void> {
+    this.child = spawnSupervisor(this.launch, this.log);
+    await waitFor(
+      async () => (await this.status()) !== null,
+      () => `the replacement kanna-worker never served ${this.baseUrl}\n${this.output()}`,
+    );
   }
 
   async status(): Promise<Record<string, unknown> | null> {
@@ -233,7 +281,7 @@ export class Worker {
       await Promise.race([exited, sleep(10_000)]);
       if (this.child.exitCode === null) this.child.kill("SIGKILL");
     }
-    await rm(this.root, { recursive: true, force: true });
+    await rm(this.launch.root, { recursive: true, force: true });
   }
 }
 
@@ -260,6 +308,50 @@ export function providerPath(
 
 /** Every provider executable `kanna-server` probes. */
 export const AGENT_PROVIDER_EXECUTABLES = ["claude", "codex", "copilot", "opencode", "agy"];
+
+function spawnSupervisor(launch: WorkerLaunch, log: string[]): ChildProcess {
+  const child = spawn(binary("kanna-worker"), launch.args, {
+    env: launch.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (chunk) => log.push(String(chunk)));
+  child.stderr?.on("data", (chunk) => log.push(String(chunk)));
+  return child;
+}
+
+/** Is that pid still there? */
+export function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The pids holding a listening socket on `port`.
+ *
+ * Deliberately the same question `kanna-server-process` answers for the
+ * supervisor: "who is actually listening", not "who is named kanna-server".
+ */
+export async function listenersOnPort(port: number): Promise<number[]> {
+  if (process.platform === "linux") {
+    const listing = await run("/bin/ss", ["-lptnH", `sport = :${port}`], process.env);
+    return [...listing.stdout.matchAll(/pid=(\d+)/g)]
+      .map((match) => Number.parseInt(match[1]!, 10))
+      .filter((pid, index, all) => all.indexOf(pid) === index);
+  }
+  const listing = await run(
+    "/usr/sbin/lsof",
+    ["-nP", "-ti", `TCP:${port}`, "-sTCP:LISTEN"],
+    process.env,
+  );
+  return listing.stdout
+    .split("\n")
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((pid) => Number.isFinite(pid));
+}
 
 export async function waitFor(
   condition: () => Promise<boolean>,

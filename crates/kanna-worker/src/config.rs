@@ -104,10 +104,10 @@ impl Options {
         self.data_dir.join("daemon.pid")
     }
 
-    /// The supervisor's own pid file. `stop-daemon` reads it to stop
-    /// supervision before stopping the daemon.
-    pub fn worker_pid_path(&self) -> PathBuf {
-        self.data_dir.join("worker.pid")
+    /// Where the running supervisor records who it is, so that `stop-daemon`
+    /// can *prove* which process to signal rather than trusting a number.
+    pub fn supervisor_record_path(&self) -> PathBuf {
+        self.data_dir.join("supervisor.json")
     }
 
     pub fn lan_port(&self) -> u16 {
@@ -210,11 +210,17 @@ impl Identity {
     }
 }
 
-/// Write a file only the owner can read: it carries `desktop_secret`, which is
-/// a credential.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Write a file only the owner can read.
+///
+/// Both files this writes carry `desktop_secret`, which is a credential: the
+/// identity record and `server.toml`. The mode is set **after** opening as
+/// well as at creation, because `OpenOptions::mode` only applies to a file
+/// this call creates -- an existing `server.toml` left at 0644 by an earlier
+/// build, or created under the default 022 umask, would otherwise keep its
+/// permissions and the 0600 on the identity file would be protecting nothing.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -227,6 +233,8 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .mode(0o600)
         .open(path)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("failed to secure {}: {error}", path.display()))?;
     file.write_all(bytes)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }

@@ -4,6 +4,13 @@
 //! trust root is the supervisor's own executable, which is why the daemon is
 //! parented by it rather than by `systemd --user` (see the crate docs).
 //!
+//! The unit must also carry the *resolved* database. `Options` picks it from
+//! `--db-path`, then `KANNA_DB_PATH`, then the machine's canonical desktop
+//! database — and a unit that dropped that choice would install an isolated
+//! worker which quietly starts against the canonical database on its next
+//! boot, which is the one database an isolated instance must never touch.
+//! Whatever `install-unit` resolved is written into `ExecStart`.
+//!
 //! Two settings are load-bearing:
 //!
 //! * **`KillMode=process`.** Without it, stopping or restarting the unit kills
@@ -77,6 +84,7 @@ pub fn render(options: &Options) -> Result<String, String> {
     Ok(render_with(
         &exe,
         &options.data_dir.to_string_lossy(),
+        &options.db_path().to_string_lossy(),
         options.lan_port(),
         options.transfer_port(),
         &std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string()),
@@ -86,6 +94,7 @@ pub fn render(options: &Options) -> Result<String, String> {
 fn render_with(
     executable: &str,
     data_dir: &str,
+    db_path: &str,
     lan_port: u16,
     transfer_port: u16,
     path: &str,
@@ -98,7 +107,7 @@ fn render_with(
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={executable} run --data-dir {data_dir} --lan-port {lan_port} --transfer-port {transfer_port}\n\
+         ExecStart={executable} run --data-dir {data_dir} --db-path {db_path} --lan-port {lan_port} --transfer-port {transfer_port}\n\
          ExecReload=/bin/kill -HUP $MAINPID\n\
          Restart=on-failure\n\
          RestartSec=2\n\
@@ -122,6 +131,7 @@ mod tests {
         let unit = render_with(
             "/opt/kanna/bin/kanna-worker",
             "/home/tester/.local/share/Kanna",
+            "/home/tester/.local/share/build.kanna/kanna-v2.db",
             48120,
             48130,
             "/opt/toolchain/bin:/usr/bin",
@@ -134,10 +144,62 @@ mod tests {
         assert!(unit.contains("Environment=PATH=/opt/toolchain/bin:/usr/bin\n"));
         assert!(unit.contains(
             "ExecStart=/opt/kanna/bin/kanna-worker run --data-dir /home/tester/.local/share/Kanna \
+             --db-path /home/tester/.local/share/build.kanna/kanna-v2.db \
              --lan-port 48120 --transfer-port 48130\n"
         ));
         assert!(unit.contains("ExecReload=/bin/kill -HUP $MAINPID\n"));
         assert!(unit.contains("WantedBy=default.target\n"));
+    }
+
+    /// An installed unit must start against the database the install
+    /// resolved. Both ways of choosing one are covered, because the
+    /// environment-selected case is the one an isolated `kd`-style instance
+    /// actually uses -- and dropping it would send that worker to the
+    /// machine's canonical desktop database on its next boot.
+    #[test]
+    fn the_unit_launches_against_the_resolved_database() {
+        let explicit = Options::parse(&[
+            "--data-dir".to_string(),
+            "/srv/worker".to_string(),
+            "--db-path".to_string(),
+            "/srv/worker/isolated.db".to_string(),
+        ])
+        .expect("options should parse");
+        assert_eq!(explicit.db_path(), PathBuf::from("/srv/worker/isolated.db"));
+
+        let unit = render_with(
+            "/opt/kanna/bin/kanna-worker",
+            "/srv/worker",
+            &explicit.db_path().to_string_lossy(),
+            48120,
+            48130,
+            "/usr/bin",
+        );
+        assert!(
+            unit.contains("--db-path /srv/worker/isolated.db "),
+            "the resolved database must reach ExecStart: {unit}"
+        );
+
+        // Selected through the environment instead. This test owns the
+        // variable and restores it; no other test in this crate reads it.
+        let previous = std::env::var_os("KANNA_DB_PATH");
+        std::env::set_var("KANNA_DB_PATH", "/srv/worker/from-env.db");
+        let from_env = Options::parse(&["--data-dir".to_string(), "/srv/worker".to_string()])
+            .expect("options should parse");
+        match previous {
+            Some(value) => std::env::set_var("KANNA_DB_PATH", value),
+            None => std::env::remove_var("KANNA_DB_PATH"),
+        }
+        assert_eq!(from_env.db_path(), PathBuf::from("/srv/worker/from-env.db"));
+        assert!(render_with(
+            "/opt/kanna/bin/kanna-worker",
+            "/srv/worker",
+            &from_env.db_path().to_string_lossy(),
+            48120,
+            48130,
+            "/usr/bin",
+        )
+        .contains("--db-path /srv/worker/from-env.db "));
     }
 
     #[test]

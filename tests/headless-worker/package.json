@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run --maxWorkers=1 src/providerPath.test.ts",
-    "test:gate": "vitest run --maxWorkers=1 src/gate.e2e.test.ts",
+    "test:gate": "vitest run --maxWorkers=1 src/gate.e2e.test.ts src/process.e2e.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -4098,20 +4098,42 @@ fn flood_bytes(intended: usize) -> usize {
     intended.max(MINIMUM_SATURATING_FLOOD)
 }
 
-/// How long a *healthy* client may take to receive a whole flood.
+/// The floor under every Linux flood-delivery ceiling, measured.
 ///
-/// These tests guard one regression: a 500 ms per-chunk write timeout being
-/// paid for every chunk the stalled subscriber cannot take, which turns a
-/// flood into tens of seconds. The ceiling therefore only has to sit an order
-/// of magnitude under that, and it scales with the flood because
-/// [`MINIMUM_SATURATING_FLOOD`] makes the flood far larger on a kernel whose
-/// socket buffers are far larger -- the same number of bytes is not the same
-/// amount of work.
+/// A Linux flood is a fixed 512 KiB ([`MINIMUM_SATURATING_FLOOD`]) whatever
+/// each test's macOS base is, so the time to deliver one does not scale with
+/// that base -- and scaling it was how the 1.5 s base became a 7.5 s ceiling
+/// that the VM could not meet.
+///
+/// Measured on the Ubuntu 26.04 aarch64 VM, idle, with
+/// `measure_flood_delivery_with_and_without_a_stalled_observer`, three runs of
+/// each condition:
+///
+/// | run | no stalled observer | stalled observer attached |
+/// | --- | --- | --- |
+/// | 1 | 7 226 ms | 7 532 ms |
+/// | 2 | 5 505 ms | 5 224 ms |
+/// | 3 | 4 457 ms | 4 960 ms |
+///
+/// So 68-115 KiB/s, and the stalled observer costs nothing the run-to-run
+/// spread does not already cover: the with/without difference (-281 ms to
+/// +503 ms) is well inside the 2.8 s spread of the *same* condition. The
+/// healthy path is not being delayed, so there is no daemon regression here --
+/// the ceiling was simply below the machine's throughput.
+///
+/// 30 s is four times the slowest delivery observed. That headroom is
+/// affordable because the regression these tests guard is *unbounded*: the
+/// observer write had no timeout at all, so a saturated observer froze PTY
+/// ingestion indefinitely. Any finite ceiling catches that; one below the
+/// machine's own throughput catches nothing but the machine.
+const LINUX_MINIMUM_FLOOD_DELIVERY_CEILING: Duration = Duration::from_secs(30);
+
+/// How long a *healthy* client may take to receive a whole flood.
 fn flood_delivery_ceiling(base: Duration) -> Duration {
     if cfg!(target_os = "macos") {
         base
     } else {
-        base * 5
+        std::cmp::max(base * 5, LINUX_MINIMUM_FLOOD_DELIVERY_CEILING)
     }
 }
 
@@ -4215,6 +4237,73 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
 
     drop(stalled);
     cleanup_atomic_attach_dir(&dir);
+}
+
+/// How long a healthy subscriber takes to receive the flood, with and without
+/// a saturated observer attached.
+///
+/// `#[ignore]`d: it is a measurement, not an assertion, and it is what
+/// [`flood_delivery_ceiling`]'s Linux number is derived from. Re-run it on the
+/// machine in question rather than adjusting the ceiling by feel:
+///
+/// ```text
+/// cargo test -p kanna-daemon --test reconnect -- --ignored --nocapture \
+///     measure_flood_delivery_with_and_without_a_stalled_observer
+/// ```
+#[test]
+#[ignore]
+fn measure_flood_delivery_with_and_without_a_stalled_observer() {
+    for with_stalled_observer in [false, true] {
+        let _flood_probe_guard = FLOOD_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let daemon = DaemonHandle::start();
+        let session_id = "sess-flood-measurement";
+        let dir = atomic_attach_dir("flood-measurement");
+        let bytes = flood_bytes(65536);
+
+        let mut control = daemon.connect();
+        control.send(&Cmd::Spawn {
+            session_id: session_id.to_string(),
+            executable: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "while [ ! -f go ]; do sleep 0.01; done; head -c {bytes} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+                ),
+            ],
+            cwd: dir.display().to_string(),
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+            terminal_prelude: None,
+        });
+        expect_session_created(&mut control, session_id);
+
+        let stalled_observer = with_stalled_observer.then(|| {
+            let mut observer = daemon.connect();
+            observer.clamp_recv_buffer(4096);
+            observe(&mut observer, session_id);
+            observer
+        });
+
+        let mut healthy = daemon.connect();
+        attach(&mut healthy, session_id);
+
+        std::fs::write(dir.join("go"), b"go").unwrap();
+        let started = Instant::now();
+        healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_secs(120));
+        let elapsed = started.elapsed();
+
+        eprintln!(
+            "MEASUREMENT stalled_observer={with_stalled_observer} bytes={bytes} elapsed_ms={} throughput_kib_s={:.0}",
+            elapsed.as_millis(),
+            (bytes as f64 / 1024.0) / elapsed.as_secs_f64()
+        );
+
+        drop(stalled_observer);
+        cleanup_atomic_attach_dir(&dir);
+    }
 }
 
 #[test]

@@ -3,5 +3,6 @@ members = [
     "apps/desktop/src-tauri",
     "crates/claude-agent-sdk",
     "crates/runtime-defaults",
+    "crates/server-process",
 ]
 resolver = "2"

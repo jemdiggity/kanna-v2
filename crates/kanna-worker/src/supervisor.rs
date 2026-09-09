@@ -18,6 +18,9 @@ use tokio::process::{Child, Command};
 /// so the bound only contains a wedged child.
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Bound on one `/v1/status` request, so a peer that answers but never closes
+/// cannot outlast the readiness deadline that is supposed to contain it.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run(options: Options) -> Result<(), String> {
     std::fs::create_dir_all(&options.data_dir)
@@ -37,12 +40,14 @@ pub async fn run(options: Options) -> Result<(), String> {
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
 
+    // `server.toml` carries `desktop_secret`, so it is written 0600 like the
+    // identity record -- and re-secured on every start, so a file left
+    // world-readable by an earlier version does not stay that way.
     let config_path = options.server_config_path();
-    std::fs::write(
+    config::write_private(
         &config_path,
-        config::build_server_config(&options, &identity, cli_bin.as_deref()),
-    )
-    .map_err(|error| format!("failed to write {}: {error}", config_path.display()))?;
+        config::build_server_config(&options, &identity, cli_bin.as_deref()).as_bytes(),
+    )?;
 
     eprintln!(
         "[worker] data_dir={} daemon={} server={} lan_port={}",
@@ -52,15 +57,16 @@ pub async fn run(options: Options) -> Result<(), String> {
         options.lan_port()
     );
 
-    // The supervisor's own pid file, so `stop-daemon` can stop supervision
-    // before stopping the daemon. Without it, tearing the daemon down races
-    // this process's own "the daemon died, replace it" branch and loses.
-    let worker_pid_path = options.worker_pid_path();
-    std::fs::write(&worker_pid_path, format!("{}\n", std::process::id()))
-        .map_err(|error| format!("failed to write {}: {error}", worker_pid_path.display()))?;
+    // The supervisor records itself so `stop-daemon` can stop supervision
+    // before stopping the daemon. Without that ordering, tearing the daemon
+    // down races this process's own "the daemon died, replace it" branch and
+    // loses. The record is an identity, not a number -- see
+    // `SupervisorRecord`.
+    let record_path = options.supervisor_record_path();
+    SupervisorRecord::of_this_process(&options.data_dir)?.write(&record_path)?;
 
     let mut daemon = spawn_daemon(&options, &daemon_bin, &server_bin).await?;
-    let mut server = spawn_server(&options, &identity, &server_bin).await?;
+    let mut server = start_server(&options, &identity, &server_bin).await?;
     authorize_server(&options, server.pid).await?;
 
     let result = supervise(
@@ -72,14 +78,89 @@ pub async fn run(options: Options) -> Result<(), String> {
         &mut server,
     )
     .await;
-    let _ = std::fs::remove_file(&worker_pid_path);
+    let _ = std::fs::remove_file(&record_path);
     result
 }
 
-/// A supervised child: the handle plus the pid we authorized it under.
+/// A process this supervisor is responsible for, and the pid it was
+/// authorized under.
+///
+/// `pid` is always the pid doing the work: for a server, the process holding
+/// the listening socket. That is the pid handed to the daemon, so it may never
+/// be a pid this supervisor merely hopes is the server.
 struct Supervised {
-    child: Child,
+    process: SupervisedProcess,
     pid: u32,
+}
+
+enum SupervisedProcess {
+    /// Spawned by this supervisor, and reaped by it.
+    Owned(Child),
+    /// Already running when this supervisor started -- because the previous
+    /// supervisor was killed and its children were reparented to init. Not
+    /// ours to reap, so its exit is observed by asking the kernel whether the
+    /// pid is still there.
+    Adopted,
+}
+
+impl Supervised {
+    /// Resolve when this process exits.
+    async fn wait(&mut self) -> Result<String, String> {
+        let pid = self.pid;
+        match &mut self.process {
+            SupervisedProcess::Owned(child) => child
+                .wait()
+                .await
+                .map(|status| status.to_string())
+                .map_err(|error| format!("failed to reap pid {pid}: {error}")),
+            SupervisedProcess::Adopted => {
+                // No exit status to reap from a process that is not our child;
+                // liveness is all the kernel will tell us about it.
+                loop {
+                    if !process_is_alive(pid) {
+                        return Ok("exited".to_string());
+                    }
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+            }
+        }
+    }
+
+    /// Has it exited already? `None` while it is still running.
+    async fn exited(&mut self) -> Result<Option<String>, String> {
+        let pid = self.pid;
+        match &mut self.process {
+            SupervisedProcess::Owned(child) => child
+                .try_wait()
+                .map(|status| status.map(|status| status.to_string()))
+                .map_err(|error| format!("failed to check on pid {pid}: {error}")),
+            SupervisedProcess::Adopted => {
+                Ok((!process_is_alive(pid)).then(|| "exited".to_string()))
+            }
+        }
+    }
+
+    /// Stop it, and reap it if it is ours.
+    async fn stop(&mut self) {
+        match &mut self.process {
+            SupervisedProcess::Owned(child) => {
+                if let Some(pid) = child.id() {
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                }
+                let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
+            SupervisedProcess::Adopted => {
+                let pid = self.pid as libc::pid_t;
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+            }
+        }
+    }
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    pid > 1 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
 }
 
 /// The event loop.
@@ -114,7 +195,7 @@ async fn supervise(
                     Ok(replacement) => {
                         // The old daemon exits once it has handed its sessions
                         // over; reap it so it does not linger as a zombie.
-                        let _ = daemon.child.wait().await;
+                        let _ = daemon.wait().await;
                         *daemon = replacement;
                         if let Err(error) = authorize_server(options, server.pid).await {
                             eprintln!("[worker] could not authorize the server on the new daemon generation: {error}");
@@ -125,32 +206,38 @@ async fn supervise(
             }
             _ = terminate.recv() => {
                 eprintln!("[worker] stopping the server; the daemon and its sessions stay up");
-                stop_child(&mut server.child).await;
+                server.stop().await;
                 return Ok(());
             }
             _ = interrupt.recv() => {
                 eprintln!("[worker] stopping the server; the daemon and its sessions stay up");
-                stop_child(&mut server.child).await;
+                server.stop().await;
                 return Ok(());
             }
-            status = server.child.wait() => {
-                let status = status.map_err(|error| format!("failed to reap kanna-server: {error}"))?;
+            status = server.wait() => {
+                let status = status?;
                 let delay = server_backoff.next();
                 eprintln!("[worker] kanna-server exited ({status}); restarting in {delay:?}");
                 tokio::time::sleep(delay).await;
-                *server = spawn_server(options, &identity, &server_bin).await?;
+                // Through `start_server`, not `spawn_server`: the port may
+                // still be held, and readiness must belong to whatever ends up
+                // actually serving.
+                *server = start_server(options, &identity, &server_bin).await?;
                 authorize_server(options, server.pid).await?;
                 server_backoff.reset();
             }
-            status = daemon.child.wait() => {
+            status = daemon.wait() => {
                 // A daemon that was replaced by a successor exits cleanly and
                 // its sessions live on inside the successor, so respawning
                 // blindly would start a third generation. Only replace it when
                 // nothing is serving the socket.
-                let status = status.map_err(|error| format!("failed to reap kanna-daemon: {error}"))?;
-                if DaemonClient::connect(&options.daemon_socket_path()).await.is_ok() {
+                let status = status?;
+                if let Ok(client) = DaemonClient::connect(&options.daemon_socket_path()).await {
                     eprintln!("[worker] a successor daemon is already serving; adopting it");
-                    daemon.child = spawn_placeholder().await?;
+                    *daemon = Supervised {
+                        pid: client.connected_pid(),
+                        process: SupervisedProcess::Adopted,
+                    };
                     if let Err(error) = authorize_server(options, server.pid).await {
                         eprintln!("[worker] could not authorize the server on the successor: {error}");
                     }
@@ -165,23 +252,6 @@ async fn supervise(
             }
         }
     }
-}
-
-/// A never-exiting stand-in for a daemon this supervisor no longer parents.
-///
-/// When a daemon hands off to a successor started elsewhere, this process
-/// still needs *something* in the `daemon.child.wait()` arm of the select, and
-/// it must never be ready. A child that sleeps forever is honest about the
-/// fact that we are no longer that daemon's parent.
-async fn spawn_placeholder() -> Result<Child, String> {
-    Command::new("/bin/sh")
-        .args(["-c", "while :; do sleep 3600; done"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| format!("failed to spawn the daemon placeholder: {error}"))
 }
 
 /// Spawn a daemon generation.
@@ -232,7 +302,10 @@ async fn spawn_daemon(
 
     wait_for_daemon(options, pid, previous_pid).await?;
     eprintln!("[worker] daemon generation {pid} is serving");
-    Ok(Supervised { child, pid })
+    Ok(Supervised {
+        process: SupervisedProcess::Owned(child),
+        pid,
+    })
 }
 
 /// Readiness is the pid file **and** a connectable socket whose peer is that
@@ -271,6 +344,80 @@ async fn wait_for_daemon(
     }
 }
 
+/// What to do about a server that is already answering on this worker's port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingServer {
+    /// It reports this worker's own desktop identity, so it is this worker's
+    /// server, left behind by a supervisor that was killed. Adopt it.
+    Adopt,
+    /// It belongs to another desktop, or will not say who it is. Stop it
+    /// before binding the port: a server this worker cannot identify must
+    /// never be authorized on this worker's daemon.
+    Replace,
+}
+
+fn classify_existing_server(
+    status: &serde_json::Value,
+    expected_desktop_id: &str,
+) -> ExistingServer {
+    match status.get("desktopId").and_then(serde_json::Value::as_str) {
+        Some(id) if id == expected_desktop_id => ExistingServer::Adopt,
+        _ => ExistingServer::Replace,
+    }
+}
+
+/// Bring this worker's server up, adopting one that is already serving.
+///
+/// This is not "spawn and wait for `/v1/status`", and the difference is a
+/// measured failure rather than caution. A supervisor that is SIGKILLed leaves
+/// its daemon and server running, reparented to init; the unit restarts the
+/// supervisor two seconds later and it starts against a port that is still
+/// bound. Spawning blindly there produces a child that dies on `Address
+/// already in use` -- but not before its `human_control::serve()` has unlinked
+/// and rebound the human-control socket, cutting the *surviving* server off
+/// from `adopt_desktop`. A readiness probe that only asks "does `/v1/status`
+/// answer" then reads the orphan's answer and reports the dead child as
+/// serving, so the pid this supervisor authorizes on the daemon holds nothing
+/// and every task input is refused with "system-input peer is not the pinned
+/// kanna-server process". Under `Restart=on-failure` that repeats forever, a
+/// daemon generation per round.
+///
+/// The shape mirrors the desktop's `MobileServerManager::start`, which faces
+/// the same question every launch.
+async fn start_server(
+    options: &Options,
+    identity: &Identity,
+    server_bin: &Path,
+) -> Result<Supervised, String> {
+    if let Some(status) = server_status(options).await {
+        match classify_existing_server(&status, &identity.desktop_id) {
+            ExistingServer::Adopt => {
+                // The orphan still owns the human-control socket, so it can
+                // still be adopted -- which is exactly why nothing may be
+                // spawned before this decision.
+                adopt_desktop(options).await?;
+                let pid = kanna_server_process::listening_server_pid(options.lan_port()).await?;
+                eprintln!(
+                    "[worker] adopted the kanna-server already serving on {} (pid {pid})",
+                    options.api_base_url()
+                );
+                return Ok(Supervised {
+                    process: SupervisedProcess::Adopted,
+                    pid,
+                });
+            }
+            ExistingServer::Replace => {
+                eprintln!(
+                    "[worker] a kanna-server this worker does not own holds port {}; stopping it",
+                    options.lan_port()
+                );
+                kanna_server_process::stop_server_on_port(options.lan_port()).await?;
+            }
+        }
+    }
+    spawn_server(options, identity, server_bin).await
+}
+
 async fn spawn_server(
     options: &Options,
     identity: &Identity,
@@ -299,22 +446,56 @@ async fn spawn_server(
     let pid = child
         .id()
         .ok_or_else(|| "spawned kanna-server has no process id".to_string())?;
+    let mut server = Supervised {
+        process: SupervisedProcess::Owned(child),
+        pid,
+    };
 
-    wait_for_server(options).await?;
-    adopt_desktop(options).await?;
+    if let Err(error) = finish_server_start(options, &mut server).await {
+        // Never leave a spawned child behind on a failed start. It holds the
+        // log pipe, and on the failure that matters here it is also part-way
+        // through rebinding the human-control socket out from under whoever
+        // is actually serving.
+        server.stop().await;
+        return Err(error);
+    }
     eprintln!(
         "[worker] kanna-server {pid} is serving on {}",
         options.api_base_url()
     );
-    Ok(Supervised { child, pid })
+    Ok(server)
 }
 
-async fn wait_for_server(options: &Options) -> Result<(), String> {
+async fn finish_server_start(options: &Options, server: &mut Supervised) -> Result<(), String> {
+    wait_for_server(options, server).await?;
+    adopt_desktop(options).await
+}
+
+/// Readiness that belongs to the process we spawned, not to whoever answers.
+async fn wait_for_server(options: &Options, server: &mut Supervised) -> Result<(), String> {
     let url = format!("{}/v1/status", options.api_base_url());
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     loop {
-        if http_get_ok(&url).await {
-            return Ok(());
+        if let Some(status) = server.exited().await? {
+            return Err(format!(
+                "kanna-server exited ({status}) before it began serving; see {}",
+                options.server_log_path().display()
+            ));
+        }
+        if http_get(&url).await.is_some() {
+            // The answer has to come from *our* process. An orphan left by a
+            // killed supervisor answers this URL just as readily, and
+            // believing it is how a dead pid gets authorized on the daemon.
+            let listeners = kanna_server_process::server_pids_on_port(options.lan_port()).await?;
+            if listeners.contains(&(server.pid as i32)) {
+                return Ok(());
+            }
+            return Err(format!(
+                "{url} is answered by {listeners:?}, not by the kanna-server this worker \
+                 spawned ({}); see {}",
+                server.pid,
+                options.server_log_path().display()
+            ));
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
@@ -326,39 +507,53 @@ async fn wait_for_server(options: &Options) -> Result<(), String> {
     }
 }
 
-/// A one-request HTTP client.
+/// `/v1/status` decoded, or `None` when nothing answers.
+async fn server_status(options: &Options) -> Option<serde_json::Value> {
+    let body = http_get(&format!("{}/v1/status", options.api_base_url())).await?;
+    serde_json::from_str(&body).ok()
+}
+
+/// A one-request HTTP client, returning the body of a 200.
 ///
 /// Deliberately hand-rolled: the only thing the supervisor asks the server is
-/// "are you up", and a TLS-capable HTTP stack is a large dependency (and, on
+/// `/v1/status`, and a TLS-capable HTTP stack is a large dependency (and, on
 /// Linux, an OpenSSL one) to carry for a loopback GET.
 ///
 /// The request is a *local process* request -- no `Origin`, no `Sec-Fetch-*`
 /// headers -- so `lan_trust` classifies it as such and it needs no credential,
 /// which is the same standing the CLI and MCP server have.
-async fn http_get_ok(url: &str) -> bool {
+async fn http_get(url: &str) -> Option<String> {
+    // Bounded as a whole: this reads to EOF, and a peer that answered but did
+    // not close would otherwise park the supervisor's readiness loop past the
+    // deadline that loop thinks it is enforcing.
+    tokio::time::timeout(HTTP_TIMEOUT, http_get_inner(url))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn http_get_inner(url: &str) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let Some((authority, path)) = url.strip_prefix("http://").map(|rest| {
+    let (authority, path) = url.strip_prefix("http://").map(|rest| {
         let split = rest.find('/').unwrap_or(rest.len());
         (&rest[..split], &rest[split..])
-    }) else {
-        return false;
-    };
-    let Ok(mut stream) = tokio::net::TcpStream::connect(authority).await else {
-        return false;
-    };
+    })?;
+    let mut stream = tokio::net::TcpStream::connect(authority).await.ok()?;
     let request = format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\n\r\n");
-    if stream.write_all(request.as_bytes()).await.is_err() {
-        return false;
+    stream.write_all(request.as_bytes()).await.ok()?;
+    // HTTP/1.0 with no keep-alive: the server closes when it is done, so the
+    // body is everything up to EOF.
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.ok()?;
+    if !(response.starts_with(b"HTTP/1.0 200") || response.starts_with(b"HTTP/1.1 200")) {
+        return None;
     }
-    // A partial read is enough: only the status line is being inspected, and
-    // waiting for EOF would depend on how the peer closes.
-    let mut response = vec![0u8; 64];
-    let Ok(read) = stream.read(&mut response).await else {
-        return false;
-    };
-    response.truncate(read);
-    response.starts_with(b"HTTP/1.0 200") || response.starts_with(b"HTTP/1.1 200")
+    let body_start = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?
+        + 4;
+    String::from_utf8(response[body_start..].to_vec()).ok()
 }
 
 /// Tell the server which process is its desktop.
@@ -448,38 +643,144 @@ pub async fn stop_daemon(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// What a running supervisor records about itself, so that a later
+/// `stop-daemon` can prove which process to signal.
+///
+/// A bare pid is not a process. The pid a stale record names may since have
+/// been recycled by anything at all -- reproduced with a `/bin/sleep` whose
+/// pid was placed in an isolated record, which `stop-daemon` then killed and
+/// reported as "no daemon". So the record carries the start-time identity that
+/// makes `(pid, start)` unique, the executable that pid must still be running,
+/// and the instance it was written for, and every one of them is re-checked
+/// against the live process before a signal is sent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SupervisorRecord {
+    pid: u32,
+    /// `(pid, start)` is the identity a recycled pid cannot forge.
+    start: kanna_daemon::proc_info::StartTime,
+    /// The kernel-derived path of the supervisor's own binary.
+    executable: PathBuf,
+    /// The instance this supervisor is supervising, so a record copied into
+    /// another data directory cannot aim a signal at an unrelated process.
+    data_dir: PathBuf,
+}
+
+impl SupervisorRecord {
+    fn of_this_process(data_dir: &Path) -> Result<Self, String> {
+        let pid = std::process::id();
+        let start = kanna_daemon::proc_info::process_info(pid as libc::pid_t)
+            .ok_or_else(|| "cannot read this supervisor's own process identity".to_string())?
+            .start;
+        let executable =
+            std::env::current_exe().map_err(|error| format!("cannot resolve own path: {error}"))?;
+        Ok(Self {
+            pid,
+            start,
+            executable,
+            data_dir: data_dir.to_path_buf(),
+        })
+    }
+
+    fn write(&self, path: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| format!("failed to encode the supervisor record: {error}"))?;
+        std::fs::write(path, bytes)
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    }
+
+    fn read(path: &Path) -> Option<Self> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+}
+
+/// Whether a recorded supervisor may be signaled.
+///
+/// Split out from the signalling so the decision is testable on its own: it is
+/// the part that must never say yes about a process somebody else owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorSignal {
+    Signal,
+    Refuse,
+}
+
+fn classify_supervisor_record(
+    record: &SupervisorRecord,
+    data_dir: &Path,
+    own_pid: u32,
+    own_executable: &Path,
+    live_start: Option<kanna_daemon::proc_info::StartTime>,
+    live_executable: Option<&Path>,
+) -> SupervisorSignal {
+    // `pid_t` is signed and `kill` reads 0 and negatives as "a process group",
+    // so a record naming one of them would broadcast a signal rather than
+    // aim it. Anything that does not round-trip through `pid_t` is refused
+    // outright rather than truncated into some other process.
+    let valid_pid = record.pid > 1 && i32::try_from(record.pid).is_ok();
+    let same_instance = record.data_dir == data_dir;
+    let not_ourselves = record.pid != own_pid;
+    // The recorded binary must be this same `kanna-worker`, and the live
+    // process must still be running it. The first refuses a stale record that
+    // names some other program; the second refuses a pid that has been
+    // recycled into one.
+    let recorded_is_this_worker = record.executable == own_executable;
+    let still_the_same_binary = live_executable == Some(record.executable.as_path());
+    let not_recycled = live_start == Some(record.start);
+
+    if valid_pid
+        && same_instance
+        && not_ourselves
+        && recorded_is_this_worker
+        && still_the_same_binary
+        && not_recycled
+    {
+        SupervisorSignal::Signal
+    } else {
+        SupervisorSignal::Refuse
+    }
+}
+
 /// Ask a running supervisor for this data directory to stop supervising.
 ///
 /// Best effort: there may not be one, and its SIGTERM path deliberately leaves
 /// the daemon running, so this only has to stop the respawns.
 async fn stop_supervisor(options: &Options) {
-    let path = options.worker_pid_path();
-    let Some(pid) = read_pid(&path) else {
+    let path = options.supervisor_record_path();
+    let Some(record) = SupervisorRecord::read(&path) else {
         return;
     };
-    if pid == std::process::id() {
+    let Ok(own_executable) = std::env::current_exe() else {
+        return;
+    };
+    let live = kanna_daemon::proc_info::process_info(record.pid as libc::pid_t);
+    let live_executable =
+        kanna_daemon::proc_info::process_executable_path(record.pid as libc::pid_t);
+    if classify_supervisor_record(
+        &record,
+        &options.data_dir,
+        std::process::id(),
+        &own_executable,
+        live.map(|info| info.start),
+        live_executable.as_deref(),
+    ) == SupervisorSignal::Refuse
+    {
+        // Not proof of a running supervisor, so nothing is signaled. A stale
+        // record is the normal reason to land here.
+        let _ = std::fs::remove_file(&path);
         return;
     }
+
+    let pid = record.pid;
     if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
         return;
     }
     eprintln!("[worker] asked supervisor {pid} to stop before tearing the daemon down");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+    while kanna_daemon::proc_info::identity_matches(pid as libc::pid_t, record.start) {
         if tokio::time::Instant::now() >= deadline {
             return;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
-}
-
-async fn stop_child(child: &mut Child) {
-    if let Some(pid) = child.id() {
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    }
-    let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
-    let _ = child.start_kill();
-    let _ = child.wait().await;
 }
 
 fn signal(kind: tokio::signal::unix::SignalKind) -> Result<tokio::signal::unix::Signal, String> {
@@ -547,12 +848,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_get_ok_reads_the_status_line() {
+    async fn http_get_returns_the_body_of_a_200_and_nothing_else() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         for (reply, expected) in [
-            ("HTTP/1.1 200 OK\r\n\r\n{}", true),
-            ("HTTP/1.1 503 Service Unavailable\r\n\r\n", false),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"desktopId\":\"w-1\"}",
+                Some("{\"desktopId\":\"w-1\"}".to_string()),
+            ),
+            ("HTTP/1.1 503 Service Unavailable\r\n\r\n", None),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -568,10 +872,135 @@ mod tests {
                 }
             });
             assert_eq!(
-                http_get_ok(&format!("http://127.0.0.1:{port}/v1/status")).await,
+                http_get(&format!("http://127.0.0.1:{port}/v1/status")).await,
                 expected
             );
             let _ = serve.await;
+        }
+    }
+
+    /// `stop-daemon` must not aim a signal at a number. Every one of these is
+    /// a way a recorded pid stops being the supervisor that wrote it.
+    #[test]
+    fn a_supervisor_is_signaled_only_when_the_record_still_describes_it() {
+        let data_dir = Path::new("/data/Kanna");
+        let exe = PathBuf::from("/opt/kanna/bin/kanna-worker");
+        let record = SupervisorRecord {
+            pid: 4242,
+            start: (99, 0),
+            executable: exe.clone(),
+            data_dir: data_dir.to_path_buf(),
+        };
+        let classify = |record: &SupervisorRecord,
+                        dir: &Path,
+                        own_pid: u32,
+                        live_start: Option<(u64, u64)>,
+                        live_exe: Option<&Path>| {
+            classify_supervisor_record(record, dir, own_pid, &exe, live_start, live_exe)
+        };
+
+        assert_eq!(
+            classify(&record, data_dir, 1, Some((99, 0)), Some(&exe)),
+            SupervisorSignal::Signal
+        );
+
+        // A pid recycled into another process: the start time no longer
+        // matches, which is the whole reason the record carries one.
+        assert_eq!(
+            classify(&record, data_dir, 1, Some((100, 0)), Some(&exe)),
+            SupervisorSignal::Refuse
+        );
+        // Dead, so there is nothing to signal.
+        assert_eq!(
+            classify(&record, data_dir, 1, None, None),
+            SupervisorSignal::Refuse
+        );
+        // That pid is now running something else -- the reproduced case was a
+        // reviewer's `/bin/sleep`, which must survive.
+        assert_eq!(
+            classify(
+                &record,
+                data_dir,
+                1,
+                Some((99, 0)),
+                Some(Path::new("/bin/sleep"))
+            ),
+            SupervisorSignal::Refuse
+        );
+        // A record naming some other program is refused before the live
+        // process is even consulted.
+        let foreign = SupervisorRecord {
+            executable: PathBuf::from("/bin/sleep"),
+            ..record.clone()
+        };
+        assert_eq!(
+            classify(
+                &foreign,
+                data_dir,
+                1,
+                Some((99, 0)),
+                Some(Path::new("/bin/sleep"))
+            ),
+            SupervisorSignal::Refuse
+        );
+        // A record copied into another instance's directory.
+        assert_eq!(
+            classify(
+                &record,
+                Path::new("/data/Other"),
+                1,
+                Some((99, 0)),
+                Some(&exe)
+            ),
+            SupervisorSignal::Refuse
+        );
+        // Ourselves.
+        assert_eq!(
+            classify(&record, data_dir, 4242, Some((99, 0)), Some(&exe)),
+            SupervisorSignal::Refuse
+        );
+        // Special and out-of-range pids: `kill` reads 0 and negatives as a
+        // process *group*, so these would broadcast rather than aim.
+        for pid in [0, 1, u32::MAX, i32::MAX as u32 + 1] {
+            let odd = SupervisorRecord {
+                pid,
+                ..record.clone()
+            };
+            assert_eq!(
+                classify(&odd, data_dir, 7, Some((99, 0)), Some(&exe)),
+                SupervisorSignal::Refuse,
+                "pid {pid} must never be signaled"
+            );
+        }
+    }
+
+    /// The decision the crash-recovery path turns on: a server already on this
+    /// worker's port is only adopted when it says it is *this* worker's.
+    /// Anything else -- another desktop, or a server that will not identify
+    /// itself -- is stopped, because a pid this worker cannot attribute must
+    /// never be authorized on its daemon.
+    #[test]
+    fn an_existing_server_is_adopted_only_when_it_reports_this_worker() {
+        let status = |value: serde_json::Value| value;
+
+        assert_eq!(
+            classify_existing_server(
+                &status(serde_json::json!({ "desktopId": "worker-abc" })),
+                "worker-abc"
+            ),
+            ExistingServer::Adopt
+        );
+        for foreign in [
+            serde_json::json!({ "desktopId": "worker-other" }),
+            serde_json::json!({ "desktopId": serde_json::Value::Null }),
+            serde_json::json!({ "desktopId": 7 }),
+            serde_json::json!({}),
+        ] {
+            assert_eq!(
+                classify_existing_server(&status(foreign.clone()), "worker-abc"),
+                ExistingServer::Replace,
+                "{foreign} must not be adopted"
+            );
         }
     }
 }

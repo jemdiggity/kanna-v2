@@ -253,6 +253,7 @@ never the Firebase CLI directly; function deploys additionally require
 | Path | Purpose |
 |---|---|
 | `crates/runtime-defaults/` | Shared constants: bundle ids, DB name, relay URLs, Firebase project ids, ports |
+| `crates/server-process/` | Who is listening on `kanna-server`'s port, and how to stop them — shared by both launchers (the desktop app and `kanna-worker`), because a launcher must attribute a port to a real pid before it authorizes one, and two copies would drift |
 | `crates/task-transfer/` | Peer-to-peer desktop protocol (mDNS discovery via `_kanna-xfer._tcp`, crypto, peer registry): task transfer plus peer task snapshots and observing/sending input to peer sessions |
 | `crates/tauri-plugin-delta-updater/` | Self-updater plugin (stub) |
 | `packages/core/` | Shared TS business logic: workflow types/tags, repo config, custom tasks, GitHub/Slack/Discord clients |

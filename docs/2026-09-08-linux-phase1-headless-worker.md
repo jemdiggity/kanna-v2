@@ -20,15 +20,26 @@ relationship, and proves the whole task lifecycle end to end on the VM.
 
 | Suite | Linux (VM) | macOS (Mac Studio) |
 | --- | --- | --- |
-| `cargo test -p kanna-daemon --no-fail-fast -- --test-threads=1` | **837 passed, 0 failed**, 3 ignored, across every target | **826 passed, 0 failed**, 3 ignored |
+| `cargo test -p kanna-daemon --no-fail-fast -- --test-threads=1` | **839 passed, 0 failed**, 4 ignored, across every target | **826 passed, 0 failed**, 4 ignored |
 | `cargo clippy --workspace --all-targets -- -D warnings` (`--exclude kanna-desktop` on Linux) | exit 0 | exit 0 |
 | `cargo test --workspace --exclude kanna-daemon --exclude kanna-desktop` | 2 174 passed, **4 failed** — all four the "no agent CLI installed" class, see §6 | all pass |
 | `cargo test -p kanna-server` with any `claude`/`codex`/`opencode` executable on `PATH` | **1 352 passed, 0 failed** | — |
-| `./kd test headless-worker` (the exit gate) | **11 passed** | 9 passed, 2 skipped (systemd-only) |
-| `pnpm test` (`tools/kd`) | — | 765+ passed |
+| `./kd test headless-worker` (the exit gate) | **16 passed** | 14 passed, 2 skipped (systemd-only) |
+| `./kd test all` | — | **19 of 19 lanes green**; 3 212 Rust tests passed, 0 failed |
 
 Phase 0's baseline was 651 passing / 113 failing daemon tests, 1 326/1 348
 server tests, and a daemon that could not start at all.
+
+The Linux numbers are from an idle VM (load < 1). The macOS numbers are from a
+green `./kd test all`, but the Mac Studio was running many other Kanna tasks
+throughout, at load averages of 38–63, and that is worth recording: two
+*earlier* full runs each produced one failure in a different timing-sensitive
+PTY fixture
+(`recovery::tests::timed_out_worker_is_reaped_before_replacement_can_write`,
+then `set_model_writes_a_control_line_to_stdin`). Both pass in isolation,
+neither is in code this phase touched, neither reproduced twice, and in those
+runs a target that normally takes 26 s took 89 s. These fixtures have
+sub-second expectations, and a machine at load 60 is not a quiet one.
 
 ## 2. What Phase 0 measured, and what the implementation had to add
 
@@ -106,8 +117,14 @@ documented where it lives:
   direction. Both ends share one inode there, so no "far end" handle exists.
   The doc comment says so rather than implying the macOS claim.
 
-Every lookup fails safe: an unreadable or vanished entry reads as
-"unavailable", never as "alive".
+Every lookup fails safe: an entry that is not this user's, or is unreadable or
+vanished, reads as "unavailable", never as "alive". The same-user part is an
+explicit check rather than a consequence of permissions — `/proc/<pid>/stat` is
+world-readable and none of the fields read here are ptrace-restricted, so
+another user's process would otherwise read as perfectly available and
+`identity_alive` would answer "yes, that is alive" about a process this daemon
+can neither signal nor inspect. A same-user zombie still keeps its identity,
+which is what the teardown protocol depends on.
 
 `process_executable_path` keeps byte-exact comparisons, with **no `(deleted)`
 tolerance**. The consequence is written into `crates/daemon/SPEC.md` and the
@@ -181,6 +198,33 @@ this developer's real Kanna database the first time the gate ran — and two
 worktrees could not run side by side, which is what `kd` already gives the
 desktop.
 
+Three more things the launcher had to get right, each reproduced with real
+binaries rather than reasoned about:
+
+- **`stop-daemon` aims a signal, it does not trust a number.** It used to
+  SIGTERM whatever pid its record named; a `/bin/sleep` whose pid was placed in
+  an isolated record was duly killed, and the worker then reported "no daemon".
+  A pid is not a process. The supervisor now records its start-time identity,
+  its executable and the instance it supervises, and every one of those is
+  re-checked against the live process before a signal is sent — the same
+  `(pid, start)` identity the daemon uses everywhere else. Pids that are not
+  addressable as one process (0, 1, anything that does not round-trip through
+  `pid_t`) are refused outright, because `kill` reads them as a process
+  *group*.
+- **The generated unit carries the database it resolved.** `render` dropped
+  `--db-path`, so an isolated worker installed as a unit came back up against
+  the machine's canonical desktop database on its next boot — the one database
+  an isolated instance must never touch. Whatever `install-unit` resolved
+  (`--db-path`, else `KANNA_DB_PATH`, else the canonical path) is now in
+  `ExecStart`, and the gate runs the generated command for real and asks the
+  server which database it opened.
+- **`server.toml` is private.** It carries `desktop_secret`, and it was being
+  written with a plain `fs::write`: under the default 022 umask that is 0644,
+  which made the 0600 on the identity file beside it pointless. It is now
+  written 0600 *and re-secured on every start*, because `OpenOptions::mode`
+  only applies to a file the call creates — a config an earlier version left
+  world-readable would otherwise have stayed that way.
+
 Verified on the VM: `/proc` shows both the daemon and the server as direct
 children of the worker, the server answers `/v1/status`, and the identity file
 beside the config is mode `0600`.
@@ -202,8 +246,65 @@ worktrees, never terminal output.
 | stage fork | stage becomes `review`; the branch is `task-<id>-2`, cut from the task's **committed tip**; its worktree exists; the run records `trigger = operator` |
 | server restart | SIGKILL the server; the supervisor replaces it, the **same** daemon generation is still serving, and the live session still accepts input |
 | daemon replacement | `SIGHUP`; a successor publishes, and the live session survives it — input after the handoff reaches the agent and is recorded |
+| supervisor loss | the supervisor is SIGKILLed under a live session and another starts on the same instance: exactly one process listens, `/v1/status` answers, the replacement is still alive 30 s later, and `send-input` still lands |
 | close | the task records `closed_at`, keeps its last stage, its worktrees are gone, and **every branch survives** |
 | unit (Linux only) | the generated unit carries `KillMode=process`, `ExecReload`, and an explicit `PATH`; `install-unit` writes to the XDG user unit directory |
+
+`tests/headless-worker/src/process.e2e.test.ts` covers four more things that
+are only visible with real processes — which process got signalled, which
+database got opened, what mode a file was left in:
+
+| Regression | Assertion |
+| --- | --- |
+| `stop-daemon` aims a signal | a `/bin/sleep` a stale record merely *names* survives, and nothing is reported as asked to stop |
+| `stop-daemon` still works | a real supervisor and its daemon are both gone afterwards |
+| the generated unit | the `ExecStart` it prints is run for real, and the server it starts has the *selected* database open and no other, with the canonical path never created |
+| `server.toml` | 0600 when created under a 022 umask, and re-secured when an earlier run left it 0644 |
+
+### Losing the supervisor
+
+The recovery case above is the one that had to be built twice. Reproduced on
+the VM: a supervisor is SIGKILLed, its daemon and server survive reparented to
+init, and the unit restarts the supervisor two seconds later. The replacement
+spawned a server that died on `Address already in use` — but not before its
+`human_control::serve()` had unlinked and rebound the human-control socket,
+cutting the *surviving* server off from `adopt_desktop`. Readiness then read
+the orphan's `/v1/status` and reported the dead child as serving, so the pid
+authorized on the daemon held nothing and every task input was refused as
+"system-input peer is not the pinned kanna-server process". Under
+`Restart=on-failure` that repeats forever, spawning a daemon generation per
+round.
+
+The supervisor now asks before it spawns, the way the desktop's
+`MobileServerManager::start` does: probe `/v1/status`, and if a server answers,
+adopt it when it reports this worker's own `desktopId` or stop it when it does
+not. Readiness for a server it *does* spawn is tied to that child — the child
+exiting is a failure, and the answering process must be the one holding the
+listening socket — and any failure after a spawn kills and reaps the child.
+Both launchers now ask "who is listening" through one crate,
+`crates/server-process`, rather than two copies that could disagree about who
+owns a port.
+
+Repeated by hand on the VM against the fix:
+
+```text
+== 1. first supervisor
+supervisor=30193 daemon=30203 server=30216
+== 2. kill -9 the supervisor
+daemon alive: yes (ppid 1)
+server alive: yes (ppid 1)
+== 3. second supervisor, same data dir / db / ports
+[worker] daemon generation 30331 is serving
+[worker] adopted the kanna-server already serving on http://127.0.0.1:49320 (pid 30216)
+== 4. state
+listeners on 49320: 30216          # one, and it is the survivor
+/v1/status: {"state":"running","desktopId":"worker-319a75e0...
+daemon generations spawned: w1.log:1 w2.log:1
+== 5. supervisor still alive after 30s
+second supervisor 30321 still running
+== 6. teardown
+supervisor alive: no / daemon alive: no / listeners on 49320: ''
+```
 
 Two things the lane had to learn, both now documented in it:
 
@@ -262,13 +363,42 @@ test may not require a boundary the daemon does not control.
   measured, a writer into a socket clamped to `SO_RCVBUF` 4096 blocked after
   8 KiB on macOS and after **180 KiB** on Linux. A flood sized for macOS fit
   entirely inside kernel buffers, nothing stalled, and the tests passed while
-  exercising none of the backpressure they exist for. Flood sizes and their
-  delivery ceilings now scale with the platform.
+  exercising none of the backpressure they exist for. Flood sizes now scale
+  with the platform, and the Linux delivery ceiling is measured rather than
+  scaled — see below.
 - Cross-version handoff (`previous_daemon`) **skips on Linux with a stated
   reason**: the archived previous release predates Linux support and cannot
   start there, so there is no previous Linux daemon to hand off from. The skip
   notice says the invariants were not exercised, and the constant that controls
   it says to revisit at every tag bump.
+
+### Sizing the Linux flood ceiling
+
+Scaling each test's macOS ceiling by a constant was wrong, and one test failed
+3 of 3 isolated runs on an idle VM because of it. A Linux flood is a *fixed*
+512 KiB whatever the macOS base is, so the time to deliver one does not scale
+with that base: a 1.5 s base became a 7.5 s ceiling, which is inside the
+machine's own delivery time.
+
+Measured with `measure_flood_delivery_with_and_without_a_stalled_observer`
+(`#[ignore]`d, in `reconnect.rs`), on the idle VM, three runs of each
+condition:
+
+| run | no stalled observer | stalled observer attached |
+| --- | --- | --- |
+| 1 | 7 226 ms | 7 532 ms |
+| 2 | 5 505 ms | 5 224 ms |
+| 3 | 4 457 ms | 4 960 ms |
+
+So 68–115 KiB/s — and **the stalled observer costs nothing**. The with/without
+difference (−281 ms to +503 ms) is well inside the 2.8 s spread of the *same*
+condition, so the healthy path is not being delayed and there is no daemon
+regression here; the ceiling was simply below the machine's throughput. The
+Linux floor is now 30 s, four times the slowest delivery observed. That
+headroom is affordable because the regression these tests guard is
+*unbounded*: the observer write had no timeout at all, so a saturated observer
+froze PTY ingestion indefinitely. Any finite ceiling catches that; one below
+the machine's own throughput catches nothing but the machine.
 
 ### The four remaining server failures, and the two Phase 0 left unclassified
 
@@ -316,6 +446,13 @@ cd ~/kanna
 cargo test -p kanna-daemon --no-fail-fast -- --test-threads=1
 cargo clippy --workspace --all-targets --exclude kanna-desktop -- -D warnings
 ./kd test headless-worker
+```
+
+To re-derive the Linux flood ceiling rather than adjusting it by feel:
+
+```
+cargo test -p kanna-daemon --test reconnect -- --ignored --nocapture \
+    measure_flood_delivery_with_and_without_a_stalled_observer
 ```
 
 `GHOSTTY_SOURCE_DIR` matters: unset, `libghostty-vt-sys`'s build script clones

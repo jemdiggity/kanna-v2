@@ -35,6 +35,7 @@ tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 flate2 = "1"
 tar = "0.4"
 kanna-runtime-defaults = { path = "../../../crates/runtime-defaults" }
+kanna-server-process = { path = "../../../crates/server-process" }
 kanna-agent-protocol = { path = "../../../crates/kanna-agent-protocol" }
 chrono = "0.4"
 libc = "0.2"

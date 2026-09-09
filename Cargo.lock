@@ -3099,6 +3099,7 @@ dependencies = [
  "image",
  "kanna-agent-protocol",
  "kanna-runtime-defaults",
+ "kanna-server-process",
  "libc",
  "objc2",
  "rand_core 0.6.4",
@@ -3184,6 +3185,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanna-server-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "kanna-task-transfer"
 version = "0.1.0"
 dependencies = [
@@ -3251,6 +3260,7 @@ version = "0.1.0"
 dependencies = [
  "kanna-daemon",
  "kanna-runtime-defaults",
+ "kanna-server-process",
  "libc",
  "serde",
  "serde_json",

@@ -397,9 +397,13 @@ mod imp {
 ///   handle to bind to, so [`pipe_end_belongs_to`] proves the weaker — but
 ///   still kernel-authoritative — statement documented on it.
 ///
-/// Every lookup fails *safe*: an unreadable or vanished `/proc` entry (a
-/// different uid, a non-dumpable process, an exit racing the scan) reads as
-/// "unavailable", never as "alive" or "matching".
+/// Every lookup fails *safe*: a `/proc` entry that is not this user's, or is
+/// unreadable or vanished (a non-dumpable process, an exit racing the scan),
+/// reads as "unavailable", never as "alive" or "matching". The same-user part
+/// of that is an explicit check rather than a consequence of permissions:
+/// `/proc/<pid>/stat` is world-readable and none of the fields read here are
+/// ptrace-restricted, so another user's process would otherwise read as
+/// perfectly available.
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{ProcessInfo, NO_TTY};
@@ -460,8 +464,29 @@ mod imp {
         })
     }
 
+    /// True when `/proc/<pid>` is owned by the user this process runs as.
+    ///
+    /// The availability boundary is deliberately the *owner*, not readability.
+    /// `/proc/<pid>/stat` is world-readable on a default procfs and none of
+    /// the fields read here (state, ppid, pgrp, tty_nr, starttime) are
+    /// ptrace-restricted, so without this check another user's process reads
+    /// as perfectly available -- and `identity_alive` would answer "yes, that
+    /// is alive" about a process this daemon can neither signal nor inspect
+    /// further. The contract these lookups are written to is that anything
+    /// outside this user's reach reads as *unavailable*, never as alive.
+    ///
+    /// A zombie is still owned by the same user until it is reaped, so
+    /// same-user zombie identity is unaffected.
+    fn owned_by_this_user(pid: libc::pid_t) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        std::fs::metadata(format!("/proc/{pid}"))
+            .map(|metadata| metadata.uid() == unsafe { libc::geteuid() })
+            .unwrap_or(false)
+    }
+
     pub fn process_info(pid: libc::pid_t) -> Option<ProcessInfo> {
-        if pid <= 0 {
+        if pid <= 0 || !owned_by_this_user(pid) {
             return None;
         }
         parse_stat(pid, &read_proc(&format!("/proc/{pid}/stat"))?)
@@ -725,6 +750,61 @@ mod imp {
                 super::super::PipeEnd::Write
             ));
             unsafe { libc::close(read_end) };
+        }
+
+        /// The availability boundary: everything outside this user's reach
+        /// reads as unavailable rather than as alive.
+        #[test]
+        fn only_this_users_live_processes_are_available() {
+            // Normal: this process, owned by this user.
+            let me = std::process::id() as libc::pid_t;
+            assert!(process_info(me).is_some(), "own process must resolve");
+
+            // Cross-UID: pid 1 is root's, and its `stat` is world-readable, so
+            // a lookup that only parsed `stat` would happily report it.
+            let init_owner = std::fs::metadata("/proc/1")
+                .map(|metadata| {
+                    use std::os::unix::fs::MetadataExt;
+                    metadata.uid()
+                })
+                .expect("/proc/1 should stat");
+            if init_owner != unsafe { libc::geteuid() } {
+                assert!(
+                    std::fs::read_to_string("/proc/1/stat").is_ok(),
+                    "this test only proves anything while /proc/1/stat is readable"
+                );
+                assert!(
+                    process_info(1).is_none(),
+                    "another user's process must read as unavailable"
+                );
+                assert!(
+                    !super::super::identity_alive(1, (0, 0)),
+                    "another user's process must never read as alive"
+                );
+            }
+
+            // Vanished: once reaped, that identity is gone. Stated as the
+            // identity rather than as `is_none`, because the bare pid may be
+            // recycled and the identity is what every caller actually asks
+            // about.
+            let mut gone = std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .expect("spawn should succeed");
+            let gone_pid = gone.id() as libc::pid_t;
+            let gone_start = process_info(gone_pid)
+                .expect("a live child must resolve")
+                .start;
+            gone.wait().expect("reaped");
+            assert!(
+                !super::super::identity_matches(gone_pid, gone_start),
+                "a reaped process must not keep answering with its identity"
+            );
+
+            // Inaccessible: a pid that cannot exist.
+            assert!(process_info(libc::pid_t::MAX).is_none());
+            assert!(process_info(0).is_none());
+            assert!(process_info(-1).is_none());
         }
 
         /// The guarantee `stop_verified`'s fault injection depends on: an

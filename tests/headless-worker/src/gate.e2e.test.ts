@@ -3,7 +3,15 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createFixtureRepo, type FixtureRepo } from "./fixtureRepo.ts";
-import { binary, run, waitFor, Worker } from "./worker.ts";
+import { setTimeout as sleep } from "node:timers/promises";
+import {
+  binary,
+  listenersOnPort,
+  processIsAlive,
+  run,
+  waitFor,
+  Worker,
+} from "./worker.ts";
 
 /**
  * Linux Phase 1's exit gate, exercised through the real wiring on whatever
@@ -300,6 +308,70 @@ describe("the headless worker's exit gate", () => {
     );
     const rows = await worker.sql("SELECT message FROM task_input WHERE task_id = ?1", [taskId]);
     expect(rows.map((row) => row.message)).toContain("after the daemon handoff");
+  });
+
+  /**
+   * The recovery the supervisor exists to survive.
+   *
+   * A supervisor that is killed leaves its daemon and server running,
+   * reparented to init, and systemd restarts it two seconds later. Reproduced
+   * on the VM before this case existed: the replacement spawned a server that
+   * died on `Address already in use`, but not before rebinding the
+   * human-control socket out from under the surviving one; readiness then read
+   * the *orphan's* `/v1/status` and reported the dead child as serving, so the
+   * pid authorized on the daemon held nothing and every task input was refused
+   * as "system-input peer is not the pinned kanna-server process" — forever,
+   * one daemon generation per restart.
+   */
+  it("recovers when its supervisor is killed and another starts on the same instance", async () => {
+    const daemonBefore = await worker.daemonPid();
+    const serverBefore = await worker.serverPid();
+    const killed = worker.supervisorPid;
+
+    await worker.killSupervisor();
+    // The children outlive their supervisor: that is the point of the daemon,
+    // and the state the replacement has to cope with.
+    expect(processIsAlive(daemonBefore)).toBe(true);
+    expect(processIsAlive(serverBefore)).toBe(true);
+
+    await worker.relaunch();
+    expect(worker.supervisorPid).not.toBe(killed);
+
+    // Exactly one process holds the port. Two would mean a spawned child
+    // raced the survivor; zero would mean the survivor was killed and nothing
+    // replaced it.
+    const listeners = await listenersOnPort(worker.launch.lanPort);
+    expect(listeners, `listeners on ${worker.launch.lanPort}`).toHaveLength(1);
+    expect(await worker.status()).not.toBeNull();
+
+    // The supervisor stays up rather than failing and being restarted forever.
+    await sleep(30_000);
+    expect(
+      processIsAlive(worker.supervisorPid),
+      `the replacement supervisor exited\n${worker.output()}`,
+    ).toBe(true);
+    expect(await listenersOnPort(worker.launch.lanPort)).toHaveLength(1);
+
+    // And the live session is still steerable, which is only true if the
+    // server that is actually listening was authorized on the daemon.
+    const message = "after the supervisor was killed";
+    const sent = await worker.cli([
+      "task",
+      "send-input",
+      "--task-id",
+      taskId,
+      "--message",
+      message,
+      "--source",
+      "operator",
+    ]);
+    expect(sent.code, sent.stderr).toBe(0);
+    await waitFor(
+      async () => (await repo.agentInput()).includes(message),
+      () => `the session did not accept input after supervisor recovery\n${worker.output()}`,
+    );
+    const rows = await worker.sql("SELECT message FROM task_input WHERE task_id = ?1", [taskId]);
+    expect(rows.map((row) => row.message)).toContain(message);
   });
 
   it("closes the task, keeping its branches and removing its worktrees", async () => {
